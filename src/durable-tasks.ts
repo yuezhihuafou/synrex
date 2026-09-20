@@ -77,7 +77,7 @@ function runIdFor(now: Date): string {
 }
 
 function taskIdFor(): string {
-  return `task_${randomUUID()}`;
+  return `task_${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 }
 
 function taskTtlMs(): number {
@@ -350,7 +350,7 @@ export class DurableTaskManager {
   }
 
   private async findTask(taskId: string): Promise<DurableTaskState> {
-    if (!/^task_[0-9a-f-]{36}$/i.test(taskId)) throw new Error("Invalid taskId.");
+    if (!/^task_(?:[0-9a-f]{16}|[0-9a-f-]{36})$/i.test(taskId)) throw new Error("Invalid taskId.");
     try {
       const pointer = JSON.parse(await readFile(this.taskIndexPath(taskId), "utf8")) as { taskPath?: string };
       if (pointer.taskPath) return readState(this.validateTaskPath(pointer.taskPath));

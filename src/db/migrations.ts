@@ -42,6 +42,11 @@ const migrations: Migration[] = [
     name: "workspace-recovery-state",
     up: migrateWorkspaceRecoveryState,
   },
+  {
+    version: 8,
+    name: "learning-memory",
+    up: migrateLearningMemory,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -258,6 +263,45 @@ function migrateWorkspaceRecoveryState(sqlite: Database.Database): void {
   if (!workspaceStateExists) return;
 
   addColumnIfMissing(sqlite, "workspace_sessions", "recovery_kind", "text");
+}
+
+function migrateLearningMemory(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists learning_episodes (
+      id text primary key,
+      workspace_root text not null,
+      conversation_scope_id text,
+      tool text not null,
+      input_summary text not null,
+      output_summary text not null,
+      success integer not null,
+      created_at text not null
+    );
+
+    create index if not exists learning_episodes_workspace_created_idx
+      on learning_episodes(workspace_root, created_at desc);
+
+    create index if not exists learning_episodes_workspace_success_idx
+      on learning_episodes(workspace_root, success, created_at desc);
+
+    create table if not exists learning_candidates (
+      id text primary key,
+      workspace_root text not null,
+      title text not null,
+      trigger text not null,
+      procedure_json text not null,
+      evidence_json text not null,
+      confidence real not null,
+      status text not null,
+      validation_note text,
+      skill_path text,
+      created_at text not null,
+      updated_at text not null
+    );
+
+    create index if not exists learning_candidates_workspace_status_idx
+      on learning_candidates(workspace_root, status, updated_at desc);
+  `);
 }
 
 function addColumnIfMissing(

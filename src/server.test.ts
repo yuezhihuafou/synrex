@@ -31,11 +31,11 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }> = [
     {
       mode: "claude",
-      expected: ["open_workspace", "read", "write", "edit", "bash", "show_changes"],
+      expected: ["open_workspace", "read", "project", "write", "edit", "bash", "show_changes"],
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "apply_patch", "exec_command", "task_get", "task_update", "task_cancel", "process_status", "write_stdin", "show_changes"],
+      expected: ["open_workspace", "read", "project", "apply_patch", "exec_command", "task_get", "task_update", "task_cancel", "process_status", "write_stdin", "show_changes"],
     },
   ];
 
@@ -94,7 +94,7 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
   const tools = await context.client.listTools();
   const names = tools.tools.map((tool) => tool.name);
   for (const required of [
-    "open_workspace", "read", "apply_patch", "exec_command",
+    "open_workspace", "read", "project", "apply_patch", "exec_command",
     "task_get", "task_update", "task_cancel", "process_status", "write_stdin",
     "semantic_code", "semantic_edit", "show_changes",
   ]) {
@@ -215,10 +215,12 @@ test("codex devspace-log responses satisfy the process output schema", async (t)
       arguments: { workspaceId, cmd: `devspace-log meta ${runId}` },
     });
     const structured = structuredContent(log);
-    assert.equal(structured.running, false);
-    assert.equal(structured.idleTimeMs, 0);
-    assert.equal(structured.nextPollMs, 0);
     assert.equal(structured.runId, runId);
+    assert.equal(structured.running, false);
+    assert.equal(structured.wallTimeMs, 0);
+    assert.equal(typeof structured.outputBytes, "number");
+    assert.equal("idleTimeMs" in structured, false);
+    assert.equal("nextPollMs" in structured, false);
   } finally {
     if (previousRunRoot === undefined) delete process.env.DEVSPACE_COMPACT_RUN_ROOT;
     else process.env.DEVSPACE_COMPACT_RUN_ROOT = previousRunRoot;
@@ -242,7 +244,6 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
   assert.equal(commandState.taskId, undefined);
   assert.equal(commandState.status, undefined);
   assert.equal(typeof commandState.runId, "string");
-  assert.equal(commandState.resultType, "complete");
 
   const afterSynchronousResult = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-sync"));
   assert.equal(afterSynchronousResult.pendingTasks, undefined);
@@ -267,15 +268,16 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
   assert.equal("root" in (pending?.[0] ?? {}), false);
   assert.equal("schemaVersion" in (pending?.[0] ?? {}), false);
   assert.equal("statusMessage" in (pending?.[0] ?? {}), false);
+  assert.equal("runId" in (pending?.[0] ?? {}), false);
+  assert.equal("lastUpdatedAt" in (pending?.[0] ?? {}), false);
 
   const task = await context.client.callTool({
     name: "task_get",
     arguments: { workspaceId: resumedWorkspaceId, taskId: asyncSnapshot.taskId },
   });
   const taskState = structuredContent(task);
-  assert.equal(taskState.resultType, "complete");
   assert.equal(taskState.status, "completed");
-  assert.equal((taskState.taskResult as { isError?: boolean } | undefined)?.isError, false);
+  assert.equal(taskState.isError, false);
 
   const acknowledged = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-c"));
   assert.equal(acknowledged.pendingTasks, undefined);
@@ -292,7 +294,6 @@ test("known long codex commands detach early instead of occupying the MCP reques
   });
   const elapsedMs = performance.now() - startedAt;
   const state = structuredContent(response);
-  assert.equal(state.resultType, "task");
   assert.equal(typeof state.taskId, "string");
   assert.ok(elapsedMs < 2_500, `expected early detach, got ${Math.round(elapsedMs)}ms`);
   assert.ok((state.pollIntervalMs as number) > 0);
@@ -302,6 +303,103 @@ test("known long codex commands detach early instead of occupying the MCP reques
     if (task.status !== "working" && task.status !== "input_required") break;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
+});
+
+test("durable task wire stays compact and suppresses unchanged polling per conversation", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true });
+  const opened = structuredContent(await callOpen(context.client, context.project, "compact-task-wire"));
+  const started = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId: opened.workspaceId, cmd: "sleep 2" },
+  });
+  const initial = structuredContent(started);
+  assert.match(initial.taskId as string, /^task_[0-9a-f]{16}$/i);
+  assert.equal("createdAt" in initial, false);
+  assert.equal("lastUpdatedAt" in initial, false);
+  assert.equal("ttlMs" in initial, false);
+  assert.equal(typeof initial.outputBytes, "number");
+  assert.equal(typeof initial.outputLines, "number");
+  assert.equal(typeof initial.outputTruncated, "boolean");
+  assert.ok(Buffer.byteLength(JSON.stringify(started), "utf8") <= 550);
+
+  const taskId = initial.taskId as string;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const meta = { "openai/session": "compact-task-poll" };
+  const first = await context.client.callTool({
+    name: "task_get",
+    arguments: { workspaceId: opened.workspaceId, taskId },
+    _meta: meta,
+  } as Parameters<Client["callTool"]>[0]);
+  const firstState = structuredContent(first);
+  assert.equal(typeof firstState.revision, "string");
+  assert.equal("createdAt" in firstState, false);
+  assert.equal("lastUpdatedAt" in firstState, false);
+  assert.equal("ttlMs" in firstState, false);
+
+  const second = await context.client.callTool({
+    name: "task_get",
+    arguments: { workspaceId: opened.workspaceId, taskId },
+    _meta: meta,
+  } as Parameters<Client["callTool"]>[0]);
+  const secondState = structuredContent(second);
+  assert.equal(secondState.unchanged, true);
+  assert.equal(secondState.revision, firstState.revision);
+  assert.ok(Buffer.byteLength(JSON.stringify(second), "utf8") <= 350);
+
+  const detailed = await context.client.callTool({
+    name: "task_get",
+    arguments: { workspaceId: opened.workspaceId, taskId, detail: true },
+    _meta: meta,
+  } as Parameters<Client["callTool"]>[0]);
+  const detail = structuredContent(detailed).detail as Record<string, unknown> | undefined;
+  assert.ok(detail);
+  assert.equal(typeof detail.createdAt, "string");
+  assert.equal(typeof detail.lastUpdatedAt, "string");
+  assert.equal(typeof detail.outputBytes, "number");
+
+  assert.ok(context.durableTasks);
+  await context.durableTasks.cancel(context.project, taskId);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const view = await context.durableTasks.get(context.project, taskId, { acknowledge: false });
+    if (view.status !== "working" && view.status !== "input_required") break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+});
+
+test("project tool keeps architecture results compact unless detail is requested", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  await mkdir(join(context.project, "src"), { recursive: true });
+  await writeFile(join(context.project, "src", "a.ts"), 'import { b } from "./b.js";\nexport const a = b;\n');
+  await writeFile(join(context.project, "src", "b.ts"), "export const b = 1;\n");
+  const opened = structuredContent(await callOpen(context.client, context.project, "project-wire"));
+  await context.client.callTool({
+    name: "project",
+    arguments: { workspaceId: opened.workspaceId, action: "arch_init" },
+  });
+
+  const compact = await context.client.callTool({
+    name: "project",
+    arguments: {
+      workspaceId: opened.workspaceId,
+      action: "arch_affected",
+      args: { paths: ["src/b.ts"] },
+    },
+  });
+  const compactState = structuredContent(compact);
+  assert.deepEqual(compactState.moduleIds, ["group:src", "file:src/a", "file:src/b"]);
+  assert.equal("modules" in compactState, false);
+  assert.equal("detail" in compactState, false);
+
+  const detailed = await context.client.callTool({
+    name: "project",
+    arguments: {
+      workspaceId: opened.workspaceId,
+      action: "arch_affected",
+      args: { paths: ["src/b.ts"], detail: true },
+    },
+  });
+  const detail = structuredContent(detailed).detail as { modules?: unknown[] } | undefined;
+  assert.equal(detail?.modules?.length, 3);
 });
 
 test("UI metadata is limited to workspace and aggregate review", async (t) => {

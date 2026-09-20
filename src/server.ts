@@ -49,6 +49,8 @@ import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
+import { LearningStore } from "./learning-store.js";
+import { registerProjectIntelligenceTools } from "./project-intelligence-tools.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
@@ -137,8 +139,9 @@ function serverInstructions(
     : "";
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
   const common = `Use DevSpace for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, or when the current workspaceId is rejected.`;
+  const intelligence = " Use project for architecture contracts/impact/drift and for relevant local experience; promote learned skills only after current validation.";
 
-  return `${common} ${toolSurface.instructions({ agents, skills })}${artifactInstruction}${showChangesInstruction}`;
+  return `${common} ${toolSurface.instructions({ agents, skills })}${intelligence}${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -353,9 +356,13 @@ function registerMcpSurface(
   durableTasks?: DurableTaskManager,
   semantic?: SerenaSemanticManager,
 ): void {
-  const registrationTarget = trackToolActivity
-    ? withTrackedToolHandlers(server, trackToolActivity)
-    : server;
+  const learning = new LearningStore(config.stateDir);
+  const registrationTarget = withTrackedToolHandlers(
+    server,
+    trackToolActivity,
+    learning,
+    workspaces,
+  );
   const toolSurface = getToolSurface(config.toolMode);
 
   registerAppResource(
@@ -443,9 +450,7 @@ function registerMcpSurface(
         ]),
         pendingTasks: z.array(z.object({
           taskId: z.string(),
-          runId: z.string(),
           status: z.enum(["completed", "cancelled", "failed"]),
-          lastUpdatedAt: z.string(),
         })).optional(),
         pendingTaskCount: z.number().int().nonnegative().optional(),
         instruction: z.string(),
@@ -475,9 +480,7 @@ function registerMcpSurface(
         : [];
       const pendingTasks = allPendingTasks.slice(0, 8).map((task) => ({
         taskId: task.taskId,
-        runId: task.runId,
         status: task.status,
-        lastUpdatedAt: task.lastUpdatedAt,
       }));
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
@@ -721,6 +724,15 @@ function registerMcpSurface(
     },
   );
 
+  registerProjectIntelligenceTools({
+    server: registrationTarget,
+    config,
+    workspaces,
+    processSessions,
+    durableTasks,
+    semantic,
+  }, learning);
+
   toolSurface.register({
     server: registrationTarget,
     config,
@@ -805,20 +817,82 @@ function registerMcpSurface(
 
 function withTrackedToolHandlers(
   server: McpRegistrationTarget,
-  trackToolActivity: TrackToolActivity,
+  trackToolActivity: TrackToolActivity | undefined,
+  learning: LearningStore,
+  workspaces: WorkspaceRegistry,
 ): McpRegistrationTarget {
   return {
     registerTool: ((...args: unknown[]) => {
+      const toolName = typeof args[0] === "string" ? args[0] : "unknown";
       const handler = args.at(-1) as (...handlerArgs: unknown[]) => unknown;
       return (server.registerTool as (...callArgs: unknown[]) => unknown)(
         ...args.slice(0, -1),
-        (...handlerArgs: unknown[]) => trackToolActivity(
-          () => Promise.resolve(handler(...handlerArgs)),
-        ),
+        async (...handlerArgs: unknown[]) => {
+          const operation = () => Promise.resolve(handler(...handlerArgs));
+          try {
+            const result = trackToolActivity
+              ? await trackToolActivity(operation)
+              : await operation();
+            await recordLearningToolCall(
+              learning,
+              workspaces,
+              toolName,
+              handlerArgs,
+              result,
+            );
+            return result;
+          } catch (error) {
+            await recordLearningToolCall(
+              learning,
+              workspaces,
+              toolName,
+              handlerArgs,
+              undefined,
+              error,
+            );
+            throw error;
+          }
+        },
       );
     }) as McpRegistrationTarget["registerTool"],
     registerResource: server.registerResource.bind(server),
   };
+}
+
+async function recordLearningToolCall(
+  learning: LearningStore,
+  workspaces: WorkspaceRegistry,
+  toolName: string,
+  handlerArgs: unknown[],
+  output?: unknown,
+  error?: unknown,
+): Promise<void> {
+  if (toolName === "open_workspace" || toolName === "project") return;
+  if (
+    toolName === "task_get"
+    && output
+    && typeof output === "object"
+    && !Array.isArray(output)
+    && (output as { structuredContent?: { unchanged?: unknown } }).structuredContent?.unchanged === true
+  ) return;
+  const input = handlerArgs[0];
+  if (!input || typeof input !== "object" || Array.isArray(input)) return;
+  const workspaceId = (input as { workspaceId?: unknown }).workspaceId;
+  if (typeof workspaceId !== "string") return;
+  try {
+    const workspace = await workspaces.getWorkspace(workspaceId);
+    const extra = handlerArgs[1] as { _meta?: Record<string, unknown> } | undefined;
+    learning.recordToolCall({
+      workspaceRoot: workspace.root,
+      conversationScopeId: conversationScopeIdFromRequestMeta(extra?._meta),
+      tool: toolName,
+      toolInput: input,
+      toolOutput: output,
+      error,
+    });
+  } catch {
+    // Learning is observational and must never change primary tool behavior.
+  }
 }
 
 export interface CreateServerOptions {

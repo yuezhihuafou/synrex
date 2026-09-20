@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 export type DurableTaskStatus =
   | "working"
   | "input_required"
@@ -55,6 +57,7 @@ export interface DurableTaskState {
 export interface DurableTaskView {
   taskId: string;
   status: DurableTaskStatus;
+  revision: string;
   statusMessage?: string;
   createdAt: string;
   lastUpdatedAt: string;
@@ -65,6 +68,8 @@ export interface DurableTaskView {
   error?: DurableTaskError;
   runId: string;
   workspaceId: string;
+  outputBytes: number;
+  outputLines: number;
 }
 
 export function taskPollIntervalMs(state: Pick<DurableTaskState, "status" | "createdAt" | "lastActivityAt">): number {
@@ -86,6 +91,7 @@ export function durableTaskView(state: DurableTaskState): DurableTaskView {
   return {
     taskId: state.taskId,
     status: state.status,
+    revision: taskRevision(state),
     statusMessage: state.statusMessage,
     createdAt: state.createdAt,
     lastUpdatedAt: state.lastUpdatedAt,
@@ -96,5 +102,25 @@ export function durableTaskView(state: DurableTaskState): DurableTaskView {
     error: state.error,
     runId: state.runId,
     workspaceId: state.workspaceId,
+    outputBytes: state.outputBytes,
+    outputLines: state.outputLines,
   };
+}
+
+function taskRevision(state: DurableTaskState): string {
+  const semanticState = {
+    status: state.status,
+    statusMessage: state.statusMessage,
+    outputBytes: state.outputBytes,
+    outputLines: state.outputLines,
+    exitCode: state.exitCode,
+    signal: state.signal,
+    inputRequests: state.inputRequests,
+    result: state.result,
+    error: state.error,
+  };
+  return createHash("sha256")
+    .update(JSON.stringify(semanticState))
+    .digest("hex")
+    .slice(0, 8);
 }

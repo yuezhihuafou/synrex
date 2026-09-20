@@ -17,8 +17,13 @@ Full output is stored locally under:
 ```
 
 Long-running process sessions keep the same `runId` across `write_stdin` polls.
-The MCP-visible result stays bounded and includes status, exit code or running
-state, duration, output size, a preview, and the `runId`.
+The MCP-visible result uses a **Compact Wire v3** receipt: only fields needed
+for the next decision are returned by default, while complete execution state
+and output stay local behind `runId` / `taskId` handles.
+
+This is deliberately independent of tool-call count. Agents may inspect and
+verify as often as needed; the optimization target is model-context bytes per
+call, not fewer calls.
 
 On the Codex-compatible tool surface, command and poll wait budgets are managed
 by DevSpace instead of exposed as model-controlled arguments. Non-interactive
@@ -33,17 +38,26 @@ command.
 The local task lifecycle mirrors the MCP Tasks extension. The compatibility
 tools `task_get`, `task_update`, and `task_cancel` correspond to `tasks/get`,
 `tasks/update`, and `tasks/cancel` while the connected host does not advertise
-`io.modelcontextprotocol/tasks`. Task states and metadata use the extension
-vocabulary: `working`, `input_required`, `completed`, `cancelled`, `failed`,
-`createdAt`, `lastUpdatedAt`, `ttlMs`, and `pollIntervalMs`. A command that exits
-non-zero is still `completed` with `isError=true` in its final task result;
-`failed` is reserved for task/infrastructure failures.
+`io.modelcontextprotocol/tasks`. Task states use the extension vocabulary:
+`working`, `input_required`, `completed`, `cancelled`, and `failed`. Durable
+local state still stores timestamps, TTL, output counters, and detailed errors.
+Default `task_get` responses expose only a compact receipt plus a semantic
+`revision`; pass `detail=true` when full metadata is actually needed. A command
+that exits non-zero is still `completed` with `isError=true`; `failed` is
+reserved for task/infrastructure failures.
+
+For ChatGPT conversations, DevSpace remembers the last semantic revision it
+returned for each task. Repeated `task_get` calls are not suppressed or blocked;
+when nothing meaningful changed they return an `unchanged` receipt instead of
+repeating the full state. Heartbeats alone do not change the semantic revision.
+New task IDs use compact 64-bit random handles; older UUID-form task IDs remain
+readable for compatibility.
 
 Terminal tasks write a small completion notification scoped to the workspace
-root. Re-opening the same project from a later conversation surfaces pending
-notifications even when the new conversation receives a different
-`workspaceId`. Calling `task_get` on a terminal task acknowledges its
-notification. There is deliberately no task-list operation.
+root. Re-opening the same project from a later conversation surfaces only the
+pending task handle and terminal state; `task_get` resolves the rest. Calling
+`task_get` on a terminal task acknowledges its notification. There is
+deliberately no task-list operation.
 
 `devspace-log meta <runId>` is the compact status view. While a durable task is
 running, it projects the useful state from `task.json`; after completion it

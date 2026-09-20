@@ -82,7 +82,7 @@ test("durable task manager returns promptly and run logs become queryable", asyn
 
     assert.equal(snapshot.running, true);
     assert.equal(snapshot.sessionId, undefined);
-    assert.match(snapshot.taskId ?? "", /^task_[0-9a-f-]{36}$/i);
+    assert.match(snapshot.taskId ?? "", /^task_[0-9a-f]{16}$/i);
     assert.match(snapshot.runId, /^run_/);
 
     const working = await manager.get(process.cwd(), snapshot.taskId as string);

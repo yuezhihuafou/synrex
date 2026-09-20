@@ -4,6 +4,7 @@ import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
+import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
   SHELL_TOOL_ANNOTATIONS,
@@ -20,12 +21,12 @@ import {
 
 type CodexRegistration = (context: ToolRegistrationContext) => void;
 
-const CODEX_EXEC_YIELD_MS = 5_000;
+const CODEX_EXEC_YIELD_MS = 2_000;
 const CODEX_LONG_EXEC_YIELD_MS = 1_000;
 const CODEX_INTERACTIVE_YIELD_MS = 250;
 
 function execYieldMs(command: string): number {
-  const likelyLong = /(?:^|[;&|]\s*)(?:sleep\s+\d|(?:pnpm|npm|yarn|bun)\s+(?:test|build|run\s+(?:test|build))|(?:node|tsx)\s+--test\b|pytest\b|colcon\s+(?:build|test)\b|cmake\s+--build\b|(?:make|ninja)\b|cargo\s+(?:test|build|clippy)\b|go\s+test\b|mvn\b|gradle\b)/i.test(command);
+  const likelyLong = /(?:^|[;&|]\s*)(?:sleep\s+\d|(?:pnpm|npm|yarn|bun)\s+(?:test|build|typecheck|lint|check|run\s+(?:test|build|typecheck|lint|check)|tsx\s+--test\b)|(?:node|tsx)\s+--test\b|pytest\b|colcon\s+(?:build|test)\b|cmake\s+--build\b|(?:make|ninja)\b|cargo\s+(?:test|build|clippy)\b|go\s+test\b|mvn\b|gradle\b)/i.test(command);
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
@@ -177,19 +178,14 @@ function recommendedPollMs(snapshot: Pick<ProcessSnapshot, "running" | "wallTime
 
 function processResult(snapshot: ProcessSnapshot): string {
   const isError = Boolean(snapshot.signal) || (!snapshot.running && (snapshot.exitCode ?? 0) !== 0);
-  const status = snapshot.running
-    ? snapshot.sessionId === undefined
-      ? `running task=${snapshot.taskId ?? snapshot.runId}`
-      : `running session=${snapshot.sessionId}`
-    : snapshot.signal
-      ? `signal=${snapshot.signal}`
-      : `exit=${snapshot.exitCode ?? "unknown"}`;
-  const lines = [
-    `run=${snapshot.runId} status=${status} duration=${snapshot.wallTimeMs}ms output=${snapshot.outputLines}L/${snapshot.outputBytes}B`,
-  ];
-  if (snapshot.running) {
-    lines[0] += ` idle=${snapshot.idleTimeMs}ms next_check>=${recommendedPollMs(snapshot)}ms`;
-  }
+  const nextPollMs = recommendedPollMs(snapshot);
+  const lines = snapshot.running
+    ? [snapshot.taskId
+      ? `task=${snapshot.taskId} working poll=${nextPollMs}ms`
+      : `session=${snapshot.sessionId ?? "?"} working poll=${nextPollMs}ms`]
+    : [snapshot.signal
+      ? `run=${snapshot.runId} signal=${snapshot.signal}`
+      : `run=${snapshot.runId} exit=${snapshot.exitCode ?? "unknown"}`];
   const preview = compactPreview(snapshot.output, isError, snapshot.command);
   if (preview) lines.push(preview);
   if (snapshot.logError) {
@@ -207,67 +203,76 @@ function processIsError(snapshot: ProcessSnapshot): boolean {
 function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) {
   const result = processResult(snapshot);
   const isTask = Boolean(snapshot.taskId && snapshot.running);
-  const resultType = isTask ? "task" : "complete";
   const content = [textBlock(result)];
+  const terminal = !snapshot.running;
   return {
     content,
     isError: processIsError(snapshot),
     structuredContent: {
       result,
-      resultType,
-      sessionId: snapshot.sessionId,
+      ...(snapshot.sessionId !== undefined ? { sessionId: snapshot.sessionId } : {}),
       ...(isTask ? {
         taskId: snapshot.taskId,
         status: task?.status,
-        statusMessage: task?.statusMessage,
-        createdAt: task?.createdAt,
-        lastUpdatedAt: task?.lastUpdatedAt,
-        ttlMs: task?.ttlMs,
+        revision: task?.revision,
         pollIntervalMs: task?.pollIntervalMs,
       } : {}),
       runId: snapshot.runId,
       running: snapshot.running,
-      exitCode: snapshot.exitCode,
-      signal: snapshot.signal,
       wallTimeMs: snapshot.wallTimeMs,
-      ...(snapshot.running ? {
-        idleTimeMs: snapshot.idleTimeMs,
-        nextPollMs: recommendedPollMs(snapshot),
-      } : {}),
       outputBytes: snapshot.outputBytes,
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
+      ...(terminal && snapshot.exitCode !== undefined ? { exitCode: snapshot.exitCode } : {}),
+      ...(terminal && snapshot.signal ? { signal: snapshot.signal } : {}),
+      ...(snapshot.running && !isTask ? { nextPollMs: recommendedPollMs(snapshot) } : {}),
+      ...(snapshot.outputTruncated ? { outputTruncated: true } : {}),
       ...(snapshot.logError ? { logError: snapshot.logError } : {}),
     },
   };
 }
 
-function taskViewResponse(view: DurableTaskView) {
+function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; unchanged?: boolean } = {}) {
+  if (options.unchanged) {
+    const result = `task=${view.taskId} unchanged rev=${view.revision} poll=${view.pollIntervalMs ?? 0}ms`;
+    return {
+      content: [textBlock(result)],
+      structuredContent: {
+        result,
+        taskId: view.taskId,
+        status: view.status,
+        revision: view.revision,
+        ...(view.pollIntervalMs ? { pollIntervalMs: view.pollIntervalMs } : {}),
+        unchanged: true,
+      },
+    };
+  }
   const state = view.status === "completed"
-    ? `completed${view.result?.isError ? " isError=true" : ""}`
+    ? `completed${view.result?.isError ? " error" : ""}`
     : view.status;
-  const result = [
-    `task=${view.taskId} status=${state} run=${view.runId} poll=${view.pollIntervalMs ?? 0}ms`,
-    view.statusMessage,
-    view.status === "input_required" ? "Use task_update for outstanding inputRequests." : undefined,
-  ].filter(Boolean).join("\n");
+  const terminalExit = view.result?.exitCode;
+  const result = `task=${view.taskId} ${state} rev=${view.revision}`
+    + (view.pollIntervalMs ? ` poll=${view.pollIntervalMs}ms` : "")
+    + (terminalExit !== null && terminalExit !== undefined ? ` exit=${terminalExit}` : "")
+    + ` log=${view.runId}`;
   return {
     content: [textBlock(result)],
     isError: view.status === "failed",
     structuredContent: {
       result,
-      resultType: "complete" as const,
       taskId: view.taskId,
       status: view.status,
-      statusMessage: view.statusMessage,
-      createdAt: view.createdAt,
-      lastUpdatedAt: view.lastUpdatedAt,
-      ttlMs: view.ttlMs,
-      pollIntervalMs: view.pollIntervalMs,
-      inputRequests: view.inputRequests,
-      taskResult: view.result,
-      error: view.error,
+      revision: view.revision,
       runId: view.runId,
+      ...(view.pollIntervalMs ? { pollIntervalMs: view.pollIntervalMs } : {}),
+      ...(view.status === "input_required" && view.inputRequests ? { inputRequests: view.inputRequests } : {}),
+      ...(view.result ? {
+        isError: view.result.isError,
+        exitCode: view.result.exitCode,
+        ...(view.result.signal ? { signal: view.result.signal } : {}),
+      } : {}),
+      ...(view.error ? { error: { code: view.error.code, message: view.error.message } } : {}),
+      ...(options.detail ? { detail: view } : {}),
     },
   };
 }
@@ -278,12 +283,9 @@ function runLogToolResponse(command: string, result: string) {
     content: [textBlock(result)],
     structuredContent: {
       result,
-      resultType: "complete" as const,
       runId,
       running: false,
       wallTimeMs: 0,
-      idleTimeMs: 0,
-      nextPollMs: 0,
       outputBytes: Buffer.byteLength(result, "utf8"),
       outputLines: result === "" ? 0 : result.split(/\r?\n/).length,
       outputTruncated: false,
@@ -334,13 +336,13 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
 
 function registerCodexProcessTools(context: ToolRegistrationContext): void {
   const { server, config, workspaces, processSessions, durableTasks } = context;
+  const deliveredTaskRevisions = new Map<string, string>();
 
   server.registerTool(
     "exec_command",
     {
       title: "Execute command",
-      description:
-        "Run a shell command in a workspace. Not sandboxed. Full output is saved locally. Long non-TTY commands become durable tasks; TTY commands return a process session. devspace-log reads saved output.",
+      description: "Run a shell command. Full output is logged; long jobs return task handles and TTY jobs return sessions.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -406,18 +408,31 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "task_get",
     {
       title: "Get durable task",
-      description:
-        "Get one durable task without waiting. Honor pollIntervalMs before checking a working task again.",
+      description: "Read task state. Honor pollIntervalMs.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
+        detail: z.boolean().optional().describe("Return full task metadata instead of the compact receipt."),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, taskId }) => {
+    async ({ workspaceId, taskId, detail }, extra) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
-      return taskViewResponse(await durableTasks.get(workspace.root, taskId));
+      const view = await durableTasks.get(workspace.root, taskId);
+      const conversationScopeId = conversationScopeIdFromRequestMeta(extra._meta);
+      const receiptKey = conversationScopeId ? `${conversationScopeId}\0${workspaceId}\0${taskId}` : undefined;
+      const unchanged = !detail && receiptKey !== undefined && deliveredTaskRevisions.get(receiptKey) === view.revision;
+      if (receiptKey) {
+        deliveredTaskRevisions.delete(receiptKey);
+        deliveredTaskRevisions.set(receiptKey, view.revision);
+        while (deliveredTaskRevisions.size > 1_000) {
+          const oldest = deliveredTaskRevisions.keys().next().value as string | undefined;
+          if (!oldest) break;
+          deliveredTaskRevisions.delete(oldest);
+        }
+      }
+      return taskViewResponse(view, { detail, unchanged });
     },
   );
 
@@ -425,8 +440,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "task_update",
     {
       title: "Update durable task",
-      description:
-        "Provide requested input to a durable task in input_required state. Do not use for polling.",
+      description: "Answer an input_required task.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
@@ -439,7 +453,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.update(workspace.root, taskId, inputResponses);
       const result = `Accepted task input for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { result, resultType: "complete" as const } };
+      return { content: [textBlock(result)], structuredContent: { result } };
     },
   );
 
@@ -447,8 +461,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "task_cancel",
     {
       title: "Cancel durable task",
-      description:
-        "Request cancellation of one durable task. Use task_get only if the terminal state matters to later work.",
+      description: "Cancel a durable task.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
@@ -460,7 +473,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.cancel(workspace.root, taskId);
       const result = `Cancellation requested for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { result, resultType: "complete" as const } };
+      return { content: [textBlock(result)], structuredContent: { result } };
     },
   );
 
@@ -494,7 +507,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           ? `signal=${status.signal}`
           : `exit=${status.exitCode ?? "unknown"}`;
       const result = [
-        `run=${status.runId} status=${state} session=${status.sessionId} duration=${status.wallTimeMs}ms idle=${status.idleTimeMs}ms output=${status.outputLines}L/${status.outputBytes}B next_check>=${nextPollMs}ms`,
+        `session=${status.sessionId} ${state} poll=${nextPollMs}ms log=${status.runId}`,
       ];
       if (status.logError) result.push(`warning=full local log persistence failed: ${status.logError}`);
       const resultText = result.join("\n");
@@ -505,13 +518,12 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           sessionId: status.sessionId,
           runId: status.runId,
           running: status.running,
-          exitCode: status.exitCode,
-          signal: status.signal,
           wallTimeMs: status.wallTimeMs,
-          idleTimeMs: status.idleTimeMs,
           outputBytes: status.outputBytes,
           outputLines: status.outputLines,
-          nextPollMs,
+          ...(status.exitCode !== undefined ? { exitCode: status.exitCode } : {}),
+          ...(status.signal ? { signal: status.signal } : {}),
+          ...(status.running ? { nextPollMs } : {}),
           ...(status.logError ? { logError: status.logError } : {}),
         },
       };
