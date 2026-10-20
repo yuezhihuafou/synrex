@@ -1,6 +1,6 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -336,6 +336,31 @@ export class DurableTaskManager {
       await unlink(this.notificationPath(workspaceRoot, taskId)).catch(() => undefined);
     }
     return view;
+  }
+
+  /** Observe an out-of-process durable runner's atomic task.json renames.
+   * Events are only a latency optimisation; every caller must retain timed
+   * state checks because fs.watch is not a durable event journal. */
+  async watchChanges(workspaceRoot: string, taskId: string, onChange: () => void): Promise<() => void> {
+    const state = await this.findTask(taskId);
+    this.assertOwned(state, workspaceRoot);
+    const taskPath = await this.findTaskPath(taskId);
+    try {
+      let pending: ReturnType<typeof setTimeout> | undefined;
+      const watcher = watch(path.dirname(taskPath), { persistent: false }, (_event, filename) => {
+        if ((filename === null || String(filename) === path.basename(taskPath)) && !pending) {
+          // Coalesce rapid atomic writes from chatty commands rather than
+          // turning each output chunk into an eager status read.
+          pending = setTimeout(() => { pending = undefined; onChange(); }, 70);
+          pending.unref?.();
+        }
+      });
+      watcher.on("error", () => { onChange(); watcher.close(); });
+      return () => { if (pending) clearTimeout(pending); watcher.close(); };
+    } catch {
+      // Unsupported filesystems use bounded, jittered fallback state reads.
+      return () => undefined;
+    }
   }
 
   async pendingNotifications(workspaceRoot: string): Promise<DurableTaskNotification[]> {

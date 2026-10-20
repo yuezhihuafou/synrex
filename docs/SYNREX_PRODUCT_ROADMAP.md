@@ -219,6 +219,13 @@ on different nodes.
   unchanged receipt on timeout. Compare its invocation count and latency
   against repeated `task_get` calls on real clients before claiming
   improvement. It does *not* wake the GPT host.
+- A subsequent source-only optimisation uses local task.json filesystem
+  change notifications for immediate read-only wakeups, with jittered
+  increasing safety-check intervals when events are lost or unavailable.
+  The host-visible tool contract and ten-second maximum remain unchanged.
+  See `docs/decisions/20261020-event-driven-execution.md`. Actual MCP
+  Tasks notifications and Work/dots MCP Events are separate future adapters:
+  **neither push integration is shipped in the pinned owner release**.
 - Isolated 2026-10-20 QA has verified a 17-tool authenticated MCP schema,
   preserved workflow and durable task IDs across a candidate restart,
   unchanged OAuth/Console access controls and the new wait path. This is

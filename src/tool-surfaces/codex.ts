@@ -479,10 +479,30 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     async ({ workspaceId, taskId, sinceRevision }) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
-      const waited = await waitForTaskChange(
-        () => durableTasks.get(workspace.root, taskId, { acknowledge: false }),
-        sinceRevision,
-      );
+      let notify: (() => void) | undefined;
+      let changedBeforeSubscribe = false;
+      // Validate ownership and install the OS watcher *before* the first
+      // read. File changes between watcher setup and subscribe are buffered.
+      const closeWatch = await durableTasks.watchChanges(workspace.root, taskId, () => {
+        changedBeforeSubscribe = true;
+        notify?.();
+      });
+      let waited;
+      try {
+        waited = await waitForTaskChange(
+          () => durableTasks.get(workspace.root, taskId, { acknowledge: false }),
+          sinceRevision,
+          {
+            subscribe: (onChange) => {
+              notify = onChange;
+              if (changedBeforeSubscribe) onChange();
+              return () => { notify = undefined; };
+            },
+          },
+        );
+      } finally {
+        closeWatch();
+      }
       if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
         await durableTasks.get(workspace.root, taskId); // acknowledge terminal notification
       }

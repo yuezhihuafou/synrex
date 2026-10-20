@@ -46,3 +46,48 @@ test("unknown prior revision changes are returned without waiting", async () => 
   assert.equal(result.unchanged, false);
   assert.equal(result.view.revision, "new");
 });
+
+test("state-change event wakes task_wait before the next safety poll", async () => {
+  let revision = "old";
+  let wake: (() => void) | undefined;
+  let closed = false;
+  let reads = 0;
+  const startedAt = Date.now();
+  const completed = waitForTaskChange(async () => {
+    reads++;
+    return view(revision === "old" ? "working" : "completed", revision);
+  }, "old", {
+    waitMs: 1_000,
+    pollMs: 750,
+    subscribe: (callback) => {
+      wake = callback;
+      return () => { closed = true; };
+    },
+  });
+  setTimeout(() => {
+    revision = "new";
+    wake?.();
+  }, 30);
+  const result = await completed;
+  assert.equal(result.view.status, "completed");
+  assert.equal(result.unchanged, false);
+  assert.equal(closed, true);
+  assert.ok(Date.now() - startedAt < 500, "event should beat a 750ms poll");
+  assert.ok(reads <= 3);
+});
+
+test("missing file events fall back to bounded growing safety intervals", async () => {
+  let reads = 0;
+  let closed = false;
+  const result = await waitForTaskChange(async () => {
+    reads++;
+    return view("working", "unchanged");
+  }, "unchanged", {
+    waitMs: 420,
+    pollMs: 35,
+    subscribe: () => () => { closed = true; },
+  });
+  assert.equal(result.unchanged, true);
+  assert.equal(closed, true);
+  assert.ok(reads >= 2 && reads < 11, `unexpected polling frequency: ${reads}`);
+});
