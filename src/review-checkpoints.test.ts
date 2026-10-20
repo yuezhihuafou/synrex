@@ -113,7 +113,7 @@ test("review refs are scoped to the workspace review history", async (t) => {
   );
   await assert.rejects(
     () => readReviewRef(root, head),
-    /Unknown DevSpace review reference/,
+    /Unknown Synrex review reference/,
   );
 });
 

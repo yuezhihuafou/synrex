@@ -20,3 +20,15 @@ releases/
 *.sqlite3
 *.sqlite-wal
 *.sqlite-shm
+
+# Historical local build snapshots and recovery artifacts; preserve on disk
+# without promoting generated binaries into an auditable source release.
+dist.before-*/
+dist.recovery/
+**/__pycache__/
+*.pyc
+src/config.ts.before-*
+
+# Local Console design screenshots and manual visual QA captures.
+mass/ui_actual*
+mass/ui_screenshot.html

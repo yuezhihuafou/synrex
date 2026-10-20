@@ -1,0 +1,15 @@
+[Unit]
+Description=DevSpace swy1 lightweight coordinator (private candidate)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=DEVSPACE_CONFIG_DIR=/home/swy/.devspace-core
+ExecStart=/home/swy/.nvm/versions/node/v22.22.2/bin/node /home/swy/services/devspace/releases/20261014-peer-coordinator/dist/cli.js serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=20
+
+[Install]
+WantedBy=default.target

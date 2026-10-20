@@ -6,9 +6,14 @@ import { createConnection, createServer as createNetServer } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  agentDaemonSystemdEnvironment,
+  daemonSystemdRunArgs,
+  daemonSystemdUnitName,
+  daemonLaunchArgs,
   daemonExecArgv,
   localAgentDaemonEnvironment,
   LocalAgentClient,
+  shouldUseSystemdAgentDaemon,
 } from "./local-agent-client.js";
 import { LocalAgentDaemon, type LocalAgentDaemonManager } from "./local-agent-daemon.js";
 import {
@@ -114,6 +119,65 @@ assert.deepEqual(
   ]),
   ["--enable-source-maps", "--trace-warnings"],
   "detached daemon startup must not inherit inspector flags",
+);
+
+assert.equal(shouldUseSystemdAgentDaemon({ XDG_RUNTIME_DIR: "/run/user/1000" }, "linux"), existsSync("/run/systemd/system"));
+assert.equal(shouldUseSystemdAgentDaemon({ DEVSPACE_AGENTD_LAUNCHER: "detached" }, "linux"), false);
+assert.equal(shouldUseSystemdAgentDaemon({ DEVSPACE_AGENTD_LAUNCHER: "systemd" }, "darwin"), true);
+assert.match(daemonSystemdUnitName("/tmp/state"), /^devspace-agentd-[0-9a-f]{12}$/);
+assert.deepEqual(
+  daemonSystemdRunArgs({
+    configDir: "/home/user/.devspace",
+    stateDir: "/tmp/state",
+    entrypoint: "/repo/dist/local-agent-daemon-main.js",
+    execPath: "/usr/bin/node",
+    execArgv: ["--enable-source-maps"],
+    env: {
+      HOME: "/home/user",
+      HTTPS_PROXY: "http://127.0.0.1:7890",
+      NO_PROXY: "localhost,127.0.0.1",
+      IGNORED_SECRET: "do-not-forward",
+    },
+  }),
+  [
+    "--user",
+    "--quiet",
+    "--collect",
+    `--unit=${daemonSystemdUnitName("/tmp/state")}`,
+    "--property=Restart=on-failure",
+    "--property=RestartSec=1s",
+    "--setenv=DEVSPACE_CONFIG_DIR=/home/user/.devspace",
+    "--setenv=HOME=/home/user",
+    "--setenv=HTTPS_PROXY=http://127.0.0.1:7890",
+    "--setenv=NO_PROXY=localhost,127.0.0.1",
+    "--",
+    "/usr/bin/node",
+    "--enable-source-maps",
+    "/repo/dist/local-agent-daemon-main.js",
+  ],
+);
+assert.deepEqual(
+  agentDaemonSystemdEnvironment({
+    PATH: "/bin",
+    HTTPS_PROXY: "http://127.0.0.1:7890",
+    SOME_API_TOKEN: "must-not-leak",
+  }),
+  [
+    ["PATH", "/bin"],
+    ["HTTPS_PROXY", "http://127.0.0.1:7890"],
+  ],
+);
+
+assert.deepEqual(
+  daemonLaunchArgs("/repo/src/local-agent-daemon-main.ts", ["--enable-source-maps"]),
+  ["--enable-source-maps", "--import", "tsx/esm", "/repo/src/local-agent-daemon-main.ts"],
+  "source-checkout daemon startup must load tsx for TypeScript entrypoints",
+);
+
+assert.deepEqual(
+  daemonLaunchArgs("/repo/dist/local-agent-daemon-main.js", ["--enable-source-maps"]),
+  ["--enable-source-maps", "/repo/dist/local-agent-daemon-main.js"],
+  "compiled daemon startup must not add a TypeScript loader",
 );
 
 assert.deepEqual(

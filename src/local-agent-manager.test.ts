@@ -220,7 +220,7 @@ if (mismatchedGet.isErr()) assert.equal(mismatchedGet.error.code, "WORKSPACE_MIS
 unwrap(manager.reconcileActiveRuns());
 assert.equal(getRecord(stale.id).status, "error");
 assert.equal(getRecord(stale.id).latestResponse, "previous response");
-assert.equal(getRecord(stale.id).error, "DevSpace restarted while this agent turn was running.");
+assert.equal(getRecord(stale.id).error, "Synrex restarted while this agent turn was running.");
 assert.equal(getRecord(stale.id).errorCode, "DAEMON_UNAVAILABLE");
 assert.equal(getRecord(stale.id).errorRetryable, true);
 

@@ -2,6 +2,7 @@ import * as z from "zod/v4";
 import { applyPatch } from "../apply-patch.js";
 import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
+import { waitForTaskChange } from "../durable-task-wait.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
@@ -30,7 +31,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Long non-interactive commands return durable taskId/runId handles and survive DevSpace restarts; use task_get, task_update only for input_required, and task_cancel. Honor pollIntervalMs. Retrieve saved output with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive/TTY commands return sessionId; use process_status/write_stdin. Commands run with the local user's authority and are not sandboxed. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Long non-interactive commands return durable taskId/runId handles and survive Synrex restarts; prefer task_wait to avoid repeated short task_get polls, use task_get for immediate inspection and task_cancel for cancellation. task_wait is bounded and cannot wake GPT after the host turn ends. task_update is reserved for protocol compatibility; the current durable shell runner does not request or accept structured input. Honor pollIntervalMs where task_wait is unavailable. Retrieve saved output with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive/TTY commands return sessionId; use process_status/write_stdin. Commands run with the local user's authority and are not sandboxed. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -57,14 +58,13 @@ const semanticReadActionSchema = z.enum([
 
 function registerSemanticTools(context: ToolRegistrationContext): void {
   const { server, config, workspaces, semantic } = context;
-  if (!semantic?.available) return;
 
   server.registerTool(
     "semantic_code",
     {
       title: "Semantic code query",
       description:
-        "Query source code with Serena/LSP semantics. Use overview for file structure, find for symbols, references or implementations for relations, declaration for a symbol at a code pattern, and diagnostics for language-server errors. Results are bounded; refine broad queries instead of reading entire files.",
+        "Serena/LSP code queries: overview, find, references, implementations, declaration, diagnostics. Results are bounded; narrow broad searches.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         action: semanticReadActionSchema,
@@ -77,6 +77,9 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
     },
     async ({ workspaceId, action, path: relativePath, symbol, pattern, detail }) => {
       const startedAt = performance.now();
+      if (!semantic?.available) {
+        throw new Error("Semantic code intelligence is unavailable on this host. Install/configure Serena; the tool remains registered so the MCP schema stays stable across restarts.");
+      }
       const workspace = await workspaces.getWorkspace(workspaceId);
       if (relativePath) workspaces.resolveReadPath(workspace, relativePath);
       let tool: string;
@@ -120,7 +123,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
     {
       title: "Semantic code edit",
       description:
-        "Perform an LSP-aware symbol edit through Serena when plain patching would be less reliable. Use rename for cross-file symbol renames; replace or insert actions target a symbol name-path; safe_delete removes a symbol only when semantic checks allow it. Call show_changes after the final edit.",
+        "Serena symbol edit: rename, replace_body, insert_before/after or safe_delete. Use show_changes after the final edit.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         action: semanticEditActionSchema,
@@ -133,6 +136,9 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
     },
     async ({ workspaceId, action, path: relativePath, symbol, newName, body }) => {
       const startedAt = performance.now();
+      if (!semantic?.available) {
+        throw new Error("Semantic code editing is unavailable on this host. Install/configure Serena; the tool remains registered so the MCP schema stays stable across restarts.");
+      }
       const workspace = await workspaces.getWorkspace(workspaceId);
       workspaces.resolveReadPath(workspace, relativePath);
       let tool: string;
@@ -181,7 +187,7 @@ function processResult(snapshot: ProcessSnapshot): string {
   const nextPollMs = recommendedPollMs(snapshot);
   const lines = snapshot.running
     ? [snapshot.taskId
-      ? `task=${snapshot.taskId} working poll=${nextPollMs}ms`
+      ? `task=${snapshot.taskId} working poll=${nextPollMs}ms fallback="devspace-task get ${snapshot.taskId}"`
       : `session=${snapshot.sessionId ?? "?"} working poll=${nextPollMs}ms`]
     : [snapshot.signal
       ? `run=${snapshot.runId} signal=${snapshot.signal}`
@@ -213,8 +219,6 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
       ...(snapshot.sessionId !== undefined ? { sessionId: snapshot.sessionId } : {}),
       ...(isTask ? {
         taskId: snapshot.taskId,
-        status: task?.status,
-        revision: task?.revision,
         pollIntervalMs: task?.pollIntervalMs,
       } : {}),
       runId: snapshot.runId,
@@ -315,6 +319,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
         startedAt,
         async () => {
           const workspace = await workspaces.getWorkspace(workspaceId);
+          assertPatchDoesNotMutateArchitectureState(patch);
           return applyPatch(workspace.root, patch);
         },
       );
@@ -334,6 +339,21 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
   );
 }
 
+function assertPatchDoesNotMutateArchitectureState(patch: string): void {
+  const protectedPrefix = ".devspace/architecture";
+  const protectedIntent = ".devspace-architecture.json";
+  for (const rawLine of patch.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const prefixes = ["*** Add File: ", "*** Update File: ", "*** Delete File: ", "*** Move to: "];
+    const prefix = prefixes.find((candidate) => line.startsWith(candidate));
+    if (!prefix) continue;
+    const candidate = line.slice(prefix.length).replace(/^\.\//, "");
+    if (candidate === protectedIntent || candidate === protectedPrefix || candidate.startsWith(`${protectedPrefix}/`)) {
+      throw new Error("Architecture state is protected. Use the project architecture actions; design changes require an explicit architecture change with rationale.");
+    }
+  }
+}
+
 function registerCodexProcessTools(context: ToolRegistrationContext): void {
   const { server, config, workspaces, processSessions, durableTasks } = context;
   const deliveredTaskRevisions = new Map<string, string>();
@@ -342,7 +362,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "exec_command",
     {
       title: "Execute command",
-      description: "Run a shell command. Full output is logged; long jobs return task handles and TTY jobs return sessions.",
+      description: "Run commands. For durable taskId prefer task_wait (or task_get/legacy devspace-task get), then check logs. For interactive sessionId use write_stdin.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -353,8 +373,14 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       },
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }) => {
-      await workspaces.getWorkspace(workspaceId);
+    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }, extra) => {
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      const taskCompat = await handleTaskCompatCommand(
+        cmd,
+        workspace.root,
+        durableTasks,
+      );
+      if (taskCompat) return taskCompat;
       const runLogResult = await handleRunLogCommand(cmd);
       if (runLogResult !== null) return runLogToolResponse(cmd, runLogResult);
 
@@ -370,14 +396,17 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         },
         startedAt,
         async () => {
-          const workspace = await workspaces.getWorkspace(workspaceId);
           const cwd = workspaces.resolveWorkingDirectory(workspace, workingDirectory);
           if (!tty && durableTasks?.available) {
+            const nodeRequestId = typeof extra?._meta?.["devspace/nodeRequestId"] === "string"
+              ? extra._meta["devspace/nodeRequestId"] as string
+              : undefined;
             return durableTasks.start({
               workspaceId,
               command: cmd,
               cwd,
               workspaceRoot: workspace.root,
+              requestId: nodeRequestId,
               tty: false,
             }, execYieldMs(cmd));
           }
@@ -394,7 +423,6 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         },
       );
       if (snapshot.taskId && durableTasks?.available) {
-        const workspace = await workspaces.getWorkspace(workspaceId);
         const task = await durableTasks.get(workspace.root, snapshot.taskId, {
           acknowledge: !snapshot.running,
         });
@@ -437,10 +465,37 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
   );
 
   server.registerTool(
+    "task_wait",
+    {
+      title: "Wait for durable task change",
+      description: "Wait at most 10s for task change or completion. Optional previous revision; compact unchanged receipt on timeout. Never replays work.",
+      inputSchema: {
+        workspaceId: z.string().describe(workspaceIdDescription),
+        taskId: z.string().describe("Stable task identifier returned by exec_command."),
+        sinceRevision: z.string().optional().describe("Revision from prior task receipt."),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ workspaceId, taskId, sinceRevision }) => {
+      if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      const waited = await waitForTaskChange(
+        () => durableTasks.get(workspace.root, taskId, { acknowledge: false }),
+        sinceRevision,
+      );
+      if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
+        await durableTasks.get(workspace.root, taskId); // acknowledge terminal notification
+      }
+      return taskViewResponse(waited.view, { unchanged: waited.unchanged });
+    },
+  );
+
+  server.registerTool(
     "task_update",
     {
       title: "Update durable task",
-      description: "Answer an input_required task.",
+      description:
+        "Reserved for MCP task-protocol compatibility. Current durable shell tasks do not support structured input resumption.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
@@ -535,7 +590,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     {
       title: "Write to process",
       description:
-        "Interact with a process session: send characters/Ctrl-C, resize its PTY, or collect buffered output. Use process_status for status-only checks.",
+        "Send input/Ctrl-C, resize, or poll a TTY sessionId from exec_command. Never use sessionId=0 for tasks; use task_get or exec_command 'devspace-task get <taskId>'.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
@@ -567,4 +622,25 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       return processToolResponse(snapshot);
     },
   );
+}
+
+async function handleTaskCompatCommand(
+  command: string,
+  workspaceRoot: string,
+  durableTasks: ToolRegistrationContext["durableTasks"],
+) {
+  const match = command.trim().match(/^devspace-task\s+(get|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f-]{36}))$/i);
+  if (!match) return undefined;
+  if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
+  const action = match[1]!.toLowerCase();
+  const taskId = match[2]!;
+  if (action === "get") {
+    return taskViewResponse(await durableTasks.get(workspaceRoot, taskId));
+  }
+  await durableTasks.cancel(workspaceRoot, taskId);
+  const result = `Cancellation requested for ${taskId}.`;
+  return {
+    content: [textBlock(result)],
+    structuredContent: { result, taskId },
+  };
 }

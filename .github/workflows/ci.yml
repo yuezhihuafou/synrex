@@ -53,6 +53,9 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Architecture conformance
+        run: pnpm architecture:check
+
       - name: Test
         env:
           DEVSPACE_REQUIRE_PI_SANDBOX: ${{ matrix.os == 'ubuntu-latest' && '1' || '0' }}

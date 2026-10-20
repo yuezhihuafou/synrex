@@ -1,0 +1,9 @@
+[Unit]
+Description=DevSpace single-owner state snapshot
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @SCRIPT@ --state-dir @STATE_DIR@ --config-dir @CONFIG_DIR@ --destination @BACKUP_DIR@ --runs-dir @RUNS_DIR@ --keep 7
+UMask=0077
+NoNewPrivileges=yes
+TimeoutStartSec=10min

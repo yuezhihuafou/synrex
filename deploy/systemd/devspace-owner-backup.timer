@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified DevSpace owner-state snapshot
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=10min
+Unit=devspace-owner-backup.service
+
+[Install]
+WantedBy=timers.target

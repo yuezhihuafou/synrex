@@ -53,6 +53,11 @@ export interface WorkspaceConversationBinding {
   lastUsedAt: string;
 }
 
+export interface WorkspaceMetadataPruneResult {
+  sessions: Array<{ id: string; root: string; sourceRoot?: string }>;
+  conversationBindings: number;
+}
+
 export interface WorkspaceStore {
   createSession(input: {
     id: string;
@@ -81,6 +86,7 @@ export interface WorkspaceStore {
   }): WorkspaceConversationBinding;
   touchConversationBinding(conversationScopeId: string, targetKey: string): void;
   deleteConversationBinding(conversationScopeId: string, targetKey: string): void;
+  pruneMetadata(before: Date): BetterResult<WorkspaceMetadataPruneResult, WorkspaceStoreError>;
   close?(): void;
 }
 
@@ -302,6 +308,37 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
         ),
       )
       .run();
+  }
+
+  pruneMetadata(before: Date): BetterResult<WorkspaceMetadataPruneResult, WorkspaceStoreError> {
+    return workspaceStoreResult("prune_workspace_metadata", () => {
+      const cutoff = before.toISOString();
+      const transaction = this.database.sqlite.transaction(() => {
+        const rows = this.database.sqlite.prepare(`
+          select s.id, s.root, s.source_root from workspace_sessions s
+          where s.last_used_at < ?
+            and (s.mode = 'checkout' or s.status = 'pruned')
+            and not exists (
+              select 1 from workspace_conversation_bindings b
+              where b.workspace_session_id = s.id and b.last_used_at >= ?
+            )
+        `).all(cutoff, cutoff) as Array<{ id: string; root: string; source_root: string | null }>;
+        const sessions = rows.map((row) => ({
+          id: row.id,
+          root: row.root,
+          sourceRoot: row.source_root ?? undefined,
+        }));
+        const bindings = this.database.sqlite.prepare(`
+          delete from workspace_conversation_bindings where last_used_at < ?
+        `).run(cutoff);
+        if (sessions.length > 0) {
+          const remove = this.database.sqlite.prepare("delete from workspace_sessions where id = ?");
+          for (const session of sessions) remove.run(session.id);
+        }
+        return { sessions, conversationBindings: bindings.changes };
+      });
+      return transaction();
+    });
   }
 
   close(): void {

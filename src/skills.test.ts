@@ -222,7 +222,7 @@ try {
   );
   assert.match(
     await readFile(join(devspaceSkills, "subagents", "SKILL.md"), "utf8"),
-    /# DevSpace subagents/,
+    /# Synrex subagents/,
   );
 
   const duplicateConfig = loadConfig(writeTestDevspaceConfig(configDir, {

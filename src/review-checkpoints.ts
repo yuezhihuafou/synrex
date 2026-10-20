@@ -58,6 +58,16 @@ export interface ReviewCheckpointManager {
 
 const REVIEW_REF_PREFIX = "refs/devspace/review";
 
+export async function deleteWorkspaceReviewRefs(root: string, workspaceId: string): Promise<void> {
+  const eligibility = await getGitEligibility(root);
+  if (!eligibility.ok || !eligibility.gitRoot) return;
+  const refs = reviewRefs(workspaceId);
+  await Promise.all([
+    git(eligibility.gitRoot, ["update-ref", "-d", refs.openRef]).catch(() => undefined),
+    git(eligibility.gitRoot, ["update-ref", "-d", refs.baselineRef]).catch(() => undefined),
+  ]);
+}
+
 export function createReviewCheckpointManager(): ReviewCheckpointManager {
   const states = new Map<string, WorkspaceReviewState>();
   const initializations = new Map<string, Promise<void>>();
@@ -189,7 +199,7 @@ export async function readReviewRef(root: string, reviewRef: string): Promise<Re
 
   const commit = await resolveReviewCommit(eligibility.gitRoot, reviewRef);
   if (!await isKnownReviewCommit(eligibility.gitRoot, commit)) {
-    throw new Error(`Unknown DevSpace review reference: ${reviewRef}`);
+    throw new Error(`Unknown Synrex review reference: ${reviewRef}`);
   }
   return readReviewCommit(eligibility.gitRoot, commit);
 }
@@ -289,7 +299,7 @@ async function createWorkingTreeSnapshot(gitRoot: string, parent: string): Promi
     await git(gitRoot, ["read-tree", "HEAD"], { env });
     await git(gitRoot, ["add", "-A", "--", "."], { env });
     const tree = (await git(gitRoot, ["write-tree"], { env })).stdout.trim();
-    return (await git(gitRoot, ["commit-tree", tree, "-p", parent, "-m", "DevSpace review snapshot"], { env })).stdout.trim();
+    return (await git(gitRoot, ["commit-tree", tree, "-p", parent, "-m", "Synrex review snapshot"], { env })).stdout.trim();
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -398,9 +408,9 @@ function formatChangedFiles(summary: ReviewSummary): string {
 function checkpointEnv(indexPath: string): NodeJS.ProcessEnv {
   return {
     GIT_INDEX_FILE: indexPath,
-    GIT_AUTHOR_NAME: "DevSpace",
+    GIT_AUTHOR_NAME: "Synrex",
     GIT_AUTHOR_EMAIL: "devspace@users.noreply.local",
-    GIT_COMMITTER_NAME: "DevSpace",
+    GIT_COMMITTER_NAME: "Synrex",
     GIT_COMMITTER_EMAIL: "devspace@users.noreply.local",
   };
 }

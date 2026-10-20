@@ -4,7 +4,7 @@ This page collects the setup issues users are most likely to hit.
 
 ## `devspace` Command Not Found
 
-DevSpace Verge is currently installed from its GitHub checkout. Build and link it:
+Synrex is currently installed from its GitHub checkout. Build and link it:
 
 ```bash
 pnpm install --frozen-lockfile
@@ -22,7 +22,7 @@ If the command is still missing, confirm npm's global bin directory is on `PATH`
 
 ## Unsupported Node Version
 
-DevSpace requires Node `>=22.19 <27`.
+Synrex requires Node `>=22.19 <27`.
 
 Check:
 
@@ -74,7 +74,7 @@ devspace config set publicBaseUrl https://your-tunnel-host.example.com
 
 ## Tailscale Funnel `/mcp` Returns 404
 
-Proxy the whole DevSpace server from the Funnel root:
+Proxy the whole Synrex server from the Funnel root:
 
 ```bash
 tailscale funnel --bg 7676
@@ -82,7 +82,7 @@ tailscale funnel --bg 7676
 
 Do not use `--set-path=/mcp`. Tailscale removes a configured mount path before
 proxying to the local service, so a public `/mcp` request can otherwise arrive
-at DevSpace as `/`. DevSpace also needs OAuth routes outside `/mcp`, so serving
+at Synrex as `/`. Synrex also needs OAuth routes outside `/mcp`, so serving
 the whole local origin is the correct setup.
 
 ## Tunnel URL Changed
@@ -103,7 +103,7 @@ devspace config set publicBaseUrl https://devspace.example.com
 
 ## Host Header Or 403 Problems
 
-DevSpace derives allowed hosts from the configured public URL.
+Synrex derives allowed hosts from the configured public URL.
 
 Run:
 
@@ -119,7 +119,7 @@ For intentional local debugging only, set `server.allowedHosts` to `["*"]` in
 
 ## OAuth Redirect Host Rejected
 
-By default, DevSpace allows redirects for:
+By default, Synrex allows redirects for:
 
 ```text
 chatgpt.com
@@ -151,7 +151,7 @@ client receives an unknown workspace error, call `open_workspace` again for that
 project.
 
 Workspace session metadata is persisted. ChatGPT may provide optional
-conversation metadata that lets DevSpace resume the same checkout workspace for
+conversation metadata that lets Synrex resume the same checkout workspace for
 the same project in that conversation; repeated opens reuse the `workspaceId`
 and do not repeat context already provided for that reused checkout. Worktree
 mode always creates a new isolated workspace with its own complete context.
@@ -164,9 +164,11 @@ shows the combined changes and advances the review point automatically.
 
 ## Data Retention
 
-DevSpace does not currently prune workspace sessions, conversation bindings,
-or review refs. A future product retention policy will define safe cleanup for
-these records; no automatic deletion is performed today.
+Synrex prunes stale checkout workspace sessions, old conversation bindings,
+and their Git review refs on server startup. The default retention window is 90
+days and is configured with `storage.metadataRetentionDays`. Active managed
+worktrees are not deleted by metadata retention; `devspace worktrees prune`
+keeps its separate recovery-aware lifecycle.
 
 ## MCP Workspace Path Rejected
 
@@ -203,7 +205,7 @@ needed.
 
 ## Windows Shell Commands Fail
 
-DevSpace shell execution requires Bash. Native PowerShell and `cmd.exe` command
+Synrex shell execution requires Bash. Native PowerShell and `cmd.exe` command
 execution are not supported yet.
 
 Install Git for Windows and use Git Bash, or use WSL, MSYS2, or Cygwin Bash.
@@ -221,7 +223,7 @@ Confirm Bash is detected.
 Skills are enabled by default. Confirm `skills.enabled` is `true` in
 `~/.devspace/config.jsonc`.
 
-DevSpace looks in standard Agent Skills locations:
+Synrex looks in standard Agent Skills locations:
 
 - `~/.agents/skills`
 - project `.agents/skills`
@@ -232,9 +234,9 @@ It also checks compatibility and custom paths:
 - `skills.agentDir/skills`, defaulting to `~/.codex/skills`
 - additional paths from `skills.paths`
 
-When Subagents are enabled, DevSpace loads agent profiles from
+When Subagents are enabled, Synrex loads agent profiles from
 `~/.devspace/agents/*.md` and project `.devspace/agents/*.md`, then exposes a
-compact profile catalog through `open_workspace`. DevSpace also synchronizes
+compact profile catalog through `open_workspace`. Synrex also synchronizes
 its managed `subagents` skill to `~/.devspace/skills/subagents/SKILL.md` and
 uses that copy instead of a package-manager path. The skill keeps the
 model-facing workflow to
@@ -250,15 +252,15 @@ advertises the skill and the model reads it only when useful. Set it to
 `preload` to include the workflow directly in the initial workspace
 instructions instead.
 
-For a Coding Agent, install the Verge skill directly from its GitHub repository:
+For a Coding Agent, install the Synrex skill directly from its GitHub repository:
 
 ```bash
 npx skills add yuezhihuafou/devspace-verge --skill subagents --global
 ```
 
-The Skills CLI handles agent discovery and installation. DevSpace setup does
+The Skills CLI handles agent discovery and installation. Synrex setup does
 not copy files into agent skill directories. The managed
-`~/.devspace/skills/subagents` copy is for DevSpace MCP workspaces and is
+`~/.devspace/skills/subagents` copy is for Synrex MCP workspaces and is
 separate from Coding Agent installation.
 
 Packaged agent profile examples under `examples/agents/` are starter templates.
@@ -267,12 +269,12 @@ Copy or adapt them into one of the active profile directories before use.
 Legacy project paths such as `.pi/skills` can be added to `skills.paths` when needed.
 
 If a skill appears in `open_workspace`, the model should read that skill's
-`SKILL.md` before following it. DevSpace permits reads within advertised skill
+`SKILL.md` before following it. Synrex permits reads within advertised skill
 directories without tracking whether `SKILL.md` was read first.
 
 ## Review Card Does Not Appear
 
-DevSpace attaches widget UI only to `open_workspace` and `show_changes`.
+Synrex attaches widget UI only to `open_workspace` and `show_changes`.
 Ordinary reads, edits, and commands intentionally render as normal tool results
 to avoid one iframe per call. Plain MCP clients may ignore ChatGPT Apps widget
 metadata and only show text results; `show_changes` remains available there.
@@ -284,3 +286,42 @@ Historical `show_changes` cards use the `reviewRef` in their structured result
 to recover the exact Git-backed review when a host reloads the app without its
 original result metadata. `open_workspace` can rebuild its card directly from
 its structured result.
+
+## A Newly Deployed Tool Does Not Appear In An Existing Chat
+
+Some MCP hosts cache `tools/list` for the lifetime of a conversation or
+connection. Restarting the Synrex service updates the server immediately but
+cannot force an already-open host session to rediscover a newly named tool.
+Reconnect the MCP integration or start a fresh host session when a deployment
+actually changes the top-level tool list.
+
+Synrex therefore treats the host-facing tool list as a compatibility surface:
+semantic tools stay registered even when their backend is unavailable, and new
+project-intelligence behavior should normally be added behind the stable
+`project` tool rather than by inventing another top-level MCP tool.
+
+## ChatGPT Says Authorization Is Invalid or Expired
+
+Do not repeatedly reconnect or delete the state database as a first response.
+Run a read-only inventory on the actual service host:
+
+```bash
+devspace doctor --auth
+```
+
+This reports the resolved state directory and **counts only** of registered
+clients and unexpired access/refresh tokens. It does not print passwords, raw
+tokens, token hashes, or client IDs. Check the deployed service's config
+directory and state directory against this output before drawing conclusions.
+
+Inspect the server's structured logs for `oauth_rejected` and `http_request`
+events. The `oauth_rejected.phase` and `oauth_rejected.reason` values
+distinguish missing client registrations, refresh-token rotation/replay,
+resource-URL mismatch, and expired tokens without exposing credentials.
+If the authorization attempt never reaches the server, inspect the MCP
+client or tunnel rather than resetting Synrex's database.
+
+Development/QA state is intentionally separate from production and uses
+a distinct loopback OAuth URL after `pnpm dev:seed` or `pnpm dev:reset`.
+A QA database fork must never take over the public production OAuth origin,
+because each fork would rotate its refresh tokens independently.

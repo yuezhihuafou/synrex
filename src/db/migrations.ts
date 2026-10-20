@@ -47,6 +47,21 @@ const migrations: Migration[] = [
     name: "learning-memory",
     up: migrateLearningMemory,
   },
+  {
+    version: 9,
+    name: "multi-node-control-plane",
+    up: migrateMultiNodeControlPlane,
+  },
+  {
+    version: 10,
+    name: "oauth-authorization-codes",
+    up: migrateOAuthAuthorizationCodes,
+  },
+  {
+    version: 11,
+    name: "oauth-refresh-replay-recovery",
+    up: migrateOAuthRefreshReplayRecovery,
+  },
 ];
 
 export function migrateDatabase(sqlite: Database.Database): void {
@@ -179,6 +194,41 @@ function migrateOAuthState(sqlite: Database.Database): void {
   `);
 }
 
+function migrateOAuthAuthorizationCodes(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists oauth_authorization_codes (
+      code_hash text primary key,
+      client_id text not null,
+      redirect_uri text not null,
+      code_challenge text not null,
+      scopes_json text not null,
+      resource text,
+      expires_at_ms integer not null,
+      foreign key (client_id) references oauth_clients(client_id) on delete cascade
+    );
+    create index if not exists oauth_authorization_codes_expires_at_idx
+      on oauth_authorization_codes(expires_at_ms);
+  `);
+}
+
+function migrateOAuthRefreshReplayRecovery(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists oauth_refresh_replays (
+      token_hash text primary key,
+      client_id text not null,
+      scopes_json text not null,
+      resource text,
+      access_expires_at integer not null,
+      refresh_expires_at integer not null,
+      replay_until integer not null,
+      foreign key (client_id) references oauth_clients(client_id) on delete cascade
+    );
+
+    create index if not exists oauth_refresh_replays_until_idx
+      on oauth_refresh_replays(replay_until);
+  `);
+}
+
 function migrateLocalAgentSessions(sqlite: Database.Database): void {
   sqlite.exec(`
     create table if not exists local_agent_sessions (
@@ -301,6 +351,62 @@ function migrateLearningMemory(sqlite: Database.Database): void {
 
     create index if not exists learning_candidates_workspace_status_idx
       on learning_candidates(workspace_root, status, updated_at desc);
+  `);
+}
+
+function migrateMultiNodeControlPlane(sqlite: Database.Database): void {
+  sqlite.exec(`
+    create table if not exists execution_nodes (
+      id text primary key,
+      kind text not null,
+      alias text,
+      protocol_major integer not null,
+      protocol_minor integer not null,
+      health text not null,
+      platform_json text not null,
+      capabilities_json text not null,
+      created_at text not null,
+      last_seen_at text not null
+    );
+
+    create index if not exists execution_nodes_alias_idx
+      on execution_nodes(alias);
+
+    create index if not exists execution_nodes_health_seen_idx
+      on execution_nodes(health, last_seen_at desc);
+
+    create table if not exists workspace_routes (
+      workspace_id text primary key,
+      node_id text not null,
+      local_workspace_id text not null,
+      created_at text not null,
+      last_used_at text not null,
+      foreign key (node_id) references execution_nodes(id)
+    );
+
+    create index if not exists workspace_routes_node_idx
+      on workspace_routes(node_id, last_used_at desc);
+
+    create index if not exists workspace_routes_local_idx
+      on workspace_routes(node_id, local_workspace_id);
+
+    create table if not exists task_routes (
+      task_id text primary key,
+      node_id text not null,
+      workspace_id text not null,
+      local_task_id text not null,
+      run_id text,
+      created_at text not null,
+      last_used_at text not null,
+      foreign key (node_id) references execution_nodes(id),
+      foreign key (workspace_id) references workspace_routes(workspace_id) on delete cascade
+    );
+
+    create index if not exists task_routes_node_idx
+      on task_routes(node_id, last_used_at desc);
+
+    create index if not exists task_routes_workspace_idx
+      on task_routes(workspace_id, last_used_at desc);
   `);
 }
 

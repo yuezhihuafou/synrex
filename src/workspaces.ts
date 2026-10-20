@@ -102,6 +102,7 @@ const MAX_CONVERSATION_INSTRUCTION_SCOPES = 128;
 export class WorkspaceRegistry {
   private readonly workspaces = new Map<string, Workspace>();
   private readonly conversationInstructionFingerprints = new Map<string, Set<string>>();
+  private readonly workspaceBootstrapFingerprints = new Map<string, string>();
   private readonly pendingCheckoutOpens = new Map<string, Promise<WorkspaceContext>>();
   private readonly pendingRestores = new Map<
     string,
@@ -229,10 +230,7 @@ export class WorkspaceRegistry {
       if (reusableWorkspace) {
         const context = await this.reusedWorkspaceContext(reusableWorkspace);
         this.store?.touchConversationBinding(conversationScopeId, targetKey);
-        return {
-          ...context,
-          includeBootstrapContext: false,
-        };
+        return context;
       }
 
       this.workspaces.delete(binding.workspaceSessionId);
@@ -290,16 +288,22 @@ export class WorkspaceRegistry {
   }
 
   private async reusedWorkspaceContext(workspace: Workspace): Promise<WorkspaceContext> {
+    const refreshedSkills = this.loadSkillsForWorkspace(workspace.root);
+    workspace.skills = refreshedSkills.skills;
+    workspace.skillDiagnostics = refreshedSkills.skillDiagnostics;
     workspace.agentProfiles = await loadLocalAgentProfiles(this.config, workspace.root);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const fingerprint = bootstrapFingerprint(workspace, agentsFiles, availableAgentsFiles);
+    const previousFingerprint = this.workspaceBootstrapFingerprints.get(workspace.id);
+    this.workspaceBootstrapFingerprints.set(workspace.id, fingerprint);
 
     return {
       workspace,
       agentsFiles,
       availableAgentsFiles,
       workspaceReused: true,
-      includeBootstrapContext: true,
+      includeBootstrapContext: previousFingerprint === undefined || previousFingerprint !== fingerprint,
     };
   }
 
@@ -448,6 +452,18 @@ export class WorkspaceRegistry {
   }
 
   resolveReadPath(workspace: Workspace, inputPath: string): WorkspaceReadPath {
+    const advertisedSkillRead = resolveSkillReadPath(
+      workspace.skills,
+      inputPath,
+    );
+    if (advertisedSkillRead) {
+      return {
+        absolutePath: advertisedSkillRead.absolutePath,
+        readRoots: [workspace.root, advertisedSkillRead.skill.baseDir],
+        skillRead: advertisedSkillRead,
+      };
+    }
+
     try {
       return {
         absolutePath: this.resolvePath(workspace, inputPath),
@@ -526,6 +542,10 @@ export class WorkspaceRegistry {
     this.rememberWorkspace(workspace);
     const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
     const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    this.workspaceBootstrapFingerprints.set(
+      workspace.id,
+      bootstrapFingerprint(workspace, agentsFiles, availableAgentsFiles),
+    );
 
     return {
       workspace,
@@ -545,6 +565,7 @@ export class WorkspaceRegistry {
       const oldestWorkspaceId = this.workspaces.keys().next().value as string | undefined;
       if (!oldestWorkspaceId) break;
       this.workspaces.delete(oldestWorkspaceId);
+      this.workspaceBootstrapFingerprints.delete(oldestWorkspaceId);
     }
   }
 
@@ -756,4 +777,25 @@ async function walkWorkspace(
 
 function isErrnoException(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
+}
+
+function bootstrapFingerprint(
+  workspace: Workspace,
+  agentsFiles: LoadedAgentsFile[],
+  availableAgentsFiles: AvailableAgentsFile[],
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({
+      agentsFiles: agentsFiles.map((file) => ({ path: file.path, content: file.content })),
+      availableAgentsFiles: availableAgentsFiles.map((file) => file.path),
+      skills: workspace.skills.map((skill) => ({
+        name: skill.name,
+        description: skill.description,
+        filePath: skill.filePath,
+        disableModelInvocation: skill.disableModelInvocation,
+      })),
+      skillDiagnostics: workspace.skillDiagnostics,
+      agentProfiles: workspace.agentProfiles,
+    }))
+    .digest("hex");
 }

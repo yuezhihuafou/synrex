@@ -1,6 +1,6 @@
 # Setup Guide
 
-This guide covers ChatGPT and Coding Agents using DevSpace Verge with local projects.
+This guide covers ChatGPT and Coding Agents using Synrex with local projects.
 
 ## Requirements
 
@@ -8,16 +8,16 @@ This guide covers ChatGPT and Coding Agents using DevSpace Verge with local proj
 - pnpm `11.25.0`
 - Git
 - Bash, including Git Bash or WSL on Windows
-- a public HTTPS URL that forwards to the local DevSpace server, only when
+- a public HTTPS URL that forwards to the local Synrex server, only when
   ChatGPT will connect
 
-DevSpace Verge does not create the public tunnel for you. ChatGPT users can use
+Synrex does not create the public tunnel for you. ChatGPT users can use
 Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or their own HTTPS reverse
 proxy.
 
 ## Install And Configure
 
-Verge is currently distributed from its GitHub repository rather than npm:
+Synrex is currently distributed from its GitHub repository rather than npm:
 
 ```bash
 git clone https://github.com/yuezhihuafou/devspace-verge.git
@@ -37,13 +37,13 @@ devspace init
 
 The setup flow asks one question at a time.
 
-First choose where you will use DevSpace: ChatGPT, Coding Agents, or both.
-DevSpace uses that answer to skip setup that does not apply to you.
+First choose where you will use Synrex: ChatGPT, Coding Agents, or both.
+Synrex uses that answer to skip setup that does not apply to you.
 
 ### Project roots
 
 If you selected ChatGPT, choose the project folders it may open through
-DevSpace. Keep this narrow.
+Synrex. Keep this narrow.
 
 Examples:
 
@@ -66,11 +66,11 @@ remain limited to the roots configured for ChatGPT.
 
 ### Coding Agents
 
-Setup detects supported Coding Agents and asks which ones DevSpace may use.
+Setup detects supported Coding Agents and asks which ones Synrex may use.
 These choices are stored as provider objects under `subagents` in
 `~/.devspace/config.jsonc`.
 
-If you selected Coding Agents, install the Verge subagents skill from GitHub:
+If you selected Coding Agents, install the Synrex subagents skill from GitHub:
 
 ```bash
 npx skills add yuezhihuafou/devspace-verge --skill subagents --global
@@ -81,7 +81,7 @@ The skill uses `devspace agents targets`, `run`, `continue`, `show`, and `ls`.
 These commands do not require `devspace serve`.
 
 This Coding Agent installation is separate from ChatGPT MCP usage. For MCP
-workspaces with Subagents enabled, DevSpace manages its own copy at
+workspaces with Subagents enabled, Synrex manages its own copy at
 `~/.devspace/skills/subagents/SKILL.md`; users do not install that copy
 manually.
 
@@ -94,15 +94,15 @@ reverse proxy first and point it at:
 http://127.0.0.1:7676
 ```
 
-For Tailscale Funnel, proxy the whole DevSpace server from the root path:
+For Tailscale Funnel, proxy the whole Synrex server from the root path:
 
 ```bash
 tailscale funnel --bg 7676
 ```
 
-Do not mount Funnel only at `/mcp` with `--set-path=/mcp`. DevSpace also serves
+Do not mount Funnel only at `/mcp` with `--set-path=/mcp`. Synrex also serves
 OAuth discovery and authorization routes outside `/mcp`, and a path mount can
-strip `/mcp` before the request reaches DevSpace.
+strip `/mcp` before the request reaches Synrex.
 
 Enter the public origin without `/mcp`:
 
@@ -116,7 +116,7 @@ Configure the MCP client with the full MCP endpoint:
 https://your-tunnel-host.example.com/mcp
 ```
 
-Protocol compatibility is automatic. DevSpace serves MCP 2026-07-28 requests
+Protocol compatibility is automatic. Synrex serves MCP 2026-07-28 requests
 directly and handles older 2025-era clients statelessly on the same endpoint;
 there is no client-protocol setting to maintain.
 
@@ -139,7 +139,7 @@ devspace serve
 
 ## Approve The Client
 
-When ChatGPT, Claude, or another MCP client connects, DevSpace shows an Owner
+When ChatGPT, Claude, or another MCP client connects, Synrex shows an Owner
 password approval page. Enter the Owner password printed during setup.
 
 The default config files are:
@@ -172,6 +172,7 @@ pnpm dev:seed
 pnpm dev
 ```
 
-The source server uses an ignored checkout-local fork of your normal DevSpace
-configuration and SQLite state. See [Development and Manual QA](development.md)
+The source server uses an ignored checkout-local fork of your normal Synrex
+configuration and SQLite state. It uses an isolated loopback OAuth origin and
+does not copy live OAuth tokens into the QA database. See [Development and Manual QA](development.md)
 for worktree switching, ChatGPT testing, and database migration workflows.

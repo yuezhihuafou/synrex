@@ -1,0 +1,18 @@
+[Unit]
+Description=DevSpace swy1 equal-peer MCP coordinator (production after validated cutover)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=/home/swy
+Environment=PATH=/home/swy/.nvm/versions/node/v22.22.2/bin:/home/swy/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DEVSPACE_CONFIG_DIR=/home/swy/.devspace-cutover-20261018
+WorkingDirectory=/home/swy/DevSpace
+ExecStart=/home/swy/.nvm/versions/node/v22.22.2/bin/node /home/swy/services/devspace/releases/20261018-peer-coordinator-complete/dist/cli.js serve
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=25
+
+[Install]
+WantedBy=default.target

@@ -1,6 +1,6 @@
 # Security Model
 
-DevSpace exposes local coding capabilities over MCP. Treat it as remote access
+Synrex exposes local coding capabilities over MCP. Treat it as remote access
 to your development machine.
 
 The security model is simple:
@@ -12,7 +12,7 @@ The security model is simple:
 
 ## Filesystem Allowlist
 
-DevSpace only opens workspaces under configured roots.
+Synrex only opens workspaces under configured roots.
 
 Good examples:
 
@@ -40,7 +40,7 @@ reach.
 ~/.devspace/auth.json
 ```
 
-When an MCP client connects, DevSpace shows an approval page. Enter the Owner
+When an MCP client connects, Synrex shows an approval page. Enter the Owner
 password only when you intentionally want that client to access this server.
 
 For env-driven deployments, set a long random value:
@@ -51,7 +51,7 @@ DEVSPACE_OAUTH_OWNER_TOKEN="$(openssl rand -base64 32)"
 
 ## Public URL And Host Allowlist
 
-DevSpace needs `server.publicBaseUrl` in `config.jsonc` so MCP clients can
+Synrex needs `server.publicBaseUrl` in `config.jsonc` so MCP clients can
 discover OAuth metadata and connect to the correct resource.
 
 The value should be the origin only:
@@ -62,19 +62,19 @@ https://your-tunnel-host.example.com
 
 Do not include `/mcp` in `server.publicBaseUrl`.
 
-By default, DevSpace derives allowed Host headers from the local host and public
+By default, Synrex derives allowed Host headers from the local host and public
 URL. Put `"*"` in `server.allowedHosts` only for intentional local debugging.
 
 ## Tunnels
 
-DevSpace does not manage tunnels. Your tunnel or reverse proxy should point to:
+Synrex does not manage tunnels. Your tunnel or reverse proxy should point to:
 
 ```text
 http://127.0.0.1:7676
 ```
 
 Prefer adding Cloudflare Access, Tailscale identity controls, or equivalent
-protection in front of public tunnels. DevSpace OAuth still protects the MCP
+protection in front of public tunnels. Synrex OAuth still protects the MCP
 endpoint, but the tunnel URL should not be treated as a secret.
 
 ## Shell Access
@@ -82,7 +82,7 @@ endpoint, but the tunnel URL should not be treated as a secret.
 The shell tool is powerful by design. It is meant for tests, builds, git, and
 package scripts.
 
-Filesystem path containment applies to DevSpace file tools. Shell commands run
+Filesystem path containment applies to Synrex file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
 client must be trusted and the Owner password must stay private.
 
@@ -100,18 +100,18 @@ workspace. `download_artifact` accepts the MCP host's native file value, the
 path. It returns only the workspace-relative path and does not create a
 persistent artifact service or reusable artifact ID.
 
-DevSpace accepts only the documented native-file object and trusted OpenAI
+Synrex accepts only the documented native-file object and trusted OpenAI
 download hosts and redirects. Arbitrary URL strings, local source paths,
 credentials, malformed references, and unknown object fields are rejected.
 
 Absolute paths, traversal, symlinked parents, and existing destinations also
 fail closed. Downloads stream under the configured per-file limit and are
-published without overwrite as owner-only files. DevSpace does not extract or
+published without overwrite as owner-only files. Synrex does not extract or
 execute transferred content.
 
 ## Logs
 
-By default, DevSpace logs requests and tool calls. Shell command previews are
+By default, Synrex logs requests and tool calls. Shell command previews are
 disabled unless `logging.shellCommands` is `true`.
 
 Do not enable shell command logging if commands may contain secrets.

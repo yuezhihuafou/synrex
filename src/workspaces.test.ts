@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { platform, tmpdir } from "node:os";
+import { homedir, platform, tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import {
 } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
+import { formatPathForPrompt } from "./skills.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -350,6 +351,58 @@ test("workspace cache evicts old contexts without losing advertised skill reads"
     assert.equal(
       registry.resolveReadPath(restored, resourceFile).absolutePath,
       resourceFile,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test("advertised home-relative skill paths round-trip through workspace reads", async (t) => {
+  const context = await fixture(t);
+  const skillHome = await mkdtemp(join(homedir(), ".devspace-skill-read-"));
+  t.after(async () => {
+    await rm(skillHome, { recursive: true, force: true });
+  });
+  const agentDir = join(skillHome, "agent");
+  const skillDir = join(agentDir, "skills", "roundtrip-skill");
+  const skillFile = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(
+    skillFile,
+    [
+      "---",
+      "name: roundtrip-skill",
+      "description: Verify model-visible skill paths are directly readable.",
+      "---",
+      "",
+      "Round-trip path test.",
+      "",
+    ].join("\n"),
+  );
+
+  const config = loadConfig(writeTestDevspaceConfig(
+    join(context.root, ".skill-roundtrip-home"),
+    {
+      server: { port: 1 },
+      workspaces: {
+        allowedRoots: [context.root],
+        worktreeRoot: join(context.root, ".devspace", "skill-roundtrip-worktrees"),
+      },
+      skills: { agentDir },
+      subagents: { enabled: false, instructions: "on-demand", providers: [] },
+    },
+  ));
+  const store = new SqliteWorkspaceStore(join(context.root, ".skill-roundtrip-state"));
+  try {
+    const registry = new WorkspaceRegistry(config, store);
+    const opened = await registry.openWorkspace(context.root);
+    const skill = opened.workspace.skills.find((candidate) => candidate.name === "roundtrip-skill");
+    assert.ok(skill);
+    const advertisedPath = formatPathForPrompt(skill.filePath);
+    assert.match(advertisedPath, /^~\//);
+    assert.equal(
+      registry.resolveReadPath(opened.workspace, advertisedPath).absolutePath,
+      skill.filePath,
     );
   } finally {
     store.close();

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { openDatabase } from "./db/client.js";
 
@@ -27,7 +27,6 @@ export interface LearningCandidate {
   trigger: string;
   procedure: string[];
   evidenceEpisodeIds: string[];
-  confidence: number;
   status: LearningCandidateStatus;
   validationNote?: string;
   skillPath?: string;
@@ -121,7 +120,11 @@ export class LearningStore {
         .map((item) => item.episode);
       const candidates = candidateRows
         .map(rowToCandidate)
-        .map((candidate) => ({ candidate, score: textScore(tokens, `${candidate.title} ${candidate.trigger} ${candidate.procedure.join(" ")}`) + candidate.confidence }))
+        .map((candidate) => ({
+          candidate,
+          score: textScore(tokens, `${candidate.title} ${candidate.trigger} ${candidate.procedure.join(" ")}`)
+            + Math.min(0.2, Math.log2(candidate.evidenceEpisodeIds.length + 1) * 0.03),
+        }))
         .filter((item) => tokens.length === 0 || item.score > 0)
         .sort((a, b) => b.score - a.score || b.candidate.updatedAt.localeCompare(a.candidate.updatedAt))
         .slice(0, Math.max(1, Math.min(limit, 20)))
@@ -169,11 +172,14 @@ export class LearningStore {
     try {
       const placeholders = evidence.map(() => "?").join(",");
       const found = database.sqlite.prepare(`
-        select id from learning_episodes
+        select id, success from learning_episodes
         where workspace_root = ? and id in (${placeholders})
-      `).all(input.workspaceRoot, ...evidence) as Array<{ id: string }>;
+      `).all(input.workspaceRoot, ...evidence) as Array<{ id: string; success: number }>;
       if (found.length !== evidence.length) {
         throw new Error("One or more evidence episodes do not belong to this workspace or no longer exist.");
+      }
+      if (found.some((episode) => episode.success !== 1)) {
+        throw new Error("Learning candidates may use only successful evidence episodes.");
       }
       const now = new Date().toISOString();
       const candidate: LearningCandidate = {
@@ -183,7 +189,6 @@ export class LearningStore {
         trigger,
         procedure,
         evidenceEpisodeIds: evidence,
-        confidence: Math.min(0.95, 0.45 + Math.log2(evidence.length + 1) * 0.12),
         status: "candidate",
         createdAt: now,
         updatedAt: now,
@@ -200,7 +205,7 @@ export class LearningStore {
         candidate.trigger,
         JSON.stringify(candidate.procedure),
         JSON.stringify(candidate.evidenceEpisodeIds),
-        candidate.confidence,
+        0,
         candidate.status,
         null,
         null,
@@ -245,13 +250,28 @@ export class LearningStore {
   ): Promise<LearningCandidate> {
     const candidate = this.getCandidate(workspaceRoot, candidateId);
     if (candidate.status === "rejected") throw new Error("Rejected learning candidates cannot be promoted.");
+    if (candidate.status === "promoted") return candidate;
     const note = validationNote.trim();
     if (!note) throw new Error("Promotion requires a validation note describing current evidence or tests.");
+    this.assertSuccessfulEvidence(workspaceRoot, candidate.evidenceEpisodeIds);
     const slug = skillSlug(candidate.title);
     const relative = `.agents/skills/${slug}/SKILL.md`;
     const absolute = path.join(workspaceRoot, ...relative.split("/"));
+    const skill = renderSkill(candidate);
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeFile(absolute, renderSkill(candidate), { mode: 0o644 });
+    try {
+      await writeFile(absolute, skill, { mode: 0o644, flag: "wx" });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existing = await readFile(absolute, "utf8");
+      if (existing !== skill) {
+        throw new Error(
+          `Refusing to overwrite existing project skill: ${relative}. Choose a distinct candidate title or review the existing skill.`,
+        );
+      }
+      // An identical file can be left behind by a crash between the skill
+      // write and the database update. Treat that as an idempotent retry.
+    }
 
     const database = openDatabase(this.stateDir);
     try {
@@ -265,6 +285,28 @@ export class LearningStore {
       database.close();
     }
     return this.getCandidate(workspaceRoot, candidateId);
+  }
+
+  private assertSuccessfulEvidence(workspaceRoot: string, evidenceEpisodeIds: string[]): void {
+    if (evidenceEpisodeIds.length === 0) {
+      throw new Error("Promotion requires at least one successful evidence episode.");
+    }
+    const database = openDatabase(this.stateDir);
+    try {
+      const placeholders = evidenceEpisodeIds.map(() => "?").join(",");
+      const rows = database.sqlite.prepare(`
+        select id, success from learning_episodes
+        where workspace_root = ? and id in (${placeholders})
+      `).all(workspaceRoot, ...evidenceEpisodeIds) as Array<{ id: string; success: number }>;
+      if (rows.length !== evidenceEpisodeIds.length) {
+        throw new Error("Promotion evidence no longer exists in the current workspace learning store.");
+      }
+      if (rows.some((row) => row.success !== 1)) {
+        throw new Error("Promotion evidence must consist only of successful episodes.");
+      }
+    } finally {
+      database.close();
+    }
   }
 
   reject(workspaceRoot: string, candidateId: string, note = ""): LearningCandidate {
@@ -352,7 +394,6 @@ function rowToCandidate(row: LearningCandidateRow): LearningCandidate {
     trigger: row.trigger,
     procedure: JSON.parse(row.procedure_json) as string[],
     evidenceEpisodeIds: JSON.parse(row.evidence_json) as string[],
-    confidence: row.confidence,
     status: row.status,
     validationNote: row.validation_note ?? undefined,
     skillPath: row.skill_path ?? undefined,
@@ -446,7 +487,7 @@ function renderSkill(candidate: LearningCandidate): string {
     "",
     `# ${candidate.title}`,
     "",
-    "This skill was promoted from verified DevSpace learning evidence.",
+    "This skill was promoted from verified Synrex learning evidence.",
     "",
     "## Procedure",
     "",

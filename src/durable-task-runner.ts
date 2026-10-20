@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { createWriteStream } from "node:fs";
+import { createWriteStream, existsSync } from "node:fs";
 import { readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import path from "node:path";
 import { resolveShellCommand } from "./process-platform.js";
 import { pruneRunStore } from "./compact-runtime/retention.js";
 import type { DurableTaskState, DurableTaskStatus } from "./durable-task-model.js";
@@ -13,6 +14,7 @@ export interface DurableTaskRequest {
   taskId: string;
   runId: string;
   workspaceId: string;
+  requestId?: string;
   unitName?: string;
   command: string;
   cwd: string;
@@ -26,6 +28,10 @@ export interface DurableTaskRequest {
   startedAt: string;
   ttlMs: number | null;
   env: Record<string, string>;
+}
+
+export interface DurableTaskRunnerOptions {
+  writeTaskState?: (taskPath: string, value: DurableTaskState) => Promise<void>;
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
@@ -58,7 +64,10 @@ function countNewlines(buffer: Buffer): number {
   return total;
 }
 
-export async function runDurableTask(requestPath: string): Promise<number> {
+export async function runDurableTask(
+  requestPath: string,
+  options: DurableTaskRunnerOptions = {},
+): Promise<number> {
   const request = JSON.parse(await readFile(requestPath, "utf8")) as DurableTaskRequest;
   await unlink(requestPath).catch(() => undefined);
 
@@ -72,8 +81,11 @@ export async function runDurableTask(requestPath: string): Promise<number> {
   let requestedSignal: NodeJS.Signals | undefined;
   let digest: string | undefined;
   let outputEnded = false;
+  let outputBackpressured = false;
   let stateWriteChain = Promise.resolve();
   const output = createWriteStream(request.outputPath, { flags: "a", mode: 0o600 });
+  const outputSources: Array<{ pause(): unknown; resume(): unknown }> = [];
+  const cancelPath = path.join(path.dirname(request.taskPath), "cancel.requested");
 
   const state = async (
     status: DurableTaskStatus,
@@ -89,6 +101,7 @@ export async function runDurableTask(requestPath: string): Promise<number> {
       lastUpdatedAt: new Date(now).toISOString(),
       ttlMs: request.ttlMs,
       workspaceId: request.workspaceId,
+      requestId: request.requestId,
       runId: request.runId,
       command: request.command,
       cwd: request.cwd,
@@ -102,18 +115,31 @@ export async function runDurableTask(requestPath: string): Promise<number> {
       outputLines: bytes === 0 ? 0 : newlines + (lastByte === 0x0a ? 0 : 1),
       ...extra,
     } satisfies DurableTaskState;
-    stateWriteChain = stateWriteChain.then(() => writeJsonAtomic(request.taskPath, value));
-    await stateWriteChain;
+    const writeTaskState = options.writeTaskState ?? writeJsonAtomic;
+    const writeAttempt = stateWriteChain
+      .catch(() => undefined)
+      .then(() => writeTaskState(request.taskPath, value));
+    stateWriteChain = writeAttempt.catch(() => undefined);
+    await writeAttempt;
   };
 
   const append = (chunk: Buffer): void => {
     if (chunk.length === 0 || outputEnded) return;
-    output.write(chunk);
+    const accepted = output.write(chunk);
     hash.update(chunk);
     bytes += chunk.length;
     newlines += countNewlines(chunk);
     lastByte = chunk[chunk.length - 1] ?? lastByte;
     lastActivityAtMs = Date.now();
+    if (!accepted && !outputBackpressured) {
+      outputBackpressured = true;
+      for (const source of outputSources) source.pause();
+      output.once("drain", () => {
+        outputBackpressured = false;
+        if (outputEnded) return;
+        for (const source of outputSources) source.resume();
+      });
+    }
   };
 
   const endOutput = async (): Promise<void> => {
@@ -130,6 +156,43 @@ export async function runDurableTask(requestPath: string): Promise<number> {
   };
 
   try {
+    if (existsSync(cancelPath)) {
+      await endOutput();
+      const finishedAtMs = Date.now();
+      const finishedAt = new Date(finishedAtMs).toISOString();
+      const message = "Task cancelled before command launch.";
+      await writeJsonAtomic(request.metaPath, {
+        schemaVersion: 1,
+        runId: request.runId,
+        command: request.command,
+        cwd: request.cwd,
+        root: request.root,
+        startedAt: request.startedAt,
+        finishedAt,
+        durationMs: Math.max(0, finishedAtMs - (Number.isFinite(startedAtMs) ? startedAtMs : finishedAtMs)),
+        isError: true,
+        exitCode: null,
+        signal: "SIGTERM",
+        outputBytes: 0,
+        outputLines: 0,
+        sha256: finalHash(),
+        outputPath: request.outputPath,
+        logError: null,
+        recoveredUpstreamFullOutput: false,
+        upstreamFullOutputPath: null,
+      });
+      await state("cancelled", {
+        statusMessage: message,
+        finishedAt,
+        exitCode: null,
+        signal: "SIGTERM",
+        outputBytes: 0,
+        outputLines: 0,
+      });
+      await writeCompletionNotification(request, "cancelled", message).catch(() => undefined);
+      await unlink(request.activePath).catch(() => undefined);
+      return 143;
+    }
     await state("working", { statusMessage: "Starting command." });
     const shell = resolveShellCommand(request.command, process.platform, request.env);
     const { spawn } = await import("node:child_process");
@@ -140,6 +203,8 @@ export async function runDurableTask(requestPath: string): Promise<number> {
       windowsHide: true,
     });
     childPid = child.pid;
+    if (child.stdout) outputSources.push(child.stdout);
+    if (child.stderr) outputSources.push(child.stderr);
     child.stdout?.on("data", (chunk: Buffer) => append(chunk));
     child.stderr?.on("data", (chunk: Buffer) => append(chunk));
 

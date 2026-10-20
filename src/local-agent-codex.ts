@@ -110,7 +110,7 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
 
   async initialize(): Promise<void> {
     await this.rpc.request("initialize", {
-      clientInfo: { name: "devspace", title: "DevSpace", version: DEVSPACE_VERSION },
+      clientInfo: { name: "devspace", title: "Synrex", version: DEVSPACE_VERSION },
       capabilities: {},
     });
     this.rpc.notify("initialized");
@@ -154,9 +154,9 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
             code: "PROVIDER_EXECUTION_ERROR",
             provider: this.provider,
             operation: "run",
-            retryable: false,
+            retryable: isRetryableCodexTurnFailure(parsed.failure),
             cause: completed.event.params,
-            message: "Codex agent turn failed.",
+            message: `Codex agent turn failed: ${parsed.failure}`,
           });
         }
         if (!parsed.finalResponse.trim()) {
@@ -207,6 +207,10 @@ export class CodexAppServerRuntime implements LocalAgentRuntime {
     })();
     return this.closePromise;
   }
+}
+
+function isRetryableCodexTurnFailure(message: string): boolean {
+  return /stream disconnected|error sending request|connection (?:reset|closed|refused)|ECONN(?:RESET|REFUSED)|timed? out|timeout|temporar(?:y|ily) unavailable|rate limit|too many requests|\b429\b|\b5\d\d\b/i.test(message);
 }
 
 async function waitForProcessExit(

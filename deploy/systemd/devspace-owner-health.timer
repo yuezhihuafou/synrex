@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic DevSpace owner runtime verification
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+RandomizedDelaySec=60s
+Unit=devspace-owner-health.service
+
+[Install]
+WantedBy=timers.target

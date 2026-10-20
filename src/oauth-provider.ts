@@ -10,7 +10,13 @@ import type {
   OAuthTokens,
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
-import { SqliteOAuthClientsStore, SqliteOAuthStore } from "./oauth-store.js";
+import {
+  SqliteOAuthClientsStore,
+  SqliteOAuthStore,
+  type PersistedAuthorizationCodeRecord,
+  type PersistedRefreshReplayRecord,
+} from "./oauth-store.js";
+import { oauthEnrollmentAllowed, closeOAuthEnrollmentAfterGrant, recordOAuthEnrollmentGrant } from "./oauth-enrollment.js";
 
 export interface OAuthConfig {
   ownerToken: string;
@@ -21,13 +27,8 @@ export interface OAuthConfig {
   allowedRedirectHosts: string[];
 }
 
-interface AuthorizationCodeRecord {
-  clientId: string;
-  params: AuthorizationParams;
-  expiresAtMs: number;
-}
-
 const CODE_TTL_MS = 5 * 60 * 1000;
+const REFRESH_REPLAY_WINDOW_SECONDS = 5 * 60;
 
 function randomToken(): string {
   return randomBytes(32).toString("base64url");
@@ -57,7 +58,7 @@ function formHtml(params: {
   fields: Record<string, string | undefined>;
 }): string {
   const scopeText = params.scopes.length > 0 ? params.scopes.join(" ") : "devspace";
-  const resourceText = params.resource?.href ?? "DevSpace MCP endpoint";
+  const resourceText = params.resource?.href ?? "Synrex MCP endpoint";
   const error = params.error
     ? `<p class="error">${htmlEscape(params.error)}</p>`
     : "";
@@ -71,7 +72,7 @@ function formHtml(params: {
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Connect DevSpace</title>
+    <title>Connect Synrex</title>
     <style>
       body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; background: #0f172a; color: #e2e8f0; }
       main { max-width: 440px; margin: 12vh auto; padding: 32px; background: #111827; border: 1px solid #334155; border-radius: 18px; box-shadow: 0 24px 80px rgba(0,0,0,.35); }
@@ -89,7 +90,7 @@ function formHtml(params: {
   </head>
   <body>
     <main>
-      <h1>Connect DevSpace</h1>
+      <h1>Connect Synrex</h1>
       <p class="warning">Only approve this if you are intentionally connecting your own ChatGPT or MCP client to this local machine.</p>
       ${error}
       <dl>
@@ -101,7 +102,7 @@ function formHtml(params: {
 ${hiddenFields}
         <label for="owner_token">Owner password</label>
         <input id="owner_token" name="owner_token" type="password" autocomplete="current-password" autofocus required />
-        <button type="submit">Authorize DevSpace</button>
+        <button type="submit">Authorize Synrex</button>
       </form>
     </main>
   </body>
@@ -114,7 +115,8 @@ function requestedScopesAllowed(requested: string[], supported: string[]): boole
 
 export class SingleUserOAuthProvider implements OAuthServerProvider {
   readonly clientsStore: OAuthRegisteredClientsStore;
-  private readonly codes = new Map<string, AuthorizationCodeRecord>();
+  private ownerFailures = 0;
+  private ownerFailuresResetAt = 0;
   private readonly oauthStore: SqliteOAuthStore;
   private readonly resourceServerUrl: URL;
   private readonly allowedResourceUrls: Set<string>;
@@ -122,14 +124,18 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   constructor(
     private readonly config: OAuthConfig,
     resourceServerUrl: URL,
-    stateDir: string,
+    private readonly stateDir: string,
+    private readonly onRejected?: (phase: string, reason: string) => void,
   ) {
     this.resourceServerUrl = resourceUrlFromServerUrl(resourceServerUrl);
     this.allowedResourceUrls = new Set(
       config.allowedResourceUrls.map((url) => resourceUrlFromServerUrl(url).href),
     );
     this.oauthStore = new SqliteOAuthStore(stateDir);
-    this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts);
+    this.clientsStore = new SqliteOAuthClientsStore(this.oauthStore, config.allowedRedirectHosts,
+      () => this.onRejected?.("client", "unknown_client"),
+      () => oauthEnrollmentAllowed(this.stateDir),
+      () => this.onRejected?.("client", "owner_enrollment_locked"));
   }
 
   async authorize(
@@ -137,10 +143,22 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     params: AuthorizationParams,
     res: Response,
   ): Promise<void> {
+    // An enrollment lock protects *new* client registrations. A previously
+    // registered client may re-authorize with the Owner password even after
+    // losing its local tokens (for example after a host reinstall). Otherwise
+    // the lock turns ordinary self-hosted reconnects into an operator outage.
+    if (!oauthEnrollmentAllowed(this.stateDir) && !this.oauthStore.getClient(client.client_id)) {
+      this.onRejected?.("authorize", "owner_enrollment_locked");
+      res.status(403).setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.send("New Synrex OAuth connections are locked. The machine owner can open /oauth/recovery to restore enrollment remotely.");
+      return;
+    }
     if (!params.resource || !this.isResourceAllowed(params.resource)) {
+      this.onRejected?.("authorize", "resource_missing_or_not_allowed");
       throw new InvalidRequestError("Invalid or missing OAuth resource");
     }
     if (!requestedScopesAllowed(params.scopes ?? [], this.config.scopes)) {
+      this.onRejected?.("authorize", "unsupported_scope");
       throw new InvalidRequestError("Requested scope is not supported");
     }
 
@@ -157,8 +175,20 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       return;
     }
 
+    const now = Date.now();
+    if (now >= this.ownerFailuresResetAt) {
+      this.ownerFailures = 0;
+      this.ownerFailuresResetAt = now + 60_000;
+    }
+    if (this.ownerFailures >= 5) {
+      res.setHeader("Retry-After", String(Math.ceil((this.ownerFailuresResetAt - now) / 1000)));
+      res.status(429).send("Too many incorrect passwords. Retry in one minute.");
+      return;
+    }
     const providedToken = String(res.req.body?.owner_token ?? "");
     if (!safeEquals(providedToken, this.config.ownerToken)) {
+      this.ownerFailures++;
+      this.onRejected?.("authorize", "owner_token_mismatch");
       res.status(401).setHeader("Content-Type", "text/html; charset=utf-8");
       res.send(
         formHtml({
@@ -173,9 +203,12 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     }
 
     const code = `code-${randomUUID()}`;
-    this.codes.set(code, {
+    this.oauthStore.saveAuthorizationCode(hashToken(code), {
       clientId: client.client_id,
-      params,
+      redirectUri: params.redirectUri,
+      codeChallenge: params.codeChallenge,
+      scopes: params.scopes ?? this.config.scopes,
+      resource: params.resource?.href,
       expiresAtMs: Date.now() + CODE_TTL_MS,
     });
 
@@ -190,7 +223,7 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     authorizationCode: string,
   ): Promise<string> {
     const record = this.validCodeRecord(client, authorizationCode);
-    return record.params.codeChallenge;
+    return record.codeChallenge;
   }
 
   async exchangeAuthorizationCode(
@@ -200,16 +233,29 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     redirectUri?: string,
     resource?: URL,
   ): Promise<OAuthTokens> {
+    // A short-lived authorization code represents a grant already approved
+    // using the Owner password. Closing the enrollment window must not make
+    // an in-flight code exchange fail; the code is single-use and expires.
     const record = this.validCodeRecord(client, authorizationCode);
-    if (redirectUri && redirectUri !== record.params.redirectUri) {
+    if (redirectUri && redirectUri !== record.redirectUri) {
+      this.onRejected?.("authorization_code", "redirect_uri_mismatch");
       throw new InvalidGrantError("redirect_uri does not match the authorization request");
     }
-    if (resource && (!record.params.resource || !sameResource(resource, record.params.resource))) {
+    const savedResource = record.resource ? new URL(record.resource) : undefined;
+    if (!savedResource || !this.isResourceAllowed(savedResource)
+      || (resource && !sameResource(resource, savedResource))) {
+      this.onRejected?.("authorization_code", "resource_mismatch");
       throw new InvalidGrantError("Invalid resource");
     }
 
-    this.codes.delete(authorizationCode);
-    return this.issueTokens(client.client_id, record.params.scopes ?? this.config.scopes, record.params.resource);
+    const consumed = this.oauthStore.consumeAuthorizationCode(hashToken(authorizationCode));
+    if (!consumed || consumed.clientId !== client.client_id) {
+      this.onRejected?.("authorization_code", "code_already_used_or_expired");
+      throw new InvalidGrantError("Invalid authorization code");
+    }
+    const tokens = this.issueTokens(client.client_id, consumed.scopes, savedResource);
+    recordOAuthEnrollmentGrant(this.stateDir, hashToken(tokens.access_token));
+    return tokens;
   }
 
   async exchangeRefreshToken(
@@ -220,20 +266,42 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   ): Promise<OAuthTokens> {
     const refreshTokenHash = hashToken(refreshToken);
     const record = this.oauthStore.getRefreshToken(refreshTokenHash);
-    if (!record || record.clientId !== client.client_id || record.expiresAt < Math.floor(Date.now() / 1000)) {
+    const replay = record ? undefined : this.oauthStore.getRefreshReplay(refreshTokenHash);
+    const now = Math.floor(Date.now() / 1000);
+    if (!record && (!replay || replay.replayUntil < now)) {
+      this.onRejected?.("refresh", "token_missing_or_expired");
       throw new InvalidGrantError("Invalid refresh token");
     }
-    const recordedResource = record.resource ? new URL(record.resource) : undefined;
+    const storedClientId = record?.clientId ?? replay?.clientId;
+    const storedScopes = record?.scopes ?? replay?.scopes;
+    const storedResource = record?.resource ?? replay?.resource;
+    const storedExpiry = record?.expiresAt ?? replay?.refreshExpiresAt;
+    if (!storedClientId || !storedScopes || storedExpiry === undefined || storedExpiry < now) {
+      this.onRejected?.("refresh", "token_missing_or_expired");
+      throw new InvalidGrantError("Invalid refresh token");
+    }
+    if (storedClientId !== client.client_id) {
+      this.onRejected?.("refresh", "client_mismatch");
+      throw new InvalidGrantError("Invalid refresh token");
+    }
+    const recordedResource = storedResource ? new URL(storedResource) : undefined;
     if (!recordedResource || !this.isResourceAllowed(recordedResource)) {
+      this.onRejected?.("refresh", "resource_no_longer_allowed");
       throw new InvalidGrantError("Invalid resource");
     }
     if (resource && !sameResource(resource, recordedResource)) {
+      this.onRejected?.("refresh", "resource_mismatch");
       throw new InvalidGrantError("Invalid resource");
     }
 
-    const requestedScopes = scopes ?? record.scopes;
-    if (!requestedScopes.every((scope) => record.scopes.includes(scope))) {
+    const requestedScopes = scopes ?? storedScopes;
+    if (!requestedScopes.every((scope) => storedScopes.includes(scope))) {
+      this.onRejected?.("refresh", "scope_escalation");
       throw new AccessDeniedError("Refresh token cannot grant requested scopes");
+    }
+
+    if (replay) {
+      return this.refreshReplayTokens(refreshTokenHash, replay);
     }
 
     return this.issueTokens(
@@ -247,9 +315,11 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   async verifyAccessToken(token: string): Promise<AuthInfo> {
     const record = this.oauthStore.getAccessToken(hashToken(token));
     if (!record || record.expiresAt < Math.floor(Date.now() / 1000)) {
+      this.onRejected?.("bearer", "token_missing_or_expired");
       throw new InvalidTokenError("Invalid or expired access token");
     }
 
+    closeOAuthEnrollmentAfterGrant(this.stateDir, hashToken(token));
     return {
       token,
       clientId: record.clientId,
@@ -279,9 +349,10 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private validCodeRecord(
     client: OAuthClientInformationFull,
     authorizationCode: string,
-  ): AuthorizationCodeRecord {
-    const record = this.codes.get(authorizationCode);
+  ): PersistedAuthorizationCodeRecord {
+    const record = this.oauthStore.getAuthorizationCode(hashToken(authorizationCode));
     if (!record || record.clientId !== client.client_id || record.expiresAtMs < Date.now()) {
+      this.onRejected?.("authorization_code", "code_missing_or_expired");
       throw new InvalidGrantError("Invalid authorization code");
     }
     return record;
@@ -294,10 +365,51 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     consumedRefreshTokenHash?: string,
   ): OAuthTokens {
     const now = Math.floor(Date.now() / 1000);
-    const accessToken = randomToken();
-    const refreshToken = randomToken();
     const accessExpiresAt = now + this.config.accessTokenTtlSeconds;
     const refreshExpiresAt = now + this.config.refreshTokenTtlSeconds;
+
+    if (consumedRefreshTokenHash) {
+      const replay: PersistedRefreshReplayRecord = {
+        clientId,
+        scopes,
+        resource: resource?.href,
+        accessExpiresAt,
+        refreshExpiresAt,
+        replayUntil: now + REFRESH_REPLAY_WINDOW_SECONDS,
+      };
+      const derived = this.oauthStore.deriveRefreshRotationTokens(consumedRefreshTokenHash, replay);
+      const saved = this.oauthStore.saveTokenPair(
+        {
+          accessTokenHash: hashToken(derived.accessToken),
+          accessToken: {
+            clientId,
+            scopes,
+            expiresAt: accessExpiresAt,
+            resource: resource?.href,
+          },
+          refreshTokenHash: hashToken(derived.refreshToken),
+          refreshToken: {
+            clientId,
+            scopes,
+            expiresAt: refreshExpiresAt,
+            resource: resource?.href,
+          },
+        },
+        consumedRefreshTokenHash,
+        replay,
+      );
+      if (saved) return tokenResponse(derived.accessToken, derived.refreshToken, scopes, this.config.accessTokenTtlSeconds);
+
+      const existingReplay = this.oauthStore.getRefreshReplay(consumedRefreshTokenHash);
+      if (existingReplay && existingReplay.replayUntil >= now) {
+        return this.refreshReplayTokens(consumedRefreshTokenHash, existingReplay);
+      }
+      this.onRejected?.("refresh", "rotation_race_or_replay");
+      throw new InvalidGrantError("Invalid refresh token");
+    }
+
+    const accessToken = randomToken();
+    const refreshToken = randomToken();
 
     const saved = this.oauthStore.saveTokenPair(
       {
@@ -319,17 +431,35 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
       consumedRefreshTokenHash,
     );
     if (!saved) {
+      this.onRejected?.("refresh", "rotation_race_or_replay");
       throw new InvalidGrantError("Invalid refresh token");
     }
 
-    return {
-      access_token: accessToken,
-      token_type: "bearer",
-      expires_in: this.config.accessTokenTtlSeconds,
-      refresh_token: refreshToken,
-      scope: scopes.join(" "),
-    };
+    return tokenResponse(accessToken, refreshToken, scopes, this.config.accessTokenTtlSeconds);
   }
+
+  private refreshReplayTokens(
+    refreshTokenHash: string,
+    replay: PersistedRefreshReplayRecord,
+  ): OAuthTokens {
+    const derived = this.oauthStore.deriveRefreshRotationTokens(refreshTokenHash, replay);
+    return tokenResponse(derived.accessToken, derived.refreshToken, replay.scopes, this.config.accessTokenTtlSeconds);
+  }
+}
+
+function tokenResponse(
+  accessToken: string,
+  refreshToken: string,
+  scopes: string[],
+  accessTokenTtlSeconds: number,
+): OAuthTokens {
+  return {
+    access_token: accessToken,
+    token_type: "bearer",
+    expires_in: accessTokenTtlSeconds,
+    refresh_token: refreshToken,
+    scope: scopes.join(" "),
+  };
 }
 
 function authorizationFormFields(

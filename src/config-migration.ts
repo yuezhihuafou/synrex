@@ -62,6 +62,7 @@ export function migrateLegacyConfig(value: unknown): DevspaceConfig {
       publicBaseUrl: legacy.publicBaseUrl,
       allowedHosts: legacy.allowedHosts,
     }),
+    cluster: undefined,
     workspaces: definedEntries({
       allowedRoots: legacy.allowedRoots,
       worktreeRoot: legacy.worktreeRoot,

@@ -24,6 +24,7 @@ import {
   parseLocalAgentRunArgs,
 } from "./local-agent-targets.js";
 import { createLocalAgentClient } from "./local-agent-client.js";
+import { routeAutoAgent } from "./local-agent-router.js";
 import { toAgentErrorPayload, type LocalAgentError } from "./local-agent-errors.js";
 import {
   formatAgentObservation,
@@ -54,15 +55,32 @@ import { expandHomePath } from "./roots.js";
 import { readReviewRef } from "./review-checkpoints.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { logEvent } from "./logger.js";
+import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
+import { inspectOAuthState } from "./oauth-diagnostics.js";
+import { getOAuthEnrollmentStatus, lockOAuthEnrollment, openOAuthEnrollmentWindow, usePasswordOnlyEnrollment } from "./oauth-enrollment.js";
 import { pruneStaleManagedWorktrees } from "./worktree-prune.js";
+import { pruneStaleWorkspaceMetadata } from "./workspace-retention.js";
+import { generateNodeJoinToken } from "./multinode/auth.js";
+import { NodeHealthMonitor } from "./multinode/health.js";
+import { localNodeRegistration } from "./multinode/local-node.js";
+import { compareToolContracts } from "./multinode/protocol.js";
+import { SqliteControlPlaneStore } from "./multinode/store.js";
+import { nodeApiUrl } from "./multinode/worker-client.js";
+import { DurableTaskManager } from "./durable-tasks.js";
+import { runWorkflowCommand } from "./workflow-cli.js";
+import { SerenaSemanticManager } from "./serena-semantic.js";
 
 type Command =
   | "serve"
   | "init"
   | "doctor"
+  | "oauth"
   | "config"
   | "worktrees"
   | "agents"
+  | "nodes"
+  | "workflow"
+  | "diagnose"
   | "show-changes"
   | "help"
   | "version";
@@ -84,7 +102,10 @@ async function main(argv: string[]): Promise<void> {
       await runInit({ force: args.includes("--force") });
       return;
     case "doctor":
-      await runDoctor();
+      await runDoctor(args.includes("--auth"));
+      return;
+    case "oauth":
+      runOAuthCommand(args);
       return;
     case "config":
       runConfigCommand(args);
@@ -95,6 +116,25 @@ async function main(argv: string[]): Promise<void> {
     case "agents":
       await runAgentsCommand(args);
       return;
+    case "nodes":
+      await runNodesCommand(args);
+      return;
+    case "workflow":
+      await runWorkflowCommand(args, loadConfig());
+      return;
+    case "diagnose": {
+      const [flag, rawMinutes, ...rest] = args;
+      if (args.length && (flag !== "--minutes" || rest.length !== 0 || !/^\d+$/.test(rawMinutes ?? ""))) {
+        throw new Error("Usage: synrex diagnose [--minutes 1-1440]");
+      }
+      const minutes = rawMinutes === undefined ? 30 : Number(rawMinutes);
+      if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
+        throw new Error("Diagnostic range must be between 1 and 1440 minutes");
+      }
+      const traces = new DiagnosticTrace(loadConfig().stateDir).read({ minutes, limit: 120 });
+      console.log(JSON.stringify({ minutes, count: traces.length, ...summarizeDiagnosticTrace(traces), events: traces }, null, 2));
+      return;
+    }
     case "show-changes":
       await runShowChanges(args);
       return;
@@ -112,9 +152,13 @@ function normalizeCommand(command: string | undefined): Command {
   if (
     command === "init"
     || command === "doctor"
+    || command === "oauth"
     || command === "config"
     || command === "worktrees"
     || command === "agents"
+    || command === "nodes"
+    || command === "workflow"
+    || command === "diagnose"
     || command === "show-changes"
   ) return command;
   if (command === "help" || command === "--help" || command === "-h") return "help";
@@ -133,10 +177,10 @@ async function ensureConfigured(): Promise<void> {
   if (!input.isTTY || !output.isTTY) {
     throw new Error(
       [
-        "DevSpace is not configured and this terminal is non-interactive.",
+        "Synrex is not configured and this terminal is non-interactive.",
         "",
         "Run:",
-        "  devspace init",
+        "  synrex init",
         "",
         "Or provide DEVSPACE_OAUTH_OWNER_TOKEN.",
       ].join("\n"),
@@ -149,16 +193,16 @@ async function ensureConfigured(): Promise<void> {
 async function runInit({ force }: { force: boolean }): Promise<void> {
   const files = loadDevspaceFiles();
   if (!force && files.configExists && files.authExists) {
-    prompts.log.info(`DevSpace is already configured at ${files.dir}`);
-    prompts.log.info("Run `devspace init --force` to update it.");
+    prompts.log.info(`Synrex is already configured at ${files.dir}`);
+    prompts.log.info("Run `synrex init --force` to update it.");
     return;
   }
 
   try {
-    prompts.intro("DevSpace setup");
+    prompts.intro("Synrex setup");
 
     const destinationAnswer = await prompts.multiselect({
-      message: "Where will you use DevSpace?",
+      message: "Where will you use Synrex?",
       options: [
         {
           value: "chatgpt",
@@ -168,7 +212,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
         {
           value: "coding-agents",
           label: "Coding Agents",
-          hint: "Use DevSpace from Codex, Claude Code, OpenCode, Pi, and similar tools.",
+          hint: "Use Synrex from Codex, Claude Code, OpenCode, Pi, and similar tools.",
         },
       ],
       initialValues: files.config.server.publicBaseUrl ? ["chatgpt"] : ["coding-agents"],
@@ -183,7 +227,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     if (useChatGpt) {
       const defaultRoots = files.config.workspaces.allowedRoots.join(", ") || process.cwd();
       const rootsAnswer = await textPrompt({
-        message: `Which project folders can DevSpace access? Press Enter to use ${defaultRoots}`,
+        message: `Which project folders can Synrex access? Press Enter to use ${defaultRoots}`,
         placeholder: defaultRoots,
         defaultValue: defaultRoots,
         validate: (value) => value?.trim() ? undefined : "Enter at least one project root.",
@@ -267,12 +311,12 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
       `Coding Agents: ${selectedProviders.join(", ")}`,
       ...(publicBaseUrl ? [`ChatGPT connection URL: ${publicBaseUrl}/mcp`] : []),
     ];
-    prompts.note(lines.join("\n"), "DevSpace is ready");
+    prompts.note(lines.join("\n"), "Synrex is ready");
     if (useChatGpt) {
       prompts.note(
         [
           `Owner password: ${auth.ownerToken}`,
-          "Use this when ChatGPT asks you to approve DevSpace access.",
+          "Use this when ChatGPT asks you to approve Synrex access.",
         ].join("\n"),
         "Owner password",
       );
@@ -288,7 +332,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
       );
     }
     const nextSteps = [
-      useChatGpt ? "Run `devspace serve`, then connect ChatGPT." : undefined,
+      useChatGpt ? "Run `synrex serve`, then connect ChatGPT." : undefined,
       useCodingAgents ? "Run the skill command above before delegating from your Coding Agents." : undefined,
     ].filter(Boolean).join(" ");
     prompts.outro(nextSteps);
@@ -317,10 +361,11 @@ async function serve(): Promise<void> {
 
   const config = loadConfig();
   await runStartupWorktreeCleanup(config);
+  await runStartupMetadataCleanup(config);
   const { createServer } = await import("./server.js");
-  const { app, close, localAgentProviders } = createServer(config);
+  const { app, close, localAgentProviders, localNode } = createServer(config);
   const httpServer = app.listen(config.port, config.host, () => {
-    console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
+    console.log(`synrex listening on http://${config.host}:${config.port}/mcp`);
     console.log(`public base url: ${config.publicBaseUrl}`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`allowed hosts: ${config.allowedHosts.join(", ")}`);
@@ -329,6 +374,8 @@ async function serve(): Promise<void> {
     }
     console.log("auth: Owner password approval required");
     console.log(`logging: ${config.logging.level} ${config.logging.format}`);
+    console.log(`cluster: ${config.cluster.role}${config.cluster.gatewayUrl ? ` -> ${config.cluster.gatewayUrl}` : ""}`);
+    console.log(`node: ${localNode.alias ? `${localNode.alias} (${localNode.id})` : localNode.id}`);
     console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
   });
 
@@ -341,7 +388,7 @@ async function serve(): Promise<void> {
   };
   const handleShutdown = () => {
     void shutdown().catch((error) => {
-      console.error("devspace shutdown failed", error);
+      console.error("synrex shutdown failed", error);
       process.exit(1);
     });
   };
@@ -384,7 +431,27 @@ async function runStartupWorktreeCleanup(config: ServerConfig): Promise<void> {
   }
 }
 
-async function runDoctor(): Promise<void> {
+async function runStartupMetadataCleanup(config: ServerConfig): Promise<void> {
+  try {
+    const cleanup = await pruneStaleWorkspaceMetadata(config);
+    if (cleanup.isErr()) {
+      logEvent(config.logging, "warn", "workspace_metadata_cleanup_failed", {
+        error: cleanup.error.message,
+        operation: cleanup.error.operation,
+      });
+      return;
+    }
+    if (cleanup.value.sessions > 0 || cleanup.value.conversationBindings > 0) {
+      logEvent(config.logging, "info", "workspace_metadata_cleanup", { ...cleanup.value });
+    }
+  } catch (error) {
+    logEvent(config.logging, "warn", "workspace_metadata_cleanup_failed", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
   const files = loadDevspaceFiles();
   console.log(`Config dir: ${files.dir}`);
   console.log(`Config file: ${files.configExists ? files.configPath : "missing"}`);
@@ -402,6 +469,38 @@ async function runDoctor(): Promise<void> {
     console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
+    console.log(`Cluster role: ${config.cluster.role}`);
+    if (config.cluster.gatewayUrl) console.log(`Cluster gateway: ${config.cluster.gatewayUrl}`);
+    if (!includeAuthDiagnostics) {
+      const nodeStore = new SqliteControlPlaneStore(config.stateDir);
+      try {
+        const local = nodeStore.listNodes().find((node) => node.kind === "local");
+        if (local) console.log(`Execution node: ${local.alias ? `${local.alias} (${local.id})` : local.id}`);
+        console.log(`Known execution nodes: ${nodeStore.listNodes().length}`);
+      } finally {
+        nodeStore.close();
+      }
+    }
+    if (includeAuthDiagnostics) {
+      const enrollment = getOAuthEnrollmentStatus(config.stateDir);
+      console.log(`OAuth enrollment: ${enrollment.locked ? (enrollment.acceptingNewConnections ? "temporary window open" : "locked") : "password-gated (no enrollment timer)"}`);
+      const snapshot = inspectOAuthState(config.stateDir);
+      console.log(`OAuth state path: ${config.stateDir}`);
+      console.log(`OAuth database: ${snapshot.databaseExists ? "present" : "missing"}`);
+      console.log(`OAuth registered clients: ${snapshot.clients}`);
+      console.log(`OAuth active access tokens: ${snapshot.activeAccessTokens}`);
+      console.log(`OAuth active refresh tokens: ${snapshot.activeRefreshTokens}`);
+      console.log(`OAuth pending authorization codes: ${snapshot.activeAuthorizationCodes}`);
+      if (snapshot.soonestRefreshExpiry !== undefined) {
+        console.log(`OAuth earliest refresh expiry (UTC): ${new Date(snapshot.soonestRefreshExpiry * 1000).toISOString()}`);
+      }
+      if (snapshot.clients > 0 && snapshot.activeRefreshTokens === 0) {
+        console.warn("OAuth warning: no usable refresh tokens remain in this state database; an existing client may require re-authorization.");
+      }
+      if (config.stateDir.includes(".devspace-dev")) {
+        console.warn("OAuth QA warning: this is a development state directory, not the production OAuth database.");
+      }
+    }
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
       getLocalAgentProviderAvailabilitySnapshot(),
@@ -411,6 +510,34 @@ async function runDoctor(): Promise<void> {
   } catch (error) {
     console.log(`Config status: ${error instanceof Error ? error.message : String(error)}`);
   }
+}
+
+function runOAuthCommand(args: string[]): void {
+  const [subcommand, ...rest] = args;
+  const stateDir = loadConfig().stateDir;
+  if (subcommand === "password-only" && rest.length === 0) {
+    usePasswordOnlyEnrollment(stateDir);
+    console.log("Password-gated OAuth enabled without enrollment windows; existing tokens preserved.");
+    return;
+  }
+  if (subcommand === "lock" && rest.length === 0) {
+    lockOAuthEnrollment(stateDir);
+    console.log("OAuth new-client enrollment locked; existing access and refresh tokens remain valid.");
+    return;
+  }
+  if (subcommand === "window" && (rest.length === 1 || (rest.length === 2 && rest[1] === "--once"))) {
+    const minutes = Number(rest[0]);
+    const until = openOAuthEnrollmentWindow(stateDir, minutes, Date.now(), { closeAfterGrant: rest[1] === "--once" });
+    console.log(`OAuth new-client enrollment open until ${new Date(until).toISOString()} (automatically closes).`);
+    return;
+  }
+  if (subcommand === "status" && rest.length === 0) {
+    const status = getOAuthEnrollmentStatus(stateDir);
+    console.log(`OAuth enrollment: ${status.locked ? (status.acceptingNewConnections ? "temporary window open" : "locked") : "password-gated (no enrollment timer)"}`);
+    if (status.allowUntilMs) console.log(`Window expires: ${new Date(status.allowUntilMs).toISOString()}`);
+    return;
+  }
+  throw new Error("Usage: synrex oauth password-only | synrex oauth lock | synrex oauth window <minutes 1-15> | synrex oauth status");
 }
 
 function runConfigCommand(args: string[]): void {
@@ -426,7 +553,7 @@ function runConfigCommand(args: string[]): void {
     throw new Error(`Unknown config command: ${subcommand}`);
   }
   if (key !== "publicBaseUrl") {
-    throw new Error("Only `devspace config set publicBaseUrl <url|null>` is supported right now.");
+    throw new Error("Only `synrex config set publicBaseUrl <url|null>` is supported right now.");
   }
 
   const value = rest.join(" ").trim();
@@ -444,7 +571,7 @@ function runConfigCommand(args: string[]): void {
 async function runWorktreesCommand(args: string[]): Promise<void> {
   const [subcommand, ...extra] = args;
   if (subcommand !== "prune" || extra.length > 0) {
-    throw new Error("Usage: devspace worktrees prune");
+    throw new Error("Usage: synrex worktrees prune");
   }
 
   const cleanup = await pruneStaleManagedWorktrees(loadConfig());
@@ -473,29 +600,342 @@ async function runWorktreesCommand(args: string[]): Promise<void> {
 function printHelp(): void {
   console.log(
     [
-      "DevSpace",
+      "Synrex",
       "",
       "Usage:",
       "  devspace                 Run first-time setup if needed, then start the server",
-      "  devspace serve           Start the server",
-      "  devspace init            Create or update ~/.devspace/config.jsonc and auth.json",
-      "  devspace doctor          Show config, runtime, and native dependency status",
-      "  devspace config get      Print persisted config",
-      "  devspace config set publicBaseUrl <url|null>",
-      "  devspace worktrees prune Prune managed worktrees unused for 3 days",
-      "  devspace show-changes <review-ref> [--json]",
-      "  devspace agents ls       List subagent sessions",
-      "  devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] <prompt>",
-      "  devspace agents continue <id> [--model <model>] [--effort <level>] <prompt>",
-      "  devspace agents show <id>",
-      "  devspace agents daemon <status|stop|logs>",
-      "  devspace -v, --version   Print the installed version",
+      "  synrex serve           Start the server",
+      "  synrex init            Create or update ~/.devspace/config.jsonc and auth.json",
+      "  synrex doctor          Show config, runtime, and native dependency status",
+      "  synrex doctor --auth   Show OAuth state and new-client enrollment status",
+      "  synrex oauth lock      Deny new OAuth clients and grants; keep existing tokens",
+      "  synrex oauth window 10 Temporarily allow owner-authorized new connections (1-15 min)",
+      "  synrex oauth status    Show current OAuth enrollment policy",
+      "  synrex config get      Print persisted config",
+      "  synrex config set publicBaseUrl <url|null>",
+      "  synrex worktrees prune Prune managed worktrees unused for 3 days",
+      "  synrex show-changes <review-ref> [--json]",
+      "  synrex workflow list [--workspace <path>]  List resumable GPT coding workflows",
+      "  synrex workflow show <workflow-id> [--workspace <path>]",
+      "  synrex workflow create [--workspace <path>] < workflow.json",
+      "  synrex workflow checkpoint <workflow-id> [--workspace <path>] < checkpoint.json",
+      "  synrex diagnose [--minutes 30]  Inspect small, local, redacted MCP/tool timeline",
+      "  synrex agents ls       List subagent sessions",
+      "  synrex agents run <profile-or-provider|auto> [--model <model>] [--effort <level>] <prompt>",
+      "  synrex agents continue <id> [--model <model>] [--effort <level>] <prompt>",
+      "  synrex agents show <id>",
+      "  synrex agents daemon <status|stop|logs>",
+      "  synrex nodes coordinator [--json]   Host the lightweight shared directory",
+      "  synrex nodes connect <coordinator-url> --token <join-token> [--alias <name>] [--json]",
+      "  synrex nodes gateway [--json]       Legacy alias for coordinator",
+      "  synrex nodes join <gateway-url> --token <join-token> [--alias <name>] [--json]  Legacy alias",
+      "  synrex nodes list [--json]",
+      "  synrex nodes drain <node-id-or-alias>",
+      "  synrex nodes undrain <node-id-or-alias>",
+      "  synrex nodes alias <name>",
+      "  synrex nodes pin <path-prefix> <node-id-or-alias> [--prefer]",
+      "  synrex nodes pins [--json]",
+      "  synrex nodes unpin <rule-id>",
+      "  synrex nodes join-token",
+      "  synrex -v, --version   Print the installed version",
       "",
       "For temporary tunnels:",
-      "  devspace config set publicBaseUrl https://example.trycloudflare.com",
-      "  devspace serve",
+      "  synrex config set publicBaseUrl https://example.trycloudflare.com",
+      "  synrex serve",
     ].join("\n"),
   );
+}
+
+async function runNodesCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  const { args: commandArgs, json } = extractJsonOption(rest);
+  switch (subcommand) {
+    case "coordinator":
+      await configureGateway(commandArgs, json, "coordinator");
+      return;
+    case "gateway":
+      await configureGateway(commandArgs, json, "gateway");
+      return;
+    case "connect":
+      await joinGateway(commandArgs, json, "peer");
+      return;
+    case "join":
+      await joinGateway(commandArgs, json, "worker");
+      return;
+    case "list":
+    case "ls":
+      listNodes(commandArgs, json);
+      return;
+    case "drain":
+      setNodeDrain(commandArgs, true, json);
+      return;
+    case "undrain":
+      setNodeDrain(commandArgs, false, json);
+      return;
+    case "alias":
+      setLocalNodeAlias(commandArgs, json);
+      return;
+    case "pin":
+      pinWorkspacePath(commandArgs, json);
+      return;
+    case "pins":
+      listPlacementRules(commandArgs, json);
+      return;
+    case "unpin":
+      unpinWorkspacePath(commandArgs, json);
+      return;
+    case "join-token":
+      printJoinToken(commandArgs, json);
+      return;
+    default:
+      throw new Error("Usage: synrex nodes <coordinator|connect|gateway|join|list|drain|undrain|alias|pin|pins|unpin|join-token> ...");
+  }
+}
+
+async function configureGateway(args: string[], json: boolean, role: "gateway" | "coordinator"): Promise<void> {
+  if (args.length > 0) throw new Error(`Usage: synrex nodes ${role} [--json]`);
+  const files = loadDevspaceFiles();
+  const joinToken = files.auth.nodeJoinToken ?? generateNodeJoinToken();
+  writeDevspaceAuth({ ...files.auth, nodeJoinToken: joinToken });
+  setDevspaceConfigValue(["cluster", "role"], role);
+  const outputValue = {
+    role,
+    // Explicit join-token retrieval remains available via "nodes join-token".
+    ...(role === "gateway" ? { joinToken } : {}),
+    configPath: files.configPath,
+    authPath: files.authPath,
+  };
+  if (json) {
+    printJson(outputValue);
+    return;
+  }
+  console.log(`Configured the ${role === "coordinator" ? "shared directory" : "legacy gateway"} on this complete Synrex runtime.`);
+  if (role === "gateway") console.log(`Join token: ${joinToken}`);
+  else console.log("Retrieve the join token explicitly with `synrex nodes join-token`.");
+  console.log("Restart Synrex, then run `synrex nodes connect <coordinator-url> --token <join-token>` on another peer.");
+}
+
+async function joinGateway(args: string[], json: boolean, role: "worker" | "peer"): Promise<void> {
+  const parsed = parseNodeJoinArgs(args);
+  const gatewayUrl = normalizeGatewayUrl(parsed.gatewayUrl);
+  const config = loadConfig();
+  const store = new SqliteControlPlaneStore(config.stateDir);
+  const semantic = new SerenaSemanticManager();
+  try {
+    const durable = new DurableTaskManager();
+    const registration = localNodeRegistration(config, {
+      semanticAvailable: semantic.available,
+      durableTasksAvailable: durable.available,
+    });
+    if (parsed.alias) registration.alias = parsed.alias;
+    const localNode = store.ensureLocalNode(registration);
+    const response = await fetch(nodeApiUrl(gatewayUrl, "register"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${parsed.token}`,
+      },
+      body: JSON.stringify({
+        node: {
+          id: localNode.id,
+          alias: parsed.alias ?? localNode.alias,
+          protocol: localNode.protocol,
+          platform: localNode.platform,
+          capabilities: localNode.capabilities,
+        },
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Gateway rejected node registration (${response.status}): ${(await response.text()).slice(0, 500)}`);
+    }
+    const body = await response.json() as { nodeToken?: unknown };
+    if (typeof body.nodeToken !== "string" || !body.nodeToken) {
+      throw new Error("Gateway registration did not return a node token.");
+    }
+
+    const files = loadDevspaceFiles();
+    writeDevspaceAuth({ ...files.auth, nodeToken: body.nodeToken });
+    const edits = [
+      { path: ["cluster", "role"], value: role },
+      { path: ["cluster", "gatewayUrl"], value: gatewayUrl },
+      ...(parsed.alias ? [{ path: ["node", "alias"], value: parsed.alias }] : []),
+    ];
+    setDevspaceConfigValues(edits);
+    const outputValue = { nodeId: localNode.id, alias: parsed.alias ?? localNode.alias, gatewayUrl, role };
+    if (json) printJson(outputValue);
+    else {
+      console.log(`Registered complete Synrex peer ${outputValue.alias ?? outputValue.nodeId} with the shared directory.`);
+      console.log("Restart Synrex on this host to enable directory registration and remote dispatch.");
+    }
+  } finally {
+    await semantic.close();
+    store.close();
+  }
+}
+
+function listNodes(args: string[], json: boolean): void {
+  if (args.length > 0) throw new Error("Usage: devspace nodes list [--json]");
+  const config = loadConfig();
+  const store = new SqliteControlPlaneStore(config.stateDir);
+  try {
+    new NodeHealthMonitor(store, config.cluster.suspectAfterMs, config.cluster.offlineAfterMs).reconcile();
+    const nodes = store.listNodes();
+    if (json) {
+      printJson({ nodes });
+      return;
+    }
+    if (nodes.length === 0) {
+      console.log("No execution nodes registered.");
+      return;
+    }
+    const local = nodes.find((node) => node.kind === "local");
+    const localBuild = local?.capabilities.runtime?.buildFingerprint;
+    const localContracts = local?.capabilities.toolContracts;
+    for (const node of nodes) {
+      const label = node.alias ? `${node.alias} (${node.id})` : node.id;
+      const ageSeconds = Math.max(0, Math.round((Date.now() - Date.parse(node.lastSeenAt)) / 1000));
+      const runtime = node.capabilities.runtime
+        ? ` build=${node.capabilities.runtime.buildFingerprint.slice(0, 12)} version=${node.capabilities.runtime.version}`
+          + (localBuild
+            ? ` source=${node.capabilities.runtime.buildFingerprint === localBuild ? "same" : "different"}`
+            : "")
+        : " build=unknown";
+      const comparison = compareToolContracts(localContracts, node.capabilities.toolContracts);
+      const contracts = comparison.comparable
+        ? ` contracts=${comparison.matching}/${comparison.total}`
+          + (comparison.incompatible ? ` incompatible=${comparison.incompatible}` : "")
+        : " contracts=unadvertised";
+      console.log(`${label} ${node.kind} ${node.health} ${node.platform.os}/${node.platform.arch} seen=${ageSeconds}s features=${node.capabilities.features.length}${runtime}${contracts}`);
+    }
+  } finally {
+    store.close();
+  }
+}
+
+function setNodeDrain(args: string[], draining: boolean, json: boolean): void {
+  const [selector, ...extra] = args;
+  if (!selector || extra.length > 0) {
+    throw new Error(`Usage: devspace nodes ${draining ? "drain" : "undrain"} <node-id-or-alias> [--json]`);
+  }
+  const config = loadConfig();
+  const store = new SqliteControlPlaneStore(config.stateDir);
+  try {
+    const node = store.findNode(selector);
+    if (!node) throw new Error(`Unknown execution node: ${selector}`);
+    const updated = store.setNodeHealth(node.id, draining ? "draining" : "online");
+    if (json) printJson(updated);
+    else console.log(`${updated.alias ?? updated.id}: ${updated.health}`);
+  } finally {
+    store.close();
+  }
+}
+
+function setLocalNodeAlias(args: string[], json: boolean): void {
+  const [alias, ...extra] = args;
+  if (!alias?.trim() || extra.length > 0) {
+    throw new Error("Usage: devspace nodes alias <name> [--json]");
+  }
+  const normalized = alias.trim();
+  setDevspaceConfigValue(["node", "alias"], normalized);
+  if (json) printJson({ alias: normalized, restartRequired: true });
+  else console.log(`Local node alias set to ${normalized}. Restart Synrex to publish it.`);
+}
+
+function pinWorkspacePath(args: string[], json: boolean): void {
+  const prefer = args.includes("--prefer");
+  const positional = args.filter((item) => item !== "--prefer");
+  const [pathPrefix, selector, ...extra] = positional;
+  if (!pathPrefix || !selector || extra.length > 0) {
+    throw new Error("Usage: devspace nodes pin <path-prefix> <node-id-or-alias> [--prefer] [--json]");
+  }
+  const config = loadConfig();
+  const store = new SqliteControlPlaneStore(config.stateDir);
+  try {
+    const node = store.findNode(selector);
+    if (!node) throw new Error(`Unknown execution node: ${selector}`);
+    const rule = {
+      id: `pin_${Date.now().toString(36)}`,
+      pathPrefix,
+      mode: prefer ? "prefer" as const : "require" as const,
+      node: node.id,
+      labels: {},
+    };
+    setDevspaceConfigValue(["cluster", "placementRules"], [...config.cluster.placementRules, rule]);
+    if (json) printJson(rule);
+    else {
+      console.log(`${rule.mode === "require" ? "Pinned" : "Preferred"} ${pathPrefix} -> ${node.alias ?? node.id} (${rule.id}).`);
+      console.log("Restart Synrex to apply the placement rule.");
+    }
+  } finally {
+    store.close();
+  }
+}
+
+function listPlacementRules(args: string[], json: boolean): void {
+  if (args.length > 0) throw new Error("Usage: devspace nodes pins [--json]");
+  const rules = loadConfig().cluster.placementRules;
+  if (json) {
+    printJson({ rules });
+    return;
+  }
+  if (rules.length === 0) {
+    console.log("No workspace placement rules configured.");
+    return;
+  }
+  for (const rule of rules) {
+    const target = rule.node
+      ? `node=${rule.node}`
+      : `labels=${Object.entries(rule.labels).map(([key, value]) => `${key}=${value}`).join(",")}`;
+    console.log(`${rule.id} ${rule.mode} ${rule.pathPrefix} -> ${target}`);
+  }
+}
+
+function unpinWorkspacePath(args: string[], json: boolean): void {
+  const [ruleId, ...extra] = args;
+  if (!ruleId || extra.length > 0) throw new Error("Usage: devspace nodes unpin <rule-id> [--json]");
+  const config = loadConfig();
+  const next = config.cluster.placementRules.filter((rule) => rule.id !== ruleId);
+  if (next.length === config.cluster.placementRules.length) {
+    throw new Error(`Unknown placement rule: ${ruleId}`);
+  }
+  setDevspaceConfigValue(["cluster", "placementRules"], next);
+  if (json) printJson({ removed: ruleId, restartRequired: true });
+  else console.log(`Removed placement rule ${ruleId}. Restart Synrex to apply the change.`);
+}
+
+function printJoinToken(args: string[], json: boolean): void {
+  if (args.length > 0) throw new Error("Usage: devspace nodes join-token [--json]");
+  const files = loadDevspaceFiles();
+  if (!files.auth.nodeJoinToken) throw new Error("No node join token exists. Run `devspace nodes gateway` first.");
+  if (json) printJson({ joinToken: files.auth.nodeJoinToken });
+  else console.log(files.auth.nodeJoinToken);
+}
+
+function parseNodeJoinArgs(args: string[]): { gatewayUrl: string; token: string; alias?: string } {
+  const gatewayUrl = args[0];
+  if (!gatewayUrl) throw new Error("Usage: devspace nodes join <gateway-url> --token <join-token> [--alias <name>] [--json]");
+  let token: string | undefined;
+  let alias: string | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const item = args[index];
+    if (item === "--token") token = args[++index];
+    else if (item === "--alias") alias = args[++index];
+    else throw new Error(`Unknown nodes join option: ${item}`);
+  }
+  if (!token) throw new Error("nodes join requires --token <join-token>.");
+  if (alias !== undefined && !alias.trim()) throw new Error("Node alias cannot be empty.");
+  return { gatewayUrl, token, alias: alias?.trim() };
+}
+
+function normalizeGatewayUrl(value: string): string {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))) {
+    throw new Error("Gateway URL must use HTTPS, or HTTP for localhost only.");
+  }
+  url.hash = "";
+  url.search = "";
+  url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/mcp$/, "");
+  return url.toString().replace(/\/$/, "");
 }
 
 async function runShowChanges(args: string[]): Promise<void> {
@@ -592,9 +1032,21 @@ async function runAgentsRun(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentRunArgs(args);
   const config = loadConfig();
   const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  let target = parsed.target;
+  if (target === "auto") {
+    const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
+    const providers = buildLocalAgentProviderStatuses(
+      config.subagents,
+      getLocalAgentProviderAvailabilitySnapshot(),
+    );
+    target = routeAutoAgent(
+      parsed.prompt,
+      buildLocalAgentCatalog(config.subagents, profiles, providers),
+    ).target;
+  }
   const client = createLocalAgentClient(config);
   const result = await client.start({
-    target: parsed.target,
+    target,
     prompt: parsed.prompt,
     workspaceRoot: scope.workspaceRoot,
     workspaceId: scope.workspaceId,
@@ -728,11 +1180,11 @@ function sleep(ms: number): Promise<void> {
 function printAgentsHelp(): void {
   console.log(
     [
-      "DevSpace agents",
+      "Synrex agents",
       "",
       "Usage:",
       "  devspace agents ls [--json]",
-      "  devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] [--json] <prompt>",
+      "  devspace agents run <profile-or-provider|auto> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents show <id> [--json]",
       "  devspace agents targets [--json]",
@@ -744,7 +1196,7 @@ function printAgentsHelp(): void {
 function printVersion(): void {
   const packageJson = require("../package.json") as { version?: unknown };
   if (typeof packageJson.version !== "string") {
-    throw new Error("Unable to read DevSpace package version.");
+    throw new Error("Unable to read Synrex package version.");
   }
 
   console.log(packageJson.version);
@@ -804,7 +1256,7 @@ function assertSupportedNode(): void {
 
   throw new Error(
     [
-      `DevSpace requires Node ${SUPPORTED_NODE_RANGE}.`,
+      `Synrex requires Node ${SUPPORTED_NODE_RANGE}.`,
       `Current Node: ${process.version}`,
       "",
       "Install Node 22 LTS or use a version manager such as nvm, fnm, or mise.",

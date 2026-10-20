@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { delimiter, resolve, sep } from "node:path";
 
 const DEVSPACE_PACKAGE_NAMES = new Set([
+  "synrex",
   "devspace-verge",
   "@waishnav/devspace",
 ]);

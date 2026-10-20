@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "project": "DevSpace",
+  "policies": {
+    "acyclic": false,
+    "maxDepth": 12,
+    "dependencyRules": [
+      {
+        "kind": "forbid_dependency",
+        "from": "src/db/**",
+        "to": "src/server.ts"
+      },
+      {
+        "kind": "forbid_dependency",
+        "from": "src/db/**",
+        "to": "src/tool-surfaces/**"
+      },
+      {
+        "kind": "forbid_dependency",
+        "from": "src/compact-runtime/**",
+        "to": "src/server.ts"
+      },
+      {
+        "kind": "forbid_dependency",
+        "from": "src/architecture*.ts",
+        "to": "src/server.ts"
+      },
+      {
+        "kind": "forbid_dependency",
+        "from": "src/workspaces.ts",
+        "to": "src/server.ts"
+      }
+    ]
+  },
+  "annotations": [
+    {
+      "target": "src/db",
+      "summary": "Persistence primitives and schema migrations; lower-level code must not depend on host/server presentation layers.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Keep persistence independent from MCP and tool-surface orchestration."
+        }
+      ],
+      "tags": ["core", "persistence"]
+    },
+    {
+      "target": "src/compact-runtime",
+      "summary": "Bounded command-output and durable run-log mechanics.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Compact runtime is infrastructure and must remain usable without importing the MCP server layer."
+        }
+      ],
+      "tags": ["core", "runtime"]
+    },
+    {
+      "target": "src/tool-surfaces",
+      "summary": "Host-facing adapters that translate stable DevSpace capabilities into model-facing tools.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Keep host/model presentation decisions at this edge rather than leaking them into domain state."
+        }
+      ],
+      "tags": ["adapter"]
+    },
+    {
+      "target": "src/server.ts",
+      "summary": "Composition root for MCP resources, tools, HTTP transport, and service lifecycle.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Server composes lower-level capabilities; lower-level modules should not depend back on server.ts."
+        }
+      ],
+      "tags": ["composition-root"]
+    },
+    {
+      "target": "src/workspaces.ts",
+      "summary": "Workspace lifecycle, instruction discovery, skills, and workspace-scoped state.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Workspace state is a domain boundary and must not depend on the MCP server composition root."
+        }
+      ],
+      "tags": ["core", "workspace"]
+    },
+    {
+      "target": "src/architecture-model.ts",
+      "summary": "Observed project structure and deterministic architecture-conformance engine.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Observed facts remain separate from the versioned intended architecture."
+        }
+      ],
+      "tags": ["governance"]
+    }
+  ]
+}

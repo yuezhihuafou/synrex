@@ -1,0 +1,10 @@
+[Unit]
+Description=Read-only DevSpace owner runtime and OAuth discovery health
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 @SCRIPT@ --state-dir @STATE_DIR@ --public-url @PUBLIC_URL@
+NoNewPrivileges=yes
+TimeoutStartSec=35s

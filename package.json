@@ -1,8 +1,8 @@
 {
-  "name": "devspace-verge",
+  "name": "synrex",
   "version": "0.1.0",
   "private": true,
-  "description": "Agent-optimized DevSpace derivative with compact MCP output, durable tasks, and semantic code tooling.",
+  "description": "Synrex: self-hosted, GPT-first coding and execution with durable tasks, compact context, multi-host workspaces, and architecture governance.",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yuezhihuafou/devspace-verge.git"
@@ -18,6 +18,7 @@
   },
   "packageManager": "pnpm@11.25.0",
   "bin": {
+    "synrex": "bin/synrex.js",
     "devspace": "bin/devspace.js",
     "devspace-agentd": "bin/devspace-agentd.js"
   },
@@ -35,20 +36,30 @@
   ],
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
-    "build": "pnpm clean && pnpm build:app && tsc -p tsconfig.build.json",
+    "build": "pnpm clean && pnpm build:app && tsc -p tsconfig.build.json && tsx scripts/write-build-info.ts",
     "build:app": "vite build",
     "dev": "tsx scripts/dev.ts",
     "dev:seed": "tsx scripts/dev-state.ts seed",
     "dev:reset": "tsx scripts/dev-state.ts reset",
+    "deploy:live": "node -e \"console.error('Unsafe mutable deployment disabled. Promote a tested immutable Synrex release through deploy/activate-owner-release.sh after backup and release verification.'); process.exit(1)\"",
+    "release:source-check": "tsx scripts/check-release-source.ts",
     "postinstall": "node scripts/fix-node-pty-permissions.mjs",
     "prepack": "pnpm build",
     "schema:config": "tsx scripts/generate-config-schema.ts",
     "start": "node dist/cli.js serve",
     "test": "tsx --test --test-concurrency=1 \"src/**/*.test.ts\"",
     "test:package-install": "tsx --test --test-concurrency=1 \"test/package-install-smoke.test.ts\"",
+    "benchmark:compare": "tsx scripts/compare-agent-benchmark.ts",
+    "benchmark:governance": "tsx scripts/run-governance-benchmark.ts",
+    "benchmark:governance-engine": "tsx scripts/run-governance-engine-benchmark.ts",
+    "benchmark:capabilities": "tsx scripts/run-capability-engine-benchmark.ts",
+    "benchmark:local-operator": "tsx scripts/run-local-operator-benchmark.ts",
+    "schema:probe-live": "tsx scripts/probe-live-schema.ts",
+    "architecture:check": "tsx scripts/check-architecture.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "keywords": [
+    "synrex",
     "mcp",
     "coding-agent",
     "developer-tools",

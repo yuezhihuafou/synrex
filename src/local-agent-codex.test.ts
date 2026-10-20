@@ -69,6 +69,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
         output({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: turnId, status: "failed", error: { message: "fake failure" } } } });
         return;
       }
+      if (message.params.input[0].text === "networkfail") {
+        output({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: turnId, status: "failed", error: { message: "stream disconnected before completion: error sending request" } } } });
+        return;
+      }
       if (message.params.input[0].text === "empty") {
         output({ method: "turn/completed", params: { threadId: message.params.threadId, turn: { id: turnId, status: "completed", items: [] } } });
         return;
@@ -121,6 +125,17 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
       assert.equal(failed.error.code, "PROVIDER_EXECUTION_ERROR");
       assert.equal(failed.error.provider, "codex");
       assert.equal(failed.error.retryable, false);
+    }
+    const networkFailed = await runtime.run({
+      prompt: "networkfail",
+      workspaceRoot: "/tmp/project",
+      providerSessionId: first.providerSessionId ?? undefined,
+    });
+    assert.equal(networkFailed.isErr(), true);
+    if (networkFailed.isErr()) {
+      assert.equal(networkFailed.error.code, "PROVIDER_EXECUTION_ERROR");
+      assert.equal(networkFailed.error.retryable, true);
+      assert.match(networkFailed.error.message, /stream disconnected/);
     }
     const protocolFailure = await runtime.run({
       prompt: "empty",

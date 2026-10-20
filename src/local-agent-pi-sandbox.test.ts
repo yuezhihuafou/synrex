@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -13,11 +14,20 @@ import {
 } from "./local-agent-pi-sandbox.js";
 
 const dependencies = await SandboxManager.checkDependenciesAsync();
+// Dependency presence alone does not mean this host allows the Linux network
+// namespace operations bubblewrap needs (e.g. RTM_NEWADDR can be denied).
+const bwrapProbe = process.platform === "linux"
+  ? spawnSync("bwrap", ["--unshare-net", "--ro-bind", "/", "/", "--", "/bin/true"], {
+      timeout: 3000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+    })
+  : undefined;
+const bwrapUsable = !bwrapProbe || (bwrapProbe.status === 0 && !bwrapProbe.error);
 if (process.env.DEVSPACE_REQUIRE_PI_SANDBOX === "1") {
   assert.equal(SandboxManager.isSupportedPlatform(), true, "Pi sandbox integration is required on this CI lane");
   assert.deepEqual(dependencies.errors, [], "Pi sandbox dependencies must be available on this CI lane");
+  assert.equal(bwrapUsable, true, `Pi sandbox cannot create a Linux network namespace: ${bwrapProbe?.stderr || bwrapProbe?.error}`);
 }
-if (SandboxManager.isSupportedPlatform() && dependencies.errors.length === 0) {
+if (SandboxManager.isSupportedPlatform() && dependencies.errors.length === 0 && bwrapUsable) {
   const root = await mkdtemp(join(tmpdir(), "devspace-pi-sandbox-test-"));
   const workspace = join(root, "workspace");
   mkdirSync(workspace);
@@ -96,5 +106,5 @@ if (SandboxManager.isSupportedPlatform() && dependencies.errors.length === 0) {
     await rm(root, { recursive: true, force: true });
   }
 } else {
-  console.log("Pi sandbox integration test skipped: sandbox-runtime dependencies are unavailable.");
+  console.log("Pi sandbox integration test skipped: sandbox-runtime dependencies or Linux namespace privileges are unavailable.");
 }

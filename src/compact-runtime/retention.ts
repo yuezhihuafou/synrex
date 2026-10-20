@@ -34,15 +34,22 @@ function workspaceKey(workspaceRoot: string): string {
 }
 
 async function removeRun(root: string, run: StoredRun): Promise<void> {
-  let task: { taskId?: string; root?: string } | undefined;
+  let task: { taskId?: string; root?: string; requestId?: string } | undefined;
   try {
-    task = JSON.parse(await readFile(path.join(run.path, "task.json"), "utf8")) as { taskId?: string; root?: string };
+    task = JSON.parse(await readFile(path.join(run.path, "task.json"), "utf8")) as {
+      taskId?: string;
+      root?: string;
+      requestId?: string;
+    };
   } catch {
     // Runs created before durable tasks may not have task metadata.
   }
   await rm(run.path, { recursive: true, force: true });
   if (!task?.taskId) return;
   await rm(path.join(root, ".task-index", `${task.taskId}.json`), { force: true });
+  if (task.requestId) {
+    await rm(path.join(root, ".node-request-index", `${task.requestId}.json`), { force: true });
+  }
   if (task.root) {
     const key = workspaceKey(task.root);
     await rm(path.join(root, ".task-notifications", key, `${task.taskId}.json`), { force: true });

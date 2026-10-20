@@ -72,3 +72,21 @@ test("Serena semantic LRU never evicts a backend while it is busy", async () => 
   assert.equal(closed.includes(a), false);
   await manager.close();
 });
+
+test("Serena semantic calls can use a smaller per-call timeout budget", async () => {
+  let observedTimeout: number | undefined;
+  const manager = new SerenaSemanticManager({
+    available: true,
+    timeoutMs: 15_000,
+    createClient: async () => ({
+      callTool: async (_params, _schema, options) => {
+        observedTimeout = options?.timeout;
+        return { content: [{ type: "text", text: "ok" }] };
+      },
+      close: async () => undefined,
+    }),
+  });
+  await manager.call("/tmp/devspace-serena-timeout", "find_symbol", {}, { timeoutMs: 5_000 });
+  assert.equal(observedTimeout, 5_000);
+  await manager.close();
+});

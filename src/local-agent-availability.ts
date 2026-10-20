@@ -72,7 +72,7 @@ function codexAvailability(env: NodeJS.ProcessEnv): LocalAgentProviderAvailabili
   return availability.available
     ? {
         ...availability,
-        note: "available",
+        note: "executable found; runtime/network health is checked on use",
       }
     : availability;
 }

@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Response } from "express";
 import { InvalidGrantError, InvalidTokenError } from "@modelcontextprotocol/sdk/server/auth/errors.js";
 import { databasePath, openDatabase } from "./db/client.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
@@ -26,7 +27,9 @@ try {
   testPersistenceAndTokenHashing(join(root, "persistence"));
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
+  await testAuthorizationCodeSurvivesRestart(join(root, "authorization-code-restart"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
+  await testRefreshReplayRecovery(join(root, "refresh-replay-recovery"));
   await testRefreshResourcePolicy(join(root, "refresh-policy"));
 } finally {
   await rm(root, { recursive: true, force: true });
@@ -52,6 +55,9 @@ async function testDatabaseConfiguration(stateDir: string): Promise<void> {
       { version: 6, name: "local-agent-effort-rename" },
       { version: 7, name: "workspace-recovery-state" },
       { version: 8, name: "learning-memory" },
+      { version: 9, name: "multi-node-control-plane" },
+      { version: 10, name: "oauth-authorization-codes" },
+      { version: 11, name: "oauth-refresh-replay-recovery" },
     ]);
   } finally {
     database.close();
@@ -191,6 +197,55 @@ function testTransactionalTokenRotation(stateDir: string): void {
   }
 }
 
+async function testAuthorizationCodeSurvivesRestart(stateDir: string): Promise<void> {
+  const first = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const client = await first.clientsStore.registerClient?.({
+    redirect_uris: [redirectUri], client_name: "ChatGPT",
+  });
+  assert.ok(client);
+  let redirected = "";
+  await first.authorize(client, {
+    redirectUri,
+    codeChallenge: "restart-pkce-challenge",
+    scopes: ["devspace"],
+    state: "test-state",
+    resource: mcpUrl,
+  }, {
+    req: { method: "POST", body: { owner_token: oauthConfig.ownerToken } },
+    redirect: (_status: number, location: string) => { redirected = location; },
+  } as unknown as Response);
+  const redirect = new URL(redirected);
+  const code = redirect.searchParams.get("code");
+  assert.ok(code);
+  assert.equal(redirect.searchParams.get("state"), "test-state");
+  first.close();
+
+  const second = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  try {
+    assert.ok(second.clientsStore.getClient(client.client_id));
+    assert.equal(await second.challengeForAuthorizationCode(client, code), "restart-pkce-challenge");
+    await assert.rejects(
+      second.exchangeAuthorizationCode(client, code, undefined, redirectUri, tunnelUrl),
+      InvalidGrantError,
+    );
+    const tokens = await second.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl);
+    assert.equal((await second.verifyAccessToken(tokens.access_token)).resource?.href, mcpUrl.href);
+    await assert.rejects(
+      second.exchangeAuthorizationCode(client, code, undefined, redirectUri, mcpUrl),
+      InvalidGrantError,
+    );
+  } finally {
+    second.close();
+  }
+
+  const database = openDatabase(stateDir);
+  try {
+    assert.equal(database.sqlite.prepare("select count(*) from oauth_authorization_codes").pluck().get(), 0);
+  } finally {
+    database.close();
+  }
+}
+
 async function testProviderRestartRotationAndRevocation(stateDir: string): Promise<void> {
   const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
   assert.equal(firstProvider.isResourceAllowed(mcpUrl), true);
@@ -205,14 +260,12 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
   assert.ok(client);
 
   const code = "code-test-123";
-  firstProvider["codes"].set(code, {
+  firstProvider["oauthStore"].saveAuthorizationCode(hashToken(code), {
     clientId: client.client_id,
-    params: {
-      redirectUri,
-      codeChallenge: "challenge",
-      scopes: ["devspace"],
-      resource: tunnelUrl,
-    },
+    redirectUri,
+    codeChallenge: "challenge",
+    scopes: ["devspace"],
+    resource: tunnelUrl.href,
     expiresAtMs: Date.now() + 60_000,
   });
   await assert.rejects(
@@ -267,10 +320,14 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
     assert.ok(inherited.refresh_token);
     assert.equal((await secondProvider.verifyAccessToken(inherited.access_token)).resource?.href, tunnelUrl.href);
 
-    await assert.rejects(
-      secondProvider.exchangeRefreshToken(client, issued.refresh_token, ["devspace"], tunnelUrl),
-      InvalidGrantError,
+    const replayed = await secondProvider.exchangeRefreshToken(
+      client,
+      issued.refresh_token,
+      ["devspace"],
+      tunnelUrl,
     );
+    assert.equal(replayed.access_token, refreshed.access_token);
+    assert.equal(replayed.refresh_token, refreshed.refresh_token);
 
     await secondProvider.revokeToken(client, { token: inherited.access_token });
     await assert.rejects(secondProvider.verifyAccessToken(inherited.access_token), InvalidTokenError);
@@ -282,6 +339,42 @@ async function testProviderRestartRotationAndRevocation(stateDir: string): Promi
     );
   } finally {
     secondProvider.close();
+  }
+}
+
+async function testRefreshReplayRecovery(stateDir: string): Promise<void> {
+  const firstProvider = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  const client = await firstProvider.clientsStore.registerClient?.({
+    redirect_uris: [redirectUri], client_name: "ChatGPT",
+  });
+  assert.ok(client);
+  const store = new SqliteOAuthStore(stateDir);
+  store.saveRefreshToken(hashToken("lost-response-refresh"), {
+    clientId: client.client_id,
+    scopes: ["devspace"],
+    expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    resource: mcpUrl.href,
+  });
+  store.close();
+
+  const results = await Promise.all([
+    firstProvider.exchangeRefreshToken(client, "lost-response-refresh", undefined, mcpUrl),
+    firstProvider.exchangeRefreshToken(client, "lost-response-refresh", undefined, mcpUrl),
+  ]);
+  assert.equal(results[0].access_token, results[1].access_token);
+  assert.equal(results[0].refresh_token, results[1].refresh_token);
+  firstProvider.close();
+
+  const afterRestart = new SingleUserOAuthProvider(oauthConfig, mcpUrl, stateDir);
+  try {
+    const replayed = await afterRestart.exchangeRefreshToken(client, "lost-response-refresh", undefined, mcpUrl);
+    assert.equal(replayed.access_token, results[0].access_token);
+    assert.equal(replayed.refresh_token, results[0].refresh_token);
+    assert.ok(replayed.refresh_token);
+    const next = await afterRestart.exchangeRefreshToken(client, replayed.refresh_token, undefined, mcpUrl);
+    assert.notEqual(next.refresh_token, replayed.refresh_token);
+  } finally {
+    afterRestart.close();
   }
 }
 

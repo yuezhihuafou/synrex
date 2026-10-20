@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createConnection } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -88,6 +88,7 @@ export class LocalAgentClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.spawnDaemon = options.spawnDaemon ?? (() => spawnLocalAgentDaemon(
       options.configDir ?? devspaceConfigDir(),
+      options.stateDir,
     ));
   }
 
@@ -416,16 +417,122 @@ export function createLocalAgentClient(
 
 export function spawnLocalAgentDaemon(
   configDir: string,
+  stateDir: string,
   env: NodeJS.ProcessEnv = process.env,
 ): void {
   const entrypoint = resolveDaemonEntrypoint();
-  const child = spawn(process.execPath, [...daemonExecArgv(process.execArgv), entrypoint], {
+  if (shouldUseSystemdAgentDaemon(env)) {
+    const child = spawn("systemd-run", daemonSystemdRunArgs({
+      configDir,
+      stateDir,
+      entrypoint,
+      execPath: process.execPath,
+      execArgv: process.execArgv,
+      env,
+    }), {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env,
+    });
+    child.unref();
+    return;
+  }
+  const child = spawn(process.execPath, daemonLaunchArgs(entrypoint, process.execArgv), {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
     env: localAgentDaemonEnvironment(configDir, env),
   });
   child.unref();
+}
+
+export function shouldUseSystemdAgentDaemon(
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
+): boolean {
+  if (env.DEVSPACE_AGENTD_LAUNCHER === "detached") return false;
+  if (env.DEVSPACE_AGENTD_LAUNCHER === "systemd") return true;
+  return platform === "linux"
+    && Boolean(env.XDG_RUNTIME_DIR)
+    && existsSync("/run/systemd/system");
+}
+
+export function daemonSystemdUnitName(stateDir: string): string {
+  const digest = createHash("sha256").update(stateDir).digest("hex").slice(0, 12);
+  return `devspace-agentd-${digest}`;
+}
+
+export function daemonSystemdRunArgs(input: {
+  configDir: string;
+  stateDir: string;
+  entrypoint: string;
+  execPath: string;
+  execArgv: readonly string[];
+  env?: NodeJS.ProcessEnv;
+}): string[] {
+  const inheritedEnvironment = agentDaemonSystemdEnvironment(input.env ?? process.env)
+    .map(([key, value]) => `--setenv=${key}=${value}`);
+  return [
+    "--user",
+    "--quiet",
+    "--collect",
+    `--unit=${daemonSystemdUnitName(input.stateDir)}`,
+    "--property=Restart=on-failure",
+    "--property=RestartSec=1s",
+    `--setenv=DEVSPACE_CONFIG_DIR=${input.configDir}`,
+    ...inheritedEnvironment,
+    "--",
+    input.execPath,
+    ...daemonLaunchArgs(input.entrypoint, input.execArgv),
+  ];
+}
+
+export function agentDaemonSystemdEnvironment(
+  env: NodeJS.ProcessEnv,
+): Array<[string, string]> {
+  const keys = [
+    "HOME",
+    "PATH",
+    "SHELL",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "NODE_EXTRA_CA_CERTS",
+  ] as const;
+  return keys.flatMap((key) => {
+    const value = env[key];
+    return typeof value === "string" && value.length > 0
+      ? [[key, value] as [string, string]]
+      : [];
+  });
+}
+
+export function daemonLaunchArgs(
+  entrypoint: string,
+  execArgv: readonly string[],
+): string[] {
+  const args = daemonExecArgv(execArgv);
+  if (
+    entrypoint.endsWith(".ts")
+    && !args.some((argument, index) => (
+      argument === "tsx"
+      || argument === "tsx/esm"
+      || argument.includes("tsx/esm")
+      || ((argument === "--import" || argument === "--loader") && args[index + 1]?.includes("tsx"))
+    ))
+  ) {
+    args.push("--import", "tsx/esm");
+  }
+  args.push(entrypoint);
+  return args;
 }
 
 export function localAgentDaemonEnvironment(

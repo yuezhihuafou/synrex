@@ -83,6 +83,23 @@ finishDelayedHttpClose?.();
 await delayedHttpDrain;
 assert.equal(httpDrainResolved, true);
 
+let forcedClose = false;
+let forcedCloseCallback: ((error?: Error) => void) | undefined;
+await shutdownHttpServer(
+  {
+    close(callback: (error?: Error) => void) {
+      forcedCloseCallback = callback;
+    },
+    closeAllConnections() {
+      forcedClose = true;
+      forcedCloseCallback?.();
+    },
+  },
+  async () => {},
+  10,
+);
+assert.equal(forcedClose, true, "shutdown must bound HTTP drain time");
+
 const httpCloseError = new Error("http close failed");
 await assert.rejects(
   shutdownHttpServer(

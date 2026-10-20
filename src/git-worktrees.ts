@@ -305,7 +305,7 @@ async function cleanupManagedWorktree(input: {
     let recoveryKind: WorkspaceRecoveryKind | undefined;
     if (hasTrackedChanges) {
       recoverySha = (await git(
-        ["stash", "create", `DevSpace recovery ${session.id}`],
+        ["stash", "create", `Synrex recovery ${session.id}`],
         worktreePath,
       )).trim();
       if (!recoverySha) {

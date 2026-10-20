@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Request } from "express";
 
 export type LogLevel = "silent" | "error" | "warn" | "info" | "debug";
@@ -14,6 +15,16 @@ export interface LoggingConfig {
 }
 
 type LogFields = Record<string, unknown>;
+
+export type OAuthHttpPhase = "discovery" | "registration" | "authorize" | "token" | "revoke";
+
+export interface RequestLogContext {
+  requestId: string;
+  path: string;
+  oauthPhase?: OAuthHttpPhase;
+}
+
+const requestLogContext = new AsyncLocalStorage<RequestLogContext>();
 
 const LEVEL_WEIGHT: Record<LogLevel, number> = {
   silent: 0,
@@ -65,7 +76,28 @@ export function requestIp(req: Request, trustProxy: boolean): string | undefined
 }
 
 export function requestPath(req: Request): string {
-  return req.path || req.url.split("?")[0] || req.url;
+  // Express nested routers rewrite req.url/req.path to "/". originalUrl is
+  // stable and keeps OAuth endpoint logs attributable to the real route.
+  const rawUrl = req.originalUrl || req.url;
+  return rawUrl.split("?", 1)[0] || "/";
+}
+
+export function oauthPhaseForPath(path: string): OAuthHttpPhase | undefined {
+  if (path === "/.well-known/oauth-authorization-server"
+    || path.startsWith("/.well-known/oauth-protected-resource")) return "discovery";
+  if (path === "/register") return "registration";
+  if (path === "/authorize") return "authorize";
+  if (path === "/token") return "token";
+  if (path === "/revoke") return "revoke";
+  return undefined;
+}
+
+export function runWithRequestLogContext<T>(context: RequestLogContext, callback: () => T): T {
+  return requestLogContext.run(context, callback);
+}
+
+export function currentRequestLogContext(): RequestLogContext | undefined {
+  return requestLogContext.getStore();
 }
 
 export function commandPreview(command: string): string {

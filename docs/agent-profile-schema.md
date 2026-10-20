@@ -1,6 +1,6 @@
 # Subagent profile schema
 
-DevSpace agent profiles are user-owned markdown files with YAML
+Synrex agent profiles are user-owned markdown files with YAML
 frontmatter. They describe roles such as reviewer, explorer, or implementer.
 The internal on-demand `devspace-agentd` process owns provider invocation. The
 CLI and MCP server use it as clients when they need agent execution.
@@ -54,7 +54,7 @@ Stable profile identifier shown to the model and accepted by:
 devspace agents run <name> "<prompt>"
 ```
 
-Use lowercase kebab-case names. If omitted, DevSpace uses the filename without
+Use lowercase kebab-case names. If omitted, Synrex uses the filename without
 `.md`.
 
 ### `description`
@@ -76,19 +76,19 @@ provider: copilot
 provider: grok
 ```
 
-Unsupported or custom providers are rejected. DevSpace maps providers to their
+Unsupported or custom providers are rejected. Synrex maps providers to their
 native integration:
 
 - `codex`: the host-installed `codex app-server` command
 - `claude`: Claude Code SDK
 - `opencode`: OpenCode SDK
-- `pi`: the installed Pi coding-agent SDK, one in-process session per DevSpace agent
+- `pi`: the installed Pi coding-agent SDK, one in-process session per Synrex agent
 - `cursor`: ACP
 - `copilot`: ACP
 - `grok`: Grok Build ACP (`grok agent stdio`)
 
 Codex is resolved from the user's environment rather than bundled with
-DevSpace. Run `codex login` normally before using it; set `CODEX_COMMAND` when
+Synrex. Run `codex login` normally before using it; set `CODEX_COMMAND` when
 the executable is not on the normal PATH. OpenCode, Cursor, and Copilot
 runtimes are started and reused by the daemon internally, while Pi is embedded
 through its Node SDK.
@@ -105,8 +105,8 @@ model: sonnet
 ### `effort`
 
 Optional provider reasoning effort, thinking level, or model variant. If omitted,
-DevSpace lets the provider default apply. Values are provider-specific
-passthrough strings; DevSpace does not translate names between harnesses.
+Synrex lets the provider default apply. Values are provider-specific
+passthrough strings; Synrex does not translate names between harnesses.
 
 ```yaml
 effort: low
@@ -114,7 +114,7 @@ effort: high
 effort: xhigh
 ```
 
-DevSpace passes this through to providers that expose a matching control:
+Synrex passes this through to providers that expose a matching control:
 
 - `claude`: SDK effort with adaptive thinking.
 - `codex`: app-server model reasoning effort.
@@ -133,7 +133,7 @@ disabled: true
 
 ## Markdown body
 
-The body is the profile prompt prefix DevSpace prepends when launching that
+The body is the profile prompt prefix Synrex prepends when launching that
 profile. It is not included in `open_workspace` by default.
 
 Recommended body content:
@@ -175,16 +175,16 @@ Use `devspace agents continue <id>` for a later turn. The logical agent ID is
 the `agt_...` value returned by `run` or `ls`; provider session IDs are not
 accepted as substitutes.
 
-The full profile body stays out of the model context until DevSpace launches the
+The full profile body stays out of the model context until Synrex launches the
 profile.
 
 ## Runtime lifecycle
 
-DevSpace keeps provider sessions warm while they are active or recently used,
+Synrex keeps provider sessions warm while they are active or recently used,
 but persists only the provider session id and durable agent metadata. Native
 sharing follows the provider boundary: Codex uses one app-server across agents,
 OpenCode uses one server across sessions, ACP providers use one process across
-sessions, while Claude and Pi keep one warm runtime per DevSpace agent. There is
+sessions, while Claude and Pi keep one warm runtime per Synrex agent. There is
 one active turn per agent; different agents may run concurrently.
 
 If the daemon restarts during a turn, persisted `starting` and `running` agents

@@ -16,10 +16,19 @@ devspace agents run/continue/show/ls
           └── provider runtimes
 ```
 
-The CLI starts the daemon automatically when an agent command needs it. The
+The CLI starts the daemon automatically when an agent command needs it. On a
+Linux user session managed by systemd, Synrex launches the daemon as a
+transient user service. This keeps active turns alive when the CLI or a remote
+execution wrapper exits and reaps its descendant processes. Other platforms,
+and Linux environments without a user systemd session, use the detached-process
+launcher. Set `DEVSPACE_AGENTD_LAUNCHER=detached` to force the fallback or
+`DEVSPACE_AGENTD_LAUNCHER=systemd` to force the transient-service launcher for
+diagnostics.
+
+The
 MCP server can use the same local client when an MCP operation needs agent
 functionality, but `devspace serve` is not required for local-agent execution.
-The daemon is scoped to one DevSpace `stateDir`, so one SQLite store and one
+The daemon is scoped to one Synrex `stateDir`, so one SQLite store and one
 runtime owner serve all clients using that configuration.
 
 Communication uses a private Unix domain socket on Linux/macOS or a named pipe

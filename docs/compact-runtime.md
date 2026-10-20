@@ -26,27 +26,30 @@ verify as often as needed; the optimization target is model-context bytes per
 call, not fewer calls.
 
 On the Codex-compatible tool surface, command and poll wait budgets are managed
-by DevSpace instead of exposed as model-controlled arguments. Non-interactive
+by Synrex instead of exposed as model-controlled arguments. Non-interactive
 commands use a durable local runner when the built runner is available. A long
 durable command returns after a short bounded wait with a high-entropy `taskId`
-plus the local `runId`, continues outside the DevSpace server process, and keeps
+plus the local `runId`, continues outside the Synrex server process, and keeps
 writing `task.json`, `output.log`, and finally `meta.json` under the same run
 directory. On Linux with a working user systemd manager the runner is launched
-as a separate transient user service, so restarting DevSpace does not stop the
+as a separate transient user service, so restarting Synrex does not stop the
 command.
 
 The local task lifecycle mirrors the MCP Tasks extension. The compatibility
 tools `task_get`, `task_update`, and `task_cancel` correspond to `tasks/get`,
 `tasks/update`, and `tasks/cancel` while the connected host does not advertise
-`io.modelcontextprotocol/tasks`. Task states use the extension vocabulary:
-`working`, `input_required`, `completed`, `cancelled`, and `failed`. Durable
+`io.modelcontextprotocol/tasks`. `task_update` is currently a reserved
+compatibility surface: the shell runner has no structured input channel and
+therefore does not claim to resume `input_required` work. Task states retain
+the extension vocabulary `working`, `input_required`, `completed`,
+`cancelled`, and `failed` for wire/history compatibility. Durable
 local state still stores timestamps, TTL, output counters, and detailed errors.
 Default `task_get` responses expose only a compact receipt plus a semantic
 `revision`; pass `detail=true` when full metadata is actually needed. A command
 that exits non-zero is still `completed` with `isError=true`; `failed` is
 reserved for task/infrastructure failures.
 
-For ChatGPT conversations, DevSpace remembers the last semantic revision it
+For ChatGPT conversations, Synrex remembers the last semantic revision it
 returned for each task. Repeated `task_get` calls are not suppressed or blocked;
 when nothing meaningful changed they return an `unchanged` receipt instead of
 repeating the full state. Heartbeats alone do not change the semantic revision.
@@ -109,6 +112,27 @@ bash deploy/install-user-service.sh
 The installer installs dependencies, builds `dist/`, writes a concrete
 `~/.config/systemd/user/devspace.service`, stops the old transient compact
 service, and enables/restarts the persistent service.
+
+**Historical workflow, no longer valid for the pinned single-owner service:**
+an earlier setup reloaded every source change with the following command:
+
+```bash
+pnpm deploy:live
+```
+
+**Do not execute that command.** It is now disabled. The authoritative swy1
+service executes a separately pinned immutable release; restarting it from a
+mutable checkout would break source provenance and rollback guarantees.
+Run `pnpm release:source-check` only when preparing a reproducible, Git-clean
+candidate. A dirty checkout must fail this gate. Run the candidate through
+`scripts/probe-reliable-release.ts` with disposable state and a real
+authenticated OAuth/MCP request, then back up owner state and promote via the
+reviewed `deploy/activate-owner-release.sh` procedure. A passing source build
+does not authorize a production cutover.
+
+The existing live check can be run independently with `pnpm schema:probe-live`.
+It prints the tool mode, exact tool list, and a bounded schema fingerprint; it
+creates and removes its short-lived OAuth probe client automatically.
 
 On the first install, an existing service unit is preserved as:
 

@@ -128,7 +128,7 @@ withConfigDir((configDir, env) => {
     () => loadDevspaceFiles(env),
     (error: unknown) => error instanceof Error
       && error.message.includes(`backup already exists at ${backupPath}`)
-      && error.message.includes(`Move ${backupPath} out of the way, then run DevSpace again.`),
+      && error.message.includes(`Move ${backupPath} out of the way, then run Synrex again.`),
   );
 });
 

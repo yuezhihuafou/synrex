@@ -18,7 +18,7 @@ export interface SerenaSemanticManagerOptions {
   maxBackends?: number;
 }
 
-// Keep Serena stderr attached to the DevSpace service rather than an unread pipe.
+// Keep Serena stderr attached to the Synrex service rather than an unread pipe.
 // An unread child-process pipe can fill and deadlock the semantic backend.
 export const SERENA_STDERR_MODE = "inherit" as const;
 
@@ -99,21 +99,27 @@ export class SerenaSemanticManager {
     this.maxBackends = Math.max(1, options.maxBackends ?? 4);
   }
 
-  async call(root: string, tool: string, args: Record<string, unknown>): Promise<{ result: string; truncated: boolean; backendAgeMs: number }> {
+  async call(
+    root: string,
+    tool: string,
+    args: Record<string, unknown>,
+    options: { timeoutMs?: number } = {},
+  ): Promise<{ result: string; truncated: boolean; backendAgeMs: number }> {
     if (!this.available) throw new Error("Serena semantic backend is not installed.");
+    const timeoutMs = options.timeoutMs ?? this.timeoutMs;
     const key = path.resolve(root);
     this.busy.set(key, (this.busy.get(key) ?? 0) + 1);
     let backend: { client: SerenaClientLike; startedAt: number } | undefined;
     try {
       backend = await this.backend(key);
-      const response = await backend.client.callTool({ name: tool, arguments: args }, undefined, { timeout: this.timeoutMs });
+      const response = await backend.client.callTool({ name: tool, arguments: args }, undefined, { timeout: timeoutMs });
       const raw = textFromResult(response);
       const truncated = raw.length > 8_000;
       const result = truncated ? `${raw.slice(0, 3_950)}\n... semantic result truncated; refine the query ...\n${raw.slice(-3_950)}` : raw;
       return { result, truncated, backendAgeMs: Math.max(0, Date.now() - backend.startedAt) };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (/timeout/i.test(message)) throw new Error(`Serena semantic backend timed out after ${this.timeoutMs}ms; it may still be warming or indexing. Retry later or use DevSpace text tools meanwhile.`);
+      if (/timeout/i.test(message)) throw new Error(`Serena semantic backend timed out after ${timeoutMs}ms; it may still be warming or indexing. Retry later or use Synrex text tools meanwhile.`);
       if (/(connection|transport|channel|stream).*(closed|ended|reset)|\bEOF\b|ECONNRESET|EPIPE|not connected/i.test(message)) {
         this.clients.delete(key);
         await backend?.client.close().catch(() => undefined);

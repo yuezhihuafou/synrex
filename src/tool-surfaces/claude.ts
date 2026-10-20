@@ -59,6 +59,7 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = await workspaces.getWorkspace(workspaceId);
+      assertArchitecturePathWritable(input.path);
       workspaces.resolvePath(workspace, input.path);
       const response = await writeFileTool(input, {
         cwd: workspace.root,
@@ -127,6 +128,7 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = await workspaces.getWorkspace(workspaceId);
+      assertArchitecturePathWritable(input.path);
       workspaces.resolvePath(workspace, input.path);
       const response = await editFileTool(input, {
         cwd: workspace.root,
@@ -169,6 +171,17 @@ function registerClaudeMutationTools(context: ToolRegistrationContext): void {
       };
     },
   );
+}
+
+function assertArchitecturePathWritable(relativePath: string): void {
+  const normalized = relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (
+    normalized === ".devspace-architecture.json"
+    || normalized === ".devspace/architecture"
+    || normalized.startsWith(".devspace/architecture/")
+  ) {
+    throw new Error("Architecture state is protected. Use the project architecture actions; design changes require an explicit architecture change with rationale.");
+  }
 }
 
 function registerShellTool(context: ToolRegistrationContext): void {

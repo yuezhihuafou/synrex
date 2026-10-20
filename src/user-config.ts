@@ -29,6 +29,8 @@ import { expandHomePath } from "./roots.js";
 
 const devspaceAuthConfigSchema = z.object({
   ownerToken: z.string().optional(),
+  nodeJoinToken: z.string().optional(),
+  nodeToken: z.string().optional(),
 }).passthrough();
 
 export type DevspaceUserConfig = DevspaceConfig;
@@ -160,7 +162,7 @@ function migrateLegacyConfigFile(
   if (existsSync(backupPath)) {
     throw new Error(
       `Unable to migrate ${legacyPath}: backup already exists at ${backupPath}. `
-      + `Move ${backupPath} out of the way, then run DevSpace again.`,
+      + `Move ${backupPath} out of the way, then run Synrex again.`,
     );
   }
 

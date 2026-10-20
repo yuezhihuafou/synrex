@@ -1,6 +1,6 @@
 # ChatGPT Coding Workflow
 
-DevSpace brings a Codex-style coding-agent loop to ChatGPT and other MCP hosts:
+Synrex brings a Codex-style coding-agent loop to ChatGPT and other MCP hosts:
 inspect the repo, follow local instructions, make scoped edits, run
 verification, and show the user what changed.
 
@@ -50,7 +50,7 @@ Do not call `open_workspace` again for the same checkout folder unless:
 
 ## Checkout Mode
 
-Checkout mode is the default. DevSpace opens the actual directory:
+Checkout mode is the default. Synrex opens the actual directory:
 
 ```json
 {
@@ -86,12 +86,12 @@ Each worktree-mode call creates a new managed worktree and returns a new
 actually required.
 
 Uncommitted source checkout changes are not copied into the managed worktree.
-DevSpace reports when the source checkout was dirty so the model can decide how
+Synrex reports when the source checkout was dirty so the model can decide how
 to proceed with the user.
 
 ## Project Instructions
 
-When a workspace opens, DevSpace loads root-level instruction files:
+When a workspace opens, Synrex loads root-level instruction files:
 
 - `AGENTS.md`
 - `AGENTS.MD`
@@ -108,7 +108,7 @@ new context during later tool calls.
 
 Skills are enabled by default for coding-agent workflows.
 
-DevSpace discovers standard Agent Skills from:
+Synrex discovers standard Agent Skills from:
 
 - `~/.agents/skills`
 - project `.agents/skills`
@@ -119,12 +119,12 @@ It also keeps compatibility with:
 - `skills.agentDir/skills`, defaulting to `~/.codex/skills`
 - additional paths from `skills.paths`
 
-When Subagents are enabled, DevSpace synchronizes its bundled workflow to the
+When Subagents are enabled, Synrex synchronizes its bundled workflow to the
 managed path `~/.devspace/skills/subagents/SKILL.md`. That copy is refreshed
-from the installed DevSpace package and wins over other skills named
+from the installed Synrex package and wins over other skills named
 `subagents`.
 
-When Subagents are enabled, DevSpace discovers agent profiles
+When Subagents are enabled, Synrex discovers agent profiles
 from `~/.devspace/agents/*.md` and project `.devspace/agents/*.md`.
 `open_workspace` exposes a compact catalog with profile names, descriptions,
 providers, and optional models/effort levels so the model can choose a configured agent
@@ -139,7 +139,7 @@ Legacy project paths such as `.pi/skills` can be added to `skills.paths` when ne
 When `open_workspace` returns matching skills, the model should read the
 advertised `SKILL.md` before following that skill.
 
-Skill paths may be outside the workspace. DevSpace only permits reading:
+Skill paths may be outside the workspace. Synrex only permits reading:
 
 - files within advertised skill directories
 
@@ -160,19 +160,28 @@ The Claude surface exposes these tool names:
 
 - `open_workspace`
 - `read`
+- `project`
 - `write`
 - `edit`
 - `bash`
 - `show_changes`
 
-DevSpace uses the Codex-style surface by default. It exposes:
+Synrex uses the Codex-style surface by default. It exposes:
 
 - `open_workspace`
 - `read`
+- `project`
 - `apply_patch`
 - `exec_command`
+- `task_get`, `task_update`, `task_cancel`
+- `process_status`
 - `write_stdin`
+- `semantic_code`, `semantic_edit`
 - `show_changes`
+
+The Codex semantic tools remain registered even when the local Serena backend
+is unavailable. Calls then return an availability error instead of changing the
+MCP tool list after a restart. This keeps the host-facing schema stable.
 
 In this mode, `write`, `edit`, and `bash` are not registered. `exec_command`
 returns a process session ID when a command is still
@@ -187,7 +196,7 @@ the configured shell tool with command-line tools such as `rg`, `find`, and
 
 ## Show Changes
 
-DevSpace exposes `show_changes` in both tool modes and attaches widget UI only
+Synrex exposes `show_changes` in both tool modes and attaches widget UI only
 to `open_workspace` and `show_changes`. Reads, edits, and commands return normal
 MCP results without creating an iframe for each call. Set `ui.enabled` to
 `false` in `~/.devspace/config.jsonc` to disable UI metadata while keeping the
@@ -198,11 +207,11 @@ that changes files. It shows the combined changes for that turn and advances
 the review point automatically. Reusing a workspace does not change this
 workflow.
 
-The model-facing result stays compact: DevSpace returns the workspace ID, a
+The model-facing result stays compact: Synrex returns the workspace ID, a
 Git-backed `reviewRef`, and the summary text. MCP Apps hosts receive the full
 file list and patch in result metadata for immediate rendering. If a host later
 restores only the structured result, the review card can reopen that exact
-`reviewRef` from DevSpace's Git review history without advancing the current
+`reviewRef` from Synrex's Git review history without advancing the current
 review point.
 
 For local inspection, run `devspace show-changes <review-ref>`. Add `--json` to

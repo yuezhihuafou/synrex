@@ -27,6 +27,45 @@ test("a conversation reuses its checkout context", async (t) => {
   assert.deepEqual(second.workspace.agentProfiles, first.workspace.agentProfiles);
 });
 
+test("checkout reuse refreshes changed instructions without repeating unchanged bootstrap", async (t) => {
+  const { project, registry } = await fixture(t);
+  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-refresh" });
+  const unchanged = await registry.openWorkspace(project, { conversationScopeId: "chat-refresh" });
+  assert.equal(unchanged.workspace.id, first.workspace.id);
+  assert.equal(unchanged.includeBootstrapContext, false);
+
+  await writeFile(join(project, "AGENTS.md"), "updated project instructions\n");
+  const changed = await registry.openWorkspace(project, { conversationScopeId: "chat-refresh" });
+  assert.equal(changed.workspace.id, first.workspace.id);
+  assert.equal(changed.includeBootstrapContext, true);
+  assert.ok(changed.agentsFiles.some((file) => file.content === "updated project instructions\n"));
+});
+
+test("checkout reuse discovers a newly promoted project skill", async (t) => {
+  const { project, registry } = await fixture(t);
+  const first = await registry.openWorkspace(project, { conversationScopeId: "chat-skill-refresh" });
+  assert.equal(first.workspace.skills.some((skill) => skill.name === "new-skill"), false);
+
+  const skillDir = join(project, ".agents", "skills", "new-skill");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(join(skillDir, "SKILL.md"), [
+    "---",
+    "name: new-skill",
+    "description: Newly promoted project workflow.",
+    "---",
+    "",
+    "Use the newly promoted workflow.",
+    "",
+  ].join("\n"));
+
+  const reopened = await registry.openWorkspace(project, {
+    conversationScopeId: "chat-skill-refresh",
+  });
+  assert.equal(reopened.workspace.id, first.workspace.id);
+  assert.equal(reopened.includeBootstrapContext, true);
+  assert.ok(reopened.workspace.skills.some((skill) => skill.name === "new-skill"));
+});
+
 test("different conversations receive separate checkout workspaces", async (t) => {
   const { project, registry } = await fixture(t);
 

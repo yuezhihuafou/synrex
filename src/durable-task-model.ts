@@ -35,9 +35,10 @@ export interface DurableTaskState {
   result?: DurableTaskResult;
   error?: DurableTaskError;
 
-  // DevSpace execution metadata. These fields are local implementation details,
+  // Synrex execution metadata. These fields are local implementation details,
   // not part of the MCP Tasks wire shape.
   workspaceId: string;
+  requestId?: string;
   runId: string;
   command: string;
   cwd: string;

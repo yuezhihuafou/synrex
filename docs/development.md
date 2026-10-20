@@ -1,12 +1,12 @@
 # Development and Manual QA
 
-Use the installed DevSpace Verge checkout for normal work. When testing DevSpace
-itself, run the source checkout against a checkout-local fork of your DevSpace
+Use the installed Synrex checkout for normal work. When testing Synrex
+itself, run the source checkout against a checkout-local fork of your Synrex
 configuration and SQLite state.
 
 ## First run in a checkout
 
-Install dependencies, then seed the checkout from your normal DevSpace setup:
+Install dependencies, then seed the checkout from your normal Synrex setup:
 
 ```bash
 pnpm install --frozen-lockfile
@@ -15,14 +15,17 @@ pnpm dev
 ```
 
 `dev:seed` creates an ignored `.devspace-dev/` directory in the current
-checkout. It copies the current config, auth file, DevSpace-local skills and
+checkout. It copies the current config, auth file, Synrex-local skills and
 agent profiles, and makes a SQLite backup of the configured state database. The
 copied config is rewritten so `storage.stateDir` points at the checkout-local
-state directory.
+state directory. By default, the QA server uses an isolated loopback port
+(source port plus 1000 where possible) and loopback public URL. OAuth clients,
+authorization codes, access tokens, and refresh tokens are removed from the
+**QA backup only**. The production database and credentials are not modified.
 
 `pnpm dev` only uses that local QA configuration. If the checkout has not been
 seeded, it stops with an instruction to run `pnpm dev:seed` instead of silently
-falling back to your normal DevSpace state.
+falling back to your normal Synrex state.
 
 By default the seed source is `~/.devspace`. If your normal installation uses a
 custom `DEVSPACE_CONFIG_DIR`, keep that value exported while using `dev:seed`
@@ -30,19 +33,20 @@ and `dev:reset` so both commands fork the same installation.
 
 ## Testing with ChatGPT
 
-Stop the installed DevSpace server before starting the source checkout so both
-processes do not compete for the configured port. You can keep the same tunnel
-and public URL running.
+The QA server now uses a separate loopback origin. The installed production
+server and its tunnel can continue running without competing for the QA port.
+Use `pnpm dev` for local QA and unit tests. To test with ChatGPT, supply the QA
+instance with its **own** HTTPS tunnel URL and a **separate** ChatGPT MCP
+connection. Do not point the existing production connector at a QA database
+copy.
 
-Because the QA database is forked from your normal state, it starts with the
-same registered OAuth clients and current access and refresh tokens. This
-usually lets ChatGPT continue through a server restart without setting up a new
-connection.
+Old `.devspace-dev` directories seeded before this change can still contain
+production OAuth state and URLs. Run `pnpm dev:reset` in the source checkout
+to re-isolate them. `pnpm dev` refuses to launch a fork with the same
+production public URL but a different state directory.
 
-The fork is a snapshot, not shared state. OAuth refresh tokens rotate when they
-are used, so a long-lived QA fork can diverge from the normal installation or
-from another worktree's older fork. Do not rely on separate QA databases to
-remain permanently interchangeable without re-authentication.
+This restriction prevents independent refresh-token rotation from invalidating
+an existing ChatGPT connection when switching between production and QA.
 
 ## Switching between worktrees
 
@@ -60,12 +64,12 @@ pnpm dev
 
 Once a worktree has been seeded, later runs only need `pnpm dev`.
 
-This keeps source changes and persistent QA state isolated without requiring
-DevSpace to know which Git branch or worktree is active.
+This keeps source changes and OAuth identities isolated without requiring
+Synrex to know which Git branch or worktree is active.
 
 ## Database and migration changes
 
-Do not point experimental source builds at your normal DevSpace state directory.
+Do not point experimental source builds at your normal Synrex state directory.
 Use the checkout-local fork so migrations operate on disposable data that began
 as a realistic copy of your current installation.
 
@@ -78,10 +82,10 @@ pnpm dev
 ```
 
 `dev:reset` replaces the entire `.devspace-dev/` directory from the current
-normal DevSpace config and state. Any QA-only workspace sessions, OAuth changes,
+normal Synrex config and state. Any QA-only workspace sessions, OAuth changes,
 agent sessions, and database migrations in that checkout are discarded.
 
-DevSpace also validates the migration journal at startup. If an applied
+Synrex also validates the migration journal at startup. If an applied
 migration version has a different name than the current build expects, or the
 database contains a migration version unknown to the build, startup fails
 instead of silently using an incompatible schema.
@@ -119,7 +123,7 @@ the resulting tarball to a GitHub Release, and creates the matching `vX.Y.Z`
 tag. Stable releases are marked latest; beta and release-candidate versions are
 marked prerelease.
 
-Verge does not currently publish to the upstream npm package or use the upstream
+Synrex does not currently publish to the upstream npm package or use the upstream
 npm publishing identity. Do not publish under `@waishnav/devspace`.
 
 Before a release, verify that `LICENSE` still preserves the upstream MIT

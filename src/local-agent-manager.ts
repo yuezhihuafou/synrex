@@ -73,7 +73,7 @@ export type AgentLookupError = AgentTargetError | AgentScopeError | AgentStoreEr
 export type AgentListError = AgentScopeError | AgentStoreError;
 
 /**
- * Owns one durable DevSpace agent's turn lifecycle. Provider runtimes remain
+ * Owns one durable Synrex agent's turn lifecycle. Provider runtimes remain
  * below this seam; this class only translates records into provider inputs and
  * persists the result.
  */

@@ -21,8 +21,19 @@ import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
+import { expectedToolNames } from "./tool-surface-manifest.js";
 
 const execFileAsync = promisify(execFile);
+
+test("MCP initialization identifies Synrex and preserves the coding tool surface", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const server = context.client.getServerVersion();
+  assert.equal(server?.name, "synrex");
+  assert.equal(server?.title, "Synrex");
+  assert.match(server?.description ?? "", /self-hosted, GPT-first coding and execution harness/);
+  const tools = await context.client.listTools();
+  assert.ok(tools.tools.some((tool) => tool.name === "open_workspace"));
+});
 
 test("tool modes expose the expected host-facing tool surface", async (t) => {
   const cases: Array<{
@@ -31,11 +42,11 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }> = [
     {
       mode: "claude",
-      expected: ["open_workspace", "read", "project", "write", "edit", "bash", "show_changes"],
+      expected: expectedToolNames("claude"),
     },
     {
       mode: "codex",
-      expected: ["open_workspace", "read", "project", "apply_patch", "exec_command", "task_get", "task_update", "task_cancel", "process_status", "write_stdin", "show_changes"],
+      expected: expectedToolNames("codex"),
     },
   ];
 
@@ -50,6 +61,114 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
       );
     });
   }
+});
+
+test("GPT coding workflow checkpoints are resumable through MCP after a new workspace opening", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const workspaceId = opened.workspaceId as string;
+  const newWorkflow = await context.client.callTool({
+    name: "workflow_open",
+    arguments: {
+      workspaceId, title: "P2 resume test", goal: "Build and verify a code change",
+      acceptanceCriteria: ["Tests pass"], constraints: ["Do not deploy"],
+      requestKey: "p2-test-retry-key",
+    },
+  });
+  assert.notEqual(newWorkflow.isError, true);
+  const created = structuredContent(newWorkflow);
+  const workflowId = created.workflowId as string;
+  assert.match(workflowId, /^wf_[a-f0-9]{24}$/);
+  const replayedCreate = await context.client.callTool({
+    name: "workflow_open",
+    arguments: {
+      workspaceId, title: "P2 resume test", goal: "Build and verify a code change",
+      acceptanceCriteria: ["Tests pass"], constraints: ["Do not deploy"],
+      requestKey: "p2-test-retry-key",
+    },
+  });
+  assert.equal(structuredContent(replayedCreate).workflowId, workflowId);
+  const checkpoint = await context.client.callTool({
+    name: "workflow_checkpoint",
+    arguments: {
+      workspaceId, workflowId, expectedRevision: 0, status: "active",
+      phase: "testing", summary: "Implemented and starting tests",
+      completedSteps: ["Implemented feature"], nextSteps: ["Read test output"],
+      blockers: [], checks: ["pnpm typecheck: not run yet"],
+      taskIds: ["task_0123456789abcdef"],
+    },
+  });
+  assert.notEqual(checkpoint.isError, true);
+  assert.equal(structuredContent(checkpoint).revision, 1);
+  const stale = await context.client.callTool({
+    name: "workflow_checkpoint",
+    arguments: {
+      workspaceId, workflowId, expectedRevision: 0, status: "active",
+      phase: "testing", summary: "Old state", completedSteps: [], nextSteps: [], blockers: [], checks: [], taskIds: [],
+    },
+  });
+  assert.equal(stale.isError, true);
+  assert.match(contentText(stale), /revision conflict/);
+
+  const reopened = structuredContent(await callOpen(context.client, context.project));
+  assert.notEqual(reopened.workspaceId, workspaceId, "a new conversation/workspace session must still recover the workflow");
+  const resumable = reopened.resumableWorkflows as Array<{ workflowId: string; revision: number }>;
+  assert.ok(resumable.some((item) => item.workflowId === workflowId && item.revision === 1));
+  const resume = await context.client.callTool({
+    name: "workflow_open",
+    arguments: { workspaceId: reopened.workspaceId, workflowId },
+  });
+  assert.equal(structuredContent(resume).revision, 1);
+  const inspection = await context.client.callTool({
+    name: "workflow_status",
+    arguments: { workspaceId: reopened.workspaceId, workflowId },
+  });
+  assert.equal((structuredContent(inspection).history as unknown[]).length, 1);
+});
+
+test("project tool exposes a typed stable schema while retaining legacy args", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const tools = await context.client.listTools();
+  const project = tools.tools.find((tool) => tool.name === "project");
+  assert.ok(project);
+  const properties = (project.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+  for (const required of ["workspaceId", "action", "target", "paths", "contracts", "dependencyRules", "detail", "args"]) {
+    assert.ok(required in properties, `project schema should expose ${required}`);
+  }
+  const action = properties.action as { type?: unknown; enum?: unknown[] } | undefined;
+  assert.equal(action?.type, "string");
+  assert.equal(action?.enum, undefined, "project actions must stay open-ended so adding an action does not invalidate cached host schemas");
+});
+
+test("model-facing file mutation tools cannot bypass protected architecture intent", async (t) => {
+  await t.test("codex apply_patch", async (nested) => {
+    const context = await fixture(nested, { toolMode: "codex" });
+    const opened = structuredContent(await callOpen(context.client, context.project));
+    const response = await context.client.callTool({
+      name: "apply_patch",
+      arguments: {
+        workspaceId: opened.workspaceId,
+        patch: "*** Begin Patch\n*** Add File: .devspace-architecture.json\n+{}\n*** End Patch",
+      },
+    });
+    assert.equal(response.isError, true);
+    assert.match(contentText(response), /Architecture state is protected/);
+  });
+
+  await t.test("claude write", async (nested) => {
+    const context = await fixture(nested, { toolMode: "claude" });
+    const opened = structuredContent(await callOpen(context.client, context.project));
+    const response = await context.client.callTool({
+      name: "write",
+      arguments: {
+        workspaceId: opened.workspaceId,
+        path: ".devspace-architecture.json",
+        content: "{}\n",
+      },
+    });
+    assert.equal(response.isError, true);
+    assert.match(contentText(response), /Architecture state is protected/);
+  });
 });
 
 test("codex process failures expose MCP error state and exit code", async (t) => {
@@ -73,7 +192,7 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   const context = await fixture(t, { toolMode: "codex" });
   const tools = await context.client.listTools();
 
-  for (const name of ["exec_command", "task_get", "task_update", "task_cancel", "process_status", "write_stdin"]) {
+  for (const name of ["exec_command", "task_get", "task_wait", "task_update", "task_cancel", "process_status", "write_stdin"]) {
     const tool = tools.tools.find((candidate) => candidate.name === name);
     assert.ok(tool, `${name} should be registered`);
     const properties = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
@@ -95,13 +214,13 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
   const names = tools.tools.map((tool) => tool.name);
   for (const required of [
     "open_workspace", "read", "project", "apply_patch", "exec_command",
-    "task_get", "task_update", "task_cancel", "process_status", "write_stdin",
+    "task_get", "task_wait", "task_update", "task_cancel", "process_status", "write_stdin",
     "semantic_code", "semantic_edit", "show_changes",
   ]) {
     assert.ok(names.includes(required), `${required} capability should remain exposed`);
   }
   const codexOwned = new Set([
-    "apply_patch", "exec_command", "task_get", "task_update", "task_cancel",
+    "apply_patch", "exec_command", "task_get", "task_wait", "task_update", "task_cancel",
     "process_status", "write_stdin", "semantic_code", "semantic_edit",
   ]);
   for (const tool of tools.tools.filter((candidate) => codexOwned.has(candidate.name))) {
@@ -111,7 +230,8 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
     (sum, tool) => sum + Buffer.byteLength(JSON.stringify(tool), "utf8"),
     0,
   );
-  assert.ok(totalBytes <= 14_500, `Codex+Serena tool schema grew to ${totalBytes} bytes`);
+  // Persistent workflow creation/status/checkpoint add three explicit tools.
+  assert.ok(totalBytes <= 21_000, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
   const opened = structuredContent(await callOpen(context.client, context.project));
   const semanticResponse = await context.client.callTool({
     name: "semantic_code",
@@ -297,6 +417,20 @@ test("known long codex commands detach early instead of occupying the MCP reques
   assert.equal(typeof state.taskId, "string");
   assert.ok(elapsedMs < 2_500, `expected early detach, got ${Math.round(elapsedMs)}ms`);
   assert.ok((state.pollIntervalMs as number) > 0);
+  assert.match(
+    contentText(response),
+    new RegExp(`devspace-task get ${state.taskId as string}`),
+  );
+  const compatPoll = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId: opened.workspaceId,
+      cmd: `devspace-task get ${state.taskId as string}`,
+    },
+  });
+  const compatState = structuredContent(compatPoll);
+  assert.equal(compatState.taskId, state.taskId);
+  assert.ok(compatState.status === "working" || compatState.status === "completed");
   assert.ok(context.durableTasks);
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const task = await context.durableTasks.get(context.project, state.taskId as string, { acknowledge: false });
@@ -366,6 +500,30 @@ test("durable task wire stays compact and suppresses unchanged polling per conve
   }
 });
 
+test("task_wait completes durable commands without repeated host polling", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const start = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId: opened.workspaceId, cmd: "sleep 2; printf 'wait-completed\\n'" },
+  });
+  const taskId = structuredContent(start).taskId as string;
+  assert.match(taskId, /^task_[0-9a-f]{16}$/);
+  const waited = await context.client.callTool({
+    name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId },
+  });
+  const result = structuredContent(waited);
+  assert.equal(result.taskId, taskId);
+  assert.equal(result.status, "completed");
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.unchanged, undefined);
+  const terminal = await context.client.callTool({
+    name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId, sinceRevision: result.revision },
+  });
+  assert.equal(structuredContent(terminal).status, "completed");
+  assert.equal(structuredContent(terminal).unchanged, undefined);
+});
+
 test("project tool keeps architecture results compact unless detail is requested", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   await mkdir(join(context.project, "src"), { recursive: true });
@@ -400,6 +558,66 @@ test("project tool keeps architecture results compact unless detail is requested
   });
   const detail = structuredContent(detailed).detail as { modules?: unknown[] } | undefined;
   assert.equal(detail?.modules?.length, 3);
+});
+
+test("show_changes blocks deterministic architecture violations without blocking ordinary new files", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true });
+  await mkdir(join(context.project, "src"), { recursive: true });
+  await writeFile(join(context.project, "src", "a.ts"), "export const a = 1;\n");
+  await writeFile(join(context.project, "src", "b.ts"), "export const b = 2;\n");
+  await git(context.project, ["add", "src/a.ts", "src/b.ts"]);
+  await git(context.project, ["commit", "-m", "Add architecture fixture"]);
+  const opened = structuredContent(await callOpen(context.client, context.project, "architecture-review"));
+  const workspaceId = opened.workspaceId as string;
+
+  await context.client.callTool({
+    name: "project",
+    arguments: { workspaceId, action: "arch_init" },
+  });
+  const openedChange = structuredContent(await context.client.callTool({
+    name: "project",
+    arguments: {
+      workspaceId,
+      action: "arch_change_open",
+      intent: "Protect a from b",
+      architectureChange: true,
+      rationale: "Keep this dependency boundary deterministic.",
+    },
+  }));
+  await context.client.callTool({
+    name: "project",
+    arguments: {
+      workspaceId,
+      action: "arch_policy",
+      changeId: openedChange.changeId,
+      dependencyRules: [{ kind: "forbid_dependency", from: "src/a.ts", to: "src/b.ts" }],
+    },
+  });
+  await context.client.callTool({
+    name: "project",
+    arguments: { workspaceId, action: "arch_change_close", changeId: openedChange.changeId },
+  });
+
+  await writeFile(join(context.project, "src", "c.ts"), "export const c = 3;\n");
+  const ordinary = await context.client.callTool({ name: "show_changes", arguments: { workspaceId } });
+  assert.equal(ordinary.isError, undefined);
+
+  await writeFile(join(context.project, "src", "a.ts"), 'import { b } from "./b.js";\nexport const a = b;\n');
+  const violating = await context.client.callTool({ name: "show_changes", arguments: { workspaceId } });
+  assert.equal(violating.isError, true);
+  assert.match(contentText(violating), /Architecture conformance failed/);
+  assert.match(contentText(violating), /forbidden-dependency/);
+  const violatingCard = (violating._meta as {
+    card?: { payload?: { patch?: string } };
+  } | undefined)?.card;
+  assert.match(violatingCard?.payload?.patch ?? "", /import \{ b \}/);
+
+  const repeatedViolation = await context.client.callTool({ name: "show_changes", arguments: { workspaceId } });
+  assert.equal(repeatedViolation.isError, true);
+  const repeatedCard = (repeatedViolation._meta as {
+    card?: { payload?: { patch?: string } };
+  } | undefined)?.card;
+  assert.match(repeatedCard?.payload?.patch ?? "", /import \{ b \}/);
 });
 
 test("UI metadata is limited to workspace and aggregate review", async (t) => {
@@ -635,7 +853,7 @@ test("open_workspace advertises subagent instructions on demand by default", asy
   const opened = structuredContent(await callOpen(context.client, context.project, "chat-1"));
   const skills = opened.skills as Array<Record<string, unknown>>;
   assert.equal(skills.some((skill) => skill.name === "subagents"), true);
-  assert.doesNotMatch(String(opened.instruction), /# DevSpace subagents/);
+  assert.doesNotMatch(String(opened.instruction), /# Synrex subagents/);
 });
 
 test("open_workspace preloads subagent instructions when configured", async (t) => {
@@ -651,7 +869,7 @@ test("open_workspace preloads subagent instructions when configured", async (t) 
   const opened = structuredContent(await callOpen(context.client, context.project, "chat-1"));
   const skills = opened.skills as Array<Record<string, unknown>>;
   assert.equal(skills.some((skill) => skill.name === "subagents"), false);
-  assert.match(String(opened.instruction), /# DevSpace subagents/);
+  assert.match(String(opened.instruction), /# Synrex subagents/);
 });
 
 test("open_workspace scopes checkout reuse to OpenAI session metadata", async (t) => {
@@ -969,12 +1187,16 @@ async function fixture(
   );
   const store = new SqliteWorkspaceStore(stateDir);
   const workspaces = new WorkspaceRegistry(config, store);
+  const durableRunners = new Set<Promise<number>>();
   const durableTasks = options.durableTasks
     ? new DurableTaskManager({
         runRoot: join(root, ".runs"),
         runnerPath: "test-runner",
         launchTask: async ({ requestPath }) => {
-          void runDurableTask(requestPath);
+          const runner = runDurableTask(requestPath).finally(() => {
+            durableRunners.delete(runner);
+          });
+          durableRunners.add(runner);
         },
       })
     : undefined;
@@ -1002,6 +1224,7 @@ async function fixture(
     closed = true;
     await client.close();
     await server.close();
+    await Promise.allSettled([...durableRunners]);
     store.close();
   };
 

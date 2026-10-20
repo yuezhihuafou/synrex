@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { ClusterRole } from "./multinode/topology.js";
 import type { ToolMode } from "./config-schema.js";
 import { expandHomePath } from "./roots.js";
 import type { LoggingConfig } from "./logger.js";
@@ -16,9 +17,33 @@ export interface ServerConfig {
   allowedRoots: string[];
   allowedHosts: string[];
   publicBaseUrl: string;
+  node: {
+    alias: string | null;
+    labels: Record<string, string>;
+  };
+  cluster: {
+    role: ClusterRole;
+    gatewayUrl: string | null;
+    gatewayFallbackUrl: string | null;
+    requestTimeoutMs: number;
+    pollWaitMs: number;
+    heartbeatMs: number;
+    suspectAfterMs: number;
+    offlineAfterMs: number;
+    placementRules: Array<{
+      id: string;
+      pathPrefix: string;
+      mode: "require" | "prefer";
+      node?: string;
+      labels: Record<string, string>;
+    }>;
+    joinToken?: string;
+    nodeToken?: string;
+  };
   toolMode: ToolMode;
   uiEnabled: boolean;
   stateDir: string;
+  metadataRetentionDays: number;
   worktreeRoot: string;
   artifactsEnabled: boolean;
   artifactMaxFileBytes: number;
@@ -65,9 +90,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     allowedRoots: normalizePaths(stored.workspaces.allowedRoots, [process.cwd()]),
     allowedHosts: normalizeAllowedHosts(derivedAllowedHosts),
     publicBaseUrl,
+    node: stored.node,
+    cluster: {
+      ...stored.cluster,
+      joinToken: env.DEVSPACE_NODE_JOIN_TOKEN ?? files.auth.nodeJoinToken,
+      nodeToken: env.DEVSPACE_NODE_TOKEN ?? files.auth.nodeToken,
+    },
     toolMode: stored.tools.mode,
     uiEnabled: stored.ui.enabled,
     stateDir: normalizePath(stored.storage.stateDir),
+    metadataRetentionDays: stored.storage.metadataRetentionDays,
     worktreeRoot: normalizePath(stored.workspaces.worktreeRoot),
     artifactsEnabled: stored.artifacts.enabled,
     artifactMaxFileBytes: stored.artifacts.maxFileBytes,
@@ -102,8 +134,8 @@ function parseRequiredSecret(value: string | undefined): string {
   if (!secret) {
     throw new Error("OAuth owner token is required. Run: devspace init");
   }
-  if (secret.length < 16) {
-    throw new Error("OAuth owner token must be at least 16 characters long.");
+  if (secret.length < 8) {
+    throw new Error("OAuth owner token must be at least 8 characters long.");
   }
   return secret;
 }

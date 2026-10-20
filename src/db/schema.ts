@@ -78,6 +78,21 @@ export const oauthAccessTokens = sqliteTable(
   },
 );
 
+export const oauthAuthorizationCodes = sqliteTable(
+  "oauth_authorization_codes",
+  {
+    codeHash: text("code_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    redirectUri: text("redirect_uri").notNull(),
+    codeChallenge: text("code_challenge").notNull(),
+    scopesJson: text("scopes_json").notNull(),
+    resource: text("resource"),
+    expiresAtMs: integer("expires_at_ms").notNull(),
+  },
+);
+
 export const oauthRefreshTokens = sqliteTable(
   "oauth_refresh_tokens",
   {
@@ -88,6 +103,21 @@ export const oauthRefreshTokens = sqliteTable(
     scopesJson: text("scopes_json").notNull(),
     expiresAt: integer("expires_at").notNull(),
     resource: text("resource"),
+  },
+);
+
+export const oauthRefreshReplays = sqliteTable(
+  "oauth_refresh_replays",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => oauthClients.clientId, { onDelete: "cascade" }),
+    scopesJson: text("scopes_json").notNull(),
+    resource: text("resource"),
+    accessExpiresAt: integer("access_expires_at").notNull(),
+    refreshExpiresAt: integer("refresh_expires_at").notNull(),
+    replayUntil: integer("replay_until").notNull(),
   },
 );
 
@@ -114,6 +144,58 @@ export const localAgentSessions = sqliteTable(
     index("local_agent_sessions_workspace_id_idx").on(table.workspaceId, table.updatedAt),
     index("local_agent_sessions_workspace_root_idx").on(table.workspaceRoot, table.updatedAt),
     index("local_agent_sessions_provider_session_id_idx").on(table.providerSessionId),
+  ],
+);
+
+export const executionNodes = sqliteTable(
+  "execution_nodes",
+  {
+    id: text("id").primaryKey(),
+    kind: text("kind").notNull(),
+    alias: text("alias"),
+    protocolMajor: integer("protocol_major").notNull(),
+    protocolMinor: integer("protocol_minor").notNull(),
+    health: text("health").notNull(),
+    platformJson: text("platform_json").notNull(),
+    capabilitiesJson: text("capabilities_json").notNull(),
+    createdAt: text("created_at").notNull(),
+    lastSeenAt: text("last_seen_at").notNull(),
+  },
+  (table) => [
+    index("execution_nodes_alias_idx").on(table.alias),
+    index("execution_nodes_health_seen_idx").on(table.health, table.lastSeenAt),
+  ],
+);
+
+export const workspaceRoutes = sqliteTable(
+  "workspace_routes",
+  {
+    workspaceId: text("workspace_id").primaryKey(),
+    nodeId: text("node_id").notNull().references(() => executionNodes.id),
+    localWorkspaceId: text("local_workspace_id").notNull(),
+    createdAt: text("created_at").notNull(),
+    lastUsedAt: text("last_used_at").notNull(),
+  },
+  (table) => [
+    index("workspace_routes_node_idx").on(table.nodeId, table.lastUsedAt),
+    index("workspace_routes_local_idx").on(table.nodeId, table.localWorkspaceId),
+  ],
+);
+
+export const taskRoutes = sqliteTable(
+  "task_routes",
+  {
+    taskId: text("task_id").primaryKey(),
+    nodeId: text("node_id").notNull().references(() => executionNodes.id),
+    workspaceId: text("workspace_id").notNull().references(() => workspaceRoutes.workspaceId, { onDelete: "cascade" }),
+    localTaskId: text("local_task_id").notNull(),
+    runId: text("run_id"),
+    createdAt: text("created_at").notNull(),
+    lastUsedAt: text("last_used_at").notNull(),
+  },
+  (table) => [
+    index("task_routes_node_idx").on(table.nodeId, table.lastUsedAt),
+    index("task_routes_workspace_idx").on(table.workspaceId, table.lastUsedAt),
   ],
 );
 
