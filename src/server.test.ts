@@ -419,7 +419,7 @@ test("known long codex commands detach early instead of occupying the MCP reques
   assert.ok((state.pollIntervalMs as number) > 0);
   assert.match(
     contentText(response),
-    new RegExp(`devspace-task get ${state.taskId as string}`),
+    new RegExp(`devspace-task wait ${state.taskId as string}`),
   );
   const compatPoll = await context.client.callTool({
     name: "exec_command",
@@ -509,6 +509,14 @@ test("task_wait completes durable commands without repeated host polling", async
   });
   const taskId = structuredContent(start).taskId as string;
   assert.match(taskId, /^task_[0-9a-f]{16}$/);
+  const sixToolWait = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId: opened.workspaceId, cmd: `devspace-task wait ${taskId}` },
+  });
+  const sixToolResult = structuredContent(sixToolWait);
+  assert.equal(sixToolResult.taskId, taskId);
+  assert.equal(sixToolResult.status, "completed");
+  assert.equal(sixToolResult.exitCode, 0);
+  assert.equal(sixToolResult.runId, structuredContent(start).runId);
   const waited = await context.client.callTool({
     name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId },
   });

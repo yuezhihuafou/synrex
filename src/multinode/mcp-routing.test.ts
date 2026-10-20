@@ -24,7 +24,7 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
     id: "node_remote",
     alias: "gpu",
     platform: { os: "linux", arch: "x64" },
-    capabilities: { toolMode: "codex", features: [], labels: { gpu: "true" }, workspaceRoots: ["/remote"] },
+    capabilities: { toolMode: "codex", features: [], labels: { gpu: "true" }, workspaceRoots: ["/remote"], toolContracts: { open_workspace: 1, exec_command: 1, read: 1, task_get: 1, task_wait: 1 } },
   });
   const calls: Array<{ nodeId: string; name: string; args: Record<string, unknown> }> = [];
   const transport: NodeTransport = {
@@ -108,6 +108,14 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
   ) as Record<string, unknown>;
   assert.equal((compatTask.structuredContent as Record<string, unknown>).taskId, globalTaskId);
   assert.equal(calls.at(-1)?.args.cmd, "devspace-task get task_local");
+
+  const compatWait = await handlers.get("exec_command")!(
+    { workspaceId, cmd: `devspace-task wait ${globalTaskId}` },
+    {},
+  ) as Record<string, unknown>;
+  assert.equal((compatWait.structuredContent as Record<string, unknown>).taskId, globalTaskId);
+  assert.equal(calls.at(-1)?.name, "task_wait", "compat wait must not relaunch a command");
+  assert.equal(calls.at(-1)?.args.taskId, "task_local");
 
   const replayedStart = await handlers.get("exec_command")!(
     { workspaceId, cmd: "sleep 5" },
@@ -196,6 +204,14 @@ test("new task_wait polls legacy task_get-only peer without replaying execution"
   assert.equal(calls.filter((call) => call.name === "task_get").every(
     (call) => call.args.taskId === "task_legacy" && call.args.detail === true,
   ), true);
+  const waitedViaSixTools = await handlers.get("exec_command")!({
+    workspaceId, cmd: `devspace-task wait ${taskId}`,
+  }, {}) as { structuredContent: { taskId: string; status: string; exitCode: number } };
+  assert.equal(waitedViaSixTools.structuredContent.taskId, taskId);
+  assert.equal(waitedViaSixTools.structuredContent.status, "completed");
+  assert.equal(waitedViaSixTools.structuredContent.exitCode, 0);
+  assert.equal(calls.filter((call) => call.name === "exec_command").length, 1,
+    "six-tool compatibility wait must use read-only task_get on the legacy peer");
   corruptTaskId = true;
   await assert.rejects(
     async () => handlers.get("task_wait")!({ workspaceId, taskId }, {}),

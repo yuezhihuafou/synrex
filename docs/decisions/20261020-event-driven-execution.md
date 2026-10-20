@@ -65,6 +65,27 @@ This incurred server I/O but did not produce new GPT tool calls.
 | Generic MCP Tasks-aware host | notifications/tasks on subscriptions/listen when negotiated | tasks/get suggested interval | Generic capability does not imply ordinary ChatGPT supports notifications |
 | Synrex remote peers | Local OS event or peer task status; negotiated read-only route | bounded task_get polling | Old peers may not implement task_wait |
 
+## Six-tool host compatibility and context budget (2026-10-20 follow-up)
+
+The original ChatGPT connector may still expose only six tools even when the
+deployed server advertises `task_wait`. `exec_command` therefore accepts the
+exact internal command `devspace-task wait <taskId>` and invokes the same
+bounded, read-only event-first waiter, **without starting a shell command**.
+The immediate `devspace-task get` behavior is unchanged. On a remote peer,
+the coordinator verifies the task-owner binding and routes the compatibility
+wait to advertised `task_wait` v1 or bounded `task_get` v1, never to an old
+peer's shell. Unadvertised/incompatible peer contracts fail closed. This
+preserves the six-tool interface and requires no additional GPT tool schema.
+
+The agent entrypoint now contains only critical authority/execution and
+release instructions, linking the complete unchanged engineering playbook
+for protected/cross-cutting work. Default AGENTS.md payload went from 14,431
+to 4,790 bytes (67% fewer bytes), while the detailed guidance remains in
+`docs/SYNREX_AGENT_PLAYBOOK.md`. This is an input/context reduction, **not**
+proof of an equivalent percentage reduction in end-to-end GPT task time.
+The host's model thinking and external MCP round-trip overhead still require
+real-client measurements.
+
 MCP core protocol revision 2026-07-28 removes the old GET SSE
 notifications path; subscriptions/listen uses a long-lived POST-response
 stream. Do not implement an obsolete SSE GET as if it were portable.

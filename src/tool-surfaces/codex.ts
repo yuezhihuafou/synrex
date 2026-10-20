@@ -31,7 +31,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Long non-interactive commands return durable taskId/runId handles and survive Synrex restarts; prefer task_wait to avoid repeated short task_get polls, use task_get for immediate inspection and task_cancel for cancellation. task_wait is bounded and cannot wake GPT after the host turn ends. task_update is reserved for protocol compatibility; the current durable shell runner does not request or accept structured input. Honor pollIntervalMs where task_wait is unavailable. Retrieve saved output with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive/TTY commands return sessionId; use process_status/write_stdin. Commands run with the local user's authority and are not sandboxed. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Combine independent inspections or verification commands into one exec_command when safe to reduce tool round trips; do not skip necessary checks. Long non-interactive commands return durable taskId/runId handles and survive Synrex restarts; prefer task_wait or exec_command 'devspace-task wait <taskId>' on older six-tool hosts to wait up to 8s without restarting the command. Use task_get or 'devspace-task get <taskId>' for an immediate snapshot and task_cancel for cancellation. Task waiting cannot wake GPT after the host turn ends. task_update is reserved for protocol compatibility; the current durable shell runner does not request or accept structured input. Retrieve saved output with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive/TTY commands return sessionId; use process_status/write_stdin. Commands run with the local user's authority and are not sandboxed. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -187,7 +187,7 @@ function processResult(snapshot: ProcessSnapshot): string {
   const nextPollMs = recommendedPollMs(snapshot);
   const lines = snapshot.running
     ? [snapshot.taskId
-      ? `task=${snapshot.taskId} working poll=${nextPollMs}ms fallback="devspace-task get ${snapshot.taskId}"`
+      ? `task=${snapshot.taskId} working poll=${nextPollMs}ms fallback="devspace-task wait ${snapshot.taskId}"`
       : `session=${snapshot.sessionId ?? "?"} working poll=${nextPollMs}ms`]
     : [snapshot.signal
       ? `run=${snapshot.runId} signal=${snapshot.signal}`
@@ -362,7 +362,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "exec_command",
     {
       title: "Execute command",
-      description: "Run commands. For durable taskId prefer task_wait (or task_get/legacy devspace-task get), then check logs. For interactive sessionId use write_stdin.",
+      description: "Run commands. For durable taskId use task_wait or 'devspace-task wait <taskId>' (8s max) when only six tools are visible; 'devspace-task get <taskId>' checks immediately. Never replays a running task. For interactive sessionId use write_stdin.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -479,34 +479,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     async ({ workspaceId, taskId, sinceRevision }) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
-      let notify: (() => void) | undefined;
-      let changedBeforeSubscribe = false;
-      // Validate ownership and install the OS watcher *before* the first
-      // read. File changes between watcher setup and subscribe are buffered.
-      const closeWatch = await durableTasks.watchChanges(workspace.root, taskId, () => {
-        changedBeforeSubscribe = true;
-        notify?.();
-      });
-      let waited;
-      try {
-        waited = await waitForTaskChange(
-          () => durableTasks.get(workspace.root, taskId, { acknowledge: false }),
-          sinceRevision,
-          {
-            subscribe: (onChange) => {
-              notify = onChange;
-              if (changedBeforeSubscribe) onChange();
-              return () => { notify = undefined; };
-            },
-          },
-        );
-      } finally {
-        closeWatch();
-      }
-      if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
-        await durableTasks.get(workspace.root, taskId); // acknowledge terminal notification
-      }
-      return taskViewResponse(waited.view, { unchanged: waited.unchanged });
+      return waitForDurableTask(workspace.root, taskId, durableTasks, sinceRevision);
     },
   );
 
@@ -649,7 +622,7 @@ async function handleTaskCompatCommand(
   workspaceRoot: string,
   durableTasks: ToolRegistrationContext["durableTasks"],
 ) {
-  const match = command.trim().match(/^devspace-task\s+(get|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f-]{36}))$/i);
+  const match = command.trim().match(/^devspace-task\s+(get|wait|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f-]{36}))$/i);
   if (!match) return undefined;
   if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
   const action = match[1]!.toLowerCase();
@@ -657,10 +630,49 @@ async function handleTaskCompatCommand(
   if (action === "get") {
     return taskViewResponse(await durableTasks.get(workspaceRoot, taskId));
   }
+  if (action === "wait") {
+    return waitForDurableTask(workspaceRoot, taskId, durableTasks);
+  }
   await durableTasks.cancel(workspaceRoot, taskId);
   const result = `Cancellation requested for ${taskId}.`;
   return {
     content: [textBlock(result)],
     structuredContent: { result, taskId },
   };
+}
+
+async function waitForDurableTask(
+  workspaceRoot: string,
+  taskId: string,
+  durableTasks: NonNullable<ToolRegistrationContext["durableTasks"]>,
+  sinceRevision?: string,
+) {
+  let notify: (() => void) | undefined;
+  let changedBeforeSubscribe = false;
+  // Ownership is validated and the OS watcher is installed before the
+  // first read, so an atomic update cannot be lost between the two.
+  const closeWatch = await durableTasks.watchChanges(workspaceRoot, taskId, () => {
+    changedBeforeSubscribe = true;
+    notify?.();
+  });
+  let waited;
+  try {
+    waited = await waitForTaskChange(
+      () => durableTasks.get(workspaceRoot, taskId, { acknowledge: false }),
+      sinceRevision,
+      {
+        subscribe: (onChange) => {
+          notify = onChange;
+          if (changedBeforeSubscribe) onChange();
+          return () => { notify = undefined; };
+        },
+      },
+    );
+  } finally {
+    closeWatch();
+  }
+  if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
+    await durableTasks.get(workspaceRoot, taskId); // acknowledge terminal notification
+  }
+  return taskViewResponse(waited.view, { unchanged: waited.unchanged });
 }

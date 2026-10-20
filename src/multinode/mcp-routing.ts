@@ -111,26 +111,36 @@ export function withMultiNodeRouting(
         // and never mask an explicitly incompatible task_wait contract.
         const peer = options.store.getNode(route.nodeId);
         const contracts = peer?.capabilities.toolContracts;
-        if (name === "task_wait" && contracts && contracts.task_wait === undefined
-          && contracts.task_get === 1 && typeof remoteArguments.taskId === "string") {
-          let latest: Record<string, unknown> | undefined;
-          const waited = await waitForTaskChange(async () => {
-            latest = await options.router.callWorkspaceTool({
-              workspaceId, name: "task_get",
-              arguments: { workspaceId, taskId: remoteArguments.taskId, detail: true },
+        if (name === "exec_command" && isCompatTaskWait(name, input)) {
+          // Keep legacy six-tool clients on the safe read-only wait path.
+          // An older peer must never try to execute an unrecognised
+          // devspace-task wait command through its shell.
+          if (!taskRoute || typeof remoteArguments.cmd !== "string") {
+            throw new Error(`Cannot wait for task ${requestedTaskId ?? "unknown"}: no verified remote task owner.`);
+          }
+          if (contracts?.task_wait === 1) {
+            const response = await options.router.callWorkspaceTool({
+              workspaceId,
+              name: "task_wait",
+              arguments: { workspaceId, taskId: taskRoute.localTaskId },
               meta: asMeta(extra._meta),
             });
-            const state = latest.structuredContent;
-            const fields = state && typeof state === "object" && !Array.isArray(state)
-              ? state as Record<string, unknown> : undefined;
-            if (!fields || fields.taskId !== remoteArguments.taskId
-              || !["working", "completed", "failed", "cancelled", "input_required"].includes(String(fields.status))) {
-              throw new Error("Legacy peer task_get returned an invalid or mismatched task receipt.");
-            }
-            return state as DurableTaskView;
-          }, typeof input.sinceRevision === "string" ? input.sinceRevision : undefined,
-          { waitMs: 8_000, pollMs: 1_000 });
-          const response = compactLegacyTaskWaitReceipt(latest!, waited.unchanged);
+            return rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId);
+          }
+          if (contracts?.task_get !== 1 || (contracts.task_wait !== undefined && contracts.task_wait !== 1)) {
+            throw new Error(`Remote peer has no compatible read-only wait contract for ${requestedTaskId}.`);
+          }
+          const response = await legacyRemoteTaskWait(
+            options.router, workspaceId, taskRoute.localTaskId, asMeta(extra._meta),
+          );
+          return rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId);
+        }
+        if (name === "task_wait" && contracts && contracts.task_wait === undefined
+          && contracts.task_get === 1 && typeof remoteArguments.taskId === "string") {
+          const response = await legacyRemoteTaskWait(
+            options.router, workspaceId, remoteArguments.taskId, asMeta(extra._meta),
+            typeof input.sinceRevision === "string" ? input.sinceRevision : undefined,
+          );
           return taskRoute
             ? rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId)
             : response;
@@ -157,9 +167,40 @@ function compatTaskId(
 ): string | undefined {
   if (toolName !== "exec_command" || typeof input.cmd !== "string") return undefined;
   const match = input.cmd.trim().match(
-    /^devspace-task\s+(?:get|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f-]{36}))$/i,
+    /^devspace-task\s+(?:get|wait|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f-]{36}))$/i,
   );
   return match?.[1];
+}
+
+function isCompatTaskWait(toolName: string, input: Record<string, unknown>): boolean {
+  return toolName === "exec_command" && Boolean(compatTaskId(toolName, input))
+    && /^devspace-task\s+wait\s+/i.test(String(input.cmd).trim());
+}
+
+async function legacyRemoteTaskWait(
+  router: MultiNodeRouter,
+  workspaceId: string,
+  taskId: string,
+  meta: Record<string, unknown> | undefined,
+  sinceRevision?: string,
+): Promise<Record<string, unknown>> {
+  let latest: Record<string, unknown> | undefined;
+  const waited = await waitForTaskChange(async () => {
+    latest = await router.callWorkspaceTool({
+      workspaceId, name: "task_get",
+      arguments: { workspaceId, taskId, detail: true },
+      meta,
+    });
+    const state = latest.structuredContent;
+    const fields = state && typeof state === "object" && !Array.isArray(state)
+      ? state as Record<string, unknown> : undefined;
+    if (!fields || fields.taskId !== taskId
+      || !["working", "completed", "failed", "cancelled", "input_required"].includes(String(fields.status))) {
+      throw new Error("Legacy peer task_get returned an invalid or mismatched task receipt.");
+    }
+    return state as DurableTaskView;
+  }, sinceRevision, { waitMs: 8_000, pollMs: 1_000 });
+  return compactLegacyTaskWaitReceipt(latest!, waited.unchanged);
 }
 
 function rewriteCompatTaskCommand(
