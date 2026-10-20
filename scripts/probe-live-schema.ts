@@ -196,12 +196,18 @@ try {
 
   let qaWorkflowId: string | undefined;
   let qaDurableTaskRecovered = false;
+  let qaMailboxDelivered = false;
+  let qaFinalBarrierVerified = false;
   if (process.env.DEVSPACE_QA_WORKFLOW_PROBE === "1") {
     if (!config.stateDir.includes("/devspace-reliable-qa-")) {
       throw new Error("Refusing mutating workflow smoke test outside disposable QA state");
     }
     let callId = 0;
-    const call = async (name: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const callFull = async (
+      name: string,
+      arguments_: Record<string, unknown>,
+      conversationScope?: string,
+    ): Promise<{ structuredContent: Record<string, unknown>; content?: unknown }> => {
       const response = await fetch(`${localBaseUrl}/mcp`, {
         method: "POST",
         headers: {
@@ -219,6 +225,7 @@ try {
               "io.modelcontextprotocol/protocolVersion": "2026-07-28",
               "io.modelcontextprotocol/clientCapabilities": {},
               "io.modelcontextprotocol/clientInfo": { name: "devspace-reliable-qa", version: "1" },
+              ...(conversationScope ? { "openai/session": conversationScope } : {}),
             },
           },
         }),
@@ -232,8 +239,10 @@ try {
       if (data.error || data.result?.isError || !data.result?.structuredContent) {
         throw new Error(`QA tool ${name} failed: ${JSON.stringify(data).slice(0, 1500)}`);
       }
-      return data.result.structuredContent;
+      return data.result as { structuredContent: Record<string, unknown>; content?: unknown };
     };
+    const call = async (name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> =>
+      (await callFull(name, args)).structuredContent;
     const first = await call("open_workspace", { path: process.cwd() });
     const firstWorkspace = first.workspaceId as string;
     if (!firstWorkspace) throw new Error("QA open_workspace returned no workspace ID");
@@ -271,6 +280,46 @@ try {
       qaDurableTaskRecovered = true;
       qaWorkflowId = resumeId;
     } else {
+      // Verify the actual HTTP tool result, not just the in-memory adapter:
+      // opportunistic mailbox content must preserve the original structured
+      // result and appear only for the conversation that launched the job.
+      const sessionA = `mailbox-qa-${randomUUID()}`;
+      const sessionB = `other-qa-${randomUUID()}`;
+      const mailboxStart = await callFull("exec_command", {
+        workspaceId: firstWorkspace,
+        cmd: "sleep 3; printf 'MAILBOX_QA_COMPLETE\\n'",
+      }, sessionA);
+      const mailboxTaskId = mailboxStart.structuredContent.taskId;
+      if (typeof mailboxTaskId !== "string") {
+        throw new Error("QA mailbox command did not detach");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3_300));
+      const unrelated = await callFull("read", { workspaceId: firstWorkspace, path: "package.json" }, sessionB);
+      if (JSON.stringify(unrelated.content ?? []).includes("[Synrex Completion Mailbox]")) {
+        throw new Error("QA mailbox leaked across conversation scope");
+      }
+      const related = await callFull("read", { workspaceId: firstWorkspace, path: "package.json" }, sessionA);
+      if (!JSON.stringify(related.content ?? []).includes(`task=${mailboxTaskId} status=completed`)) {
+        throw new Error("QA mailbox completion did not accompany normal read output");
+      }
+      const repeatedRead = await callFull("read", { workspaceId: firstWorkspace, path: "package.json" }, sessionA);
+      if (JSON.stringify(repeatedRead.content ?? []).includes("[Synrex Completion Mailbox]")) {
+        throw new Error("QA mailbox repeated a fresh notification");
+      }
+      if (typeof related.structuredContent.result !== "string" || !related.structuredContent.result.includes('"name": "synrex"')) {
+        throw new Error("QA mailbox changed the original read structuredContent");
+      }
+      qaMailboxDelivered = true;
+      const final = await callFull("exec_command", {
+        workspaceId: firstWorkspace,
+        cmd: `devspace-task final ${mailboxTaskId}`,
+      }, sessionA);
+      const finalBarrier = final.structuredContent.finalBarrier as { stage?: unknown } | undefined;
+      if (finalBarrier?.stage !== "terminal") {
+        throw new Error("QA final barrier did not return a terminal receipt");
+      }
+      qaFinalBarrierVerified = true;
+
       const args = {
         workspaceId: firstWorkspace, title: "QA persistent workflow",
         goal: "Verify a real HTTP MCP workflow and recover after restart",
@@ -312,6 +361,8 @@ try {
     tools: names,
     ...(qaWorkflowId ? { qaWorkflowId } : {}),
     ...(qaDurableTaskRecovered ? { qaDurableTaskRecovered } : {}),
+    ...(qaMailboxDelivered ? { qaMailboxDelivered } : {}),
+    ...(qaFinalBarrierVerified ? { qaFinalBarrierVerified } : {}),
   }));
 } finally {
   if (clientId) {

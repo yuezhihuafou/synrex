@@ -3,6 +3,8 @@ import { applyPatch } from "../apply-patch.js";
 import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
 import { waitForTaskChange } from "../durable-task-wait.js";
+import type { TaskWaitResult } from "../durable-task-wait.js";
+import { finalBarrierReceipt } from "../task-final-barrier.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
@@ -31,7 +33,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Combine independent inspections or verification commands into one exec_command when safe to reduce tool round trips; do not skip necessary checks. Long non-interactive commands return durable taskId/runId handles and survive Synrex restarts; prefer task_wait or exec_command 'devspace-task wait <taskId>' on older six-tool hosts to wait up to 8s without restarting the command. Use task_get or 'devspace-task get <taskId>' for an immediate snapshot and task_cancel for cancellation. Task waiting cannot wake GPT after the host turn ends. task_update is reserved for protocol compatibility; the current durable shell runner does not request or accept structured input. Retrieve saved output with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive/TTY commands return sessionId; use process_status/write_stdin. Commands run with the local user's authority and are not sandboxed. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs/checkpoint, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -362,7 +364,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "exec_command",
     {
       title: "Execute command",
-      description: "Run commands. For durable taskId use task_wait or 'devspace-task wait <taskId>' (8s max) when only six tools are visible; 'devspace-task get <taskId>' checks immediately. Never replays a running task. For interactive sessionId use write_stdin.",
+      description: "Run commands. Durable tasks: task_wait or devspace-task wait/final/get <taskId> on six-tool clients. final checks the last dependency; no replay. Interactive sessions: write_stdin.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         cmd: z.string().min(1).describe("Shell command to execute."),
@@ -468,18 +470,19 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
     "task_wait",
     {
       title: "Wait for durable task change",
-      description: "Wait at most 10s for task change or completion. Optional previous revision; compact unchanged receipt on timeout. Never replays work.",
+      description: "Bounded read-only task wait (10s max). final=true adds final-dependency diagnostics. No replay.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
         sinceRevision: z.string().optional().describe("Revision from prior task receipt."),
+        final: z.boolean().optional().describe("Final dependency status and diagnostics."),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, taskId, sinceRevision }) => {
+    async ({ workspaceId, taskId, sinceRevision, final }) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
-      return waitForDurableTask(workspace.root, taskId, durableTasks, sinceRevision);
+      return waitForDurableTask(workspace.root, taskId, durableTasks, sinceRevision, final === true);
     },
   );
 
@@ -622,7 +625,7 @@ async function handleTaskCompatCommand(
   workspaceRoot: string,
   durableTasks: ToolRegistrationContext["durableTasks"],
 ) {
-  const match = command.trim().match(/^devspace-task\s+(get|wait|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f-]{36}))$/i);
+  const match = command.trim().match(/^devspace-task\s+(get|wait|final|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f-]{36}))$/i);
   if (!match) return undefined;
   if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
   const action = match[1]!.toLowerCase();
@@ -630,8 +633,8 @@ async function handleTaskCompatCommand(
   if (action === "get") {
     return taskViewResponse(await durableTasks.get(workspaceRoot, taskId));
   }
-  if (action === "wait") {
-    return waitForDurableTask(workspaceRoot, taskId, durableTasks);
+  if (action === "wait" || action === "final") {
+    return waitForDurableTask(workspaceRoot, taskId, durableTasks, undefined, action === "final");
   }
   await durableTasks.cancel(workspaceRoot, taskId);
   const result = `Cancellation requested for ${taskId}.`;
@@ -646,6 +649,7 @@ async function waitForDurableTask(
   taskId: string,
   durableTasks: NonNullable<ToolRegistrationContext["durableTasks"]>,
   sinceRevision?: string,
+  final = false,
 ) {
   let notify: (() => void) | undefined;
   let changedBeforeSubscribe = false;
@@ -674,5 +678,46 @@ async function waitForDurableTask(
   if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
     await durableTasks.get(workspaceRoot, taskId); // acknowledge terminal notification
   }
-  return taskViewResponse(waited.view, { unchanged: waited.unchanged });
+  return final ? finalWaitResponse(waited, taskId)
+    : taskViewResponse(waited.view, { unchanged: waited.unchanged });
+}
+
+async function finalWaitResponse(waited: TaskWaitResult, taskId: string) {
+  const response = taskViewResponse(waited.view, { unchanged: waited.unchanged });
+  const barrier = finalBarrierReceipt(waited.view);
+  // A final wait remains bounded; inspect read-only log metadata after 60s.
+  let evidence: Record<string, unknown> | undefined;
+  if (barrier.stage === "investigate") {
+    try {
+      const raw = await handleRunLogCommand(`devspace-log meta ${barrier.runId}`);
+      const info = raw ? JSON.parse(raw) as Record<string, unknown> : undefined;
+      if (info) {
+        evidence = {
+          available: true,
+          ...(typeof info.status === "string" ? { status: info.status } : {}),
+          ...(typeof info.running === "boolean" ? { running: info.running } : {}),
+          ...(typeof info.stale === "boolean" ? { stale: info.stale } : {}),
+          ...(typeof info.lastActivityAt === "string" ? { lastActivityAt: info.lastActivityAt } : {}),
+          ...(typeof info.outputBytes === "number" ? { outputBytes: info.outputBytes } : {}),
+          ...(typeof info.outputLines === "number" ? { outputLines: info.outputLines } : {}),
+        };
+      }
+    } catch {
+      evidence = { available: false };
+    }
+  }
+  const hint = barrier.stage === "investigate"
+    ? `Final dependency ${taskId} still running for ${Math.ceil(barrier.elapsedMs / 1000)}s; inspect devspace-log tail/grep ${barrier.runId}, validate task/peer health and checkpoint unresolved work. Never repeat the command automatically.`
+    : barrier.stage === "waiting"
+      ? `Final dependency pending; next suggested check after ~${barrier.nextCheckMs}ms, or continue independent work.`
+      : barrier.stage === "input_required"
+        ? `Final dependency ${taskId} requests input; inspect the request or cancel instead of polling.`
+        : `Final dependency is ${waited.view.status}; verify logs and objective before completion.`;
+  return {
+    ...response,
+    content: [...response.content, textBlock(hint)],
+    structuredContent: { ...response.structuredContent, finalBarrier: {
+      ...barrier, ...(evidence ? { diagnostic: evidence } : {}),
+    } },
+  };
 }

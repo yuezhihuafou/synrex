@@ -201,6 +201,60 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   }
 });
 
+test("completion mailbox relays a finished background job only in the originating chat scope", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const firstScope = "mailbox-chat-a";
+  const opened = structuredContent(await callOpen(context.client, context.project, firstScope));
+  const workspaceId = opened.workspaceId as string;
+  const metaA = { "openai/session": firstScope };
+  const start = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "sleep 3; printf 'done\\n'" },
+    _meta: metaA,
+  } as Parameters<Client["callTool"]>[0]);
+  const taskId = structuredContent(start).taskId as string;
+  assert.match(taskId, /^task_[a-f0-9]{16}$/);
+  await new Promise((resolve) => setTimeout(resolve, 3_250));
+
+  const other = await context.client.callTool({
+    name: "read", arguments: { workspaceId, path: "README.md" },
+    _meta: { "openai/session": "mailbox-chat-b" },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.doesNotMatch(contentText(other), /Completion Mailbox/);
+
+  const response = await context.client.callTool({
+    name: "read", arguments: { workspaceId, path: "README.md" }, _meta: metaA,
+  } as Parameters<Client["callTool"]>[0]);
+  assert.match(contentText(response), /hello/);
+  assert.match(contentText(response), /Synrex Completion Mailbox/);
+  assert.match(contentText(response), new RegExp(taskId));
+  assert.equal(structuredContent(response).result, "hello\n");
+  const again = await context.client.callTool({
+    name: "read", arguments: { workspaceId, path: "README.md" }, _meta: metaA,
+  } as Parameters<Client["callTool"]>[0]);
+  assert.doesNotMatch(contentText(again), /Completion Mailbox/);
+});
+
+test("legacy final task command waits and reports a terminal final barrier receipt", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const workspaceId = opened.workspaceId as string;
+  const started = await context.client.callTool({
+    name: "exec_command",
+    arguments: { workspaceId, cmd: "sleep 2; printf 'final-barrier-ok\\n'" },
+  });
+  const taskId = structuredContent(started).taskId as string;
+  assert.match(taskId, /^task_[a-f0-9]{16}$/);
+  const settled = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: `devspace-task final ${taskId}` },
+  });
+  const result = structuredContent(settled);
+  assert.equal(result.taskId, taskId);
+  assert.equal(result.status, "completed");
+  assert.equal((result.finalBarrier as { stage: string; nextCheckMs: number }).stage, "terminal");
+  assert.equal((result.finalBarrier as { nextCheckMs: number }).nextCheckMs, 0);
+  assert.match(contentText(settled), /verify logs and objective before completion/);
+});
+
 test("codex tool surface stays compact without dropping capabilities", async (t) => {
   const semantic = new SerenaSemanticManager({
     available: true,

@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { waitForTaskChange } from "../durable-task-wait.js";
+import { finalBarrierReceipt } from "../task-final-barrier.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { McpRegistrationTarget } from "../mcp-modern-server.js";
 import type { MultiNodeRouter } from "./router.js";
@@ -118,20 +119,52 @@ export function withMultiNodeRouting(
           if (!taskRoute || typeof remoteArguments.cmd !== "string") {
             throw new Error(`Cannot wait for task ${requestedTaskId ?? "unknown"}: no verified remote task owner.`);
           }
+          let response: Record<string, unknown>;
           if (contracts?.task_wait === 1) {
-            const response = await options.router.callWorkspaceTool({
+            response = await options.router.callWorkspaceTool({
               workspaceId,
               name: "task_wait",
               arguments: { workspaceId, taskId: taskRoute.localTaskId },
               meta: asMeta(extra._meta),
             });
-            return rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId);
+          } else {
+            if (contracts?.task_get !== 1 || (contracts.task_wait !== undefined && contracts.task_wait !== 1)) {
+              throw new Error(`Remote peer has no compatible read-only wait contract for ${requestedTaskId}.`);
+            }
+            response = await legacyRemoteTaskWait(
+              options.router, workspaceId, taskRoute.localTaskId, asMeta(extra._meta),
+            );
           }
-          if (contracts?.task_get !== 1 || (contracts.task_wait !== undefined && contracts.task_wait !== 1)) {
-            throw new Error(`Remote peer has no compatible read-only wait contract for ${requestedTaskId}.`);
+          if (isCompatTaskFinal(name, input)) {
+            response = await appendRemoteFinalBarrier(
+              options.router, workspaceId, taskRoute.localTaskId, asMeta(extra._meta), response,
+            );
           }
-          const response = await legacyRemoteTaskWait(
-            options.router, workspaceId, taskRoute.localTaskId, asMeta(extra._meta),
+          return rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId);
+        }
+        if (name === "task_wait" && input.final === true) {
+          if (!taskRoute) throw new Error(`Cannot wait for final task ${requestedTaskId ?? "unknown"}: no verified owner.`);
+          let response: Record<string, unknown>;
+          if (contracts?.task_wait === 1) {
+            // Do not send a new optional argument to an older peer's v1 schema.
+            response = await options.router.callWorkspaceTool({
+              workspaceId, name: "task_wait",
+              arguments: {
+                workspaceId, taskId: taskRoute.localTaskId,
+                ...(typeof input.sinceRevision === "string" ? { sinceRevision: input.sinceRevision } : {}),
+              },
+              meta: asMeta(extra._meta),
+            });
+          } else if (contracts?.task_get === 1 && contracts?.task_wait === undefined) {
+            response = await legacyRemoteTaskWait(
+              options.router, workspaceId, taskRoute.localTaskId, asMeta(extra._meta),
+              typeof input.sinceRevision === "string" ? input.sinceRevision : undefined,
+            );
+          } else {
+            throw new Error(`Remote peer has no compatible read-only final wait for ${requestedTaskId}.`);
+          }
+          response = await appendRemoteFinalBarrier(
+            options.router, workspaceId, taskRoute.localTaskId, asMeta(extra._meta), response,
           );
           return rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId);
         }
@@ -167,14 +200,59 @@ function compatTaskId(
 ): string | undefined {
   if (toolName !== "exec_command" || typeof input.cmd !== "string") return undefined;
   const match = input.cmd.trim().match(
-    /^devspace-task\s+(?:get|wait|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f-]{36}))$/i,
+    /^devspace-task\s+(?:get|wait|final|cancel)\s+(task_(?:[0-9a-f]{16}|[0-9a-f]{32}|[0-9a-f-]{36}))$/i,
   );
   return match?.[1];
 }
 
 function isCompatTaskWait(toolName: string, input: Record<string, unknown>): boolean {
   return toolName === "exec_command" && Boolean(compatTaskId(toolName, input))
-    && /^devspace-task\s+wait\s+/i.test(String(input.cmd).trim());
+    && /^devspace-task\s+(?:wait|final)\s+/i.test(String(input.cmd).trim());
+}
+
+function isCompatTaskFinal(toolName: string, input: Record<string, unknown>): boolean {
+  return toolName === "exec_command" && Boolean(compatTaskId(toolName, input))
+    && /^devspace-task\s+final\s+/i.test(String(input.cmd).trim());
+}
+
+/** Remote final waits add their advisory receipt on the coordinator, so an
+ * older peer never has to execute a new shell command or understand 'final'.
+ * The read-only detail receipt is also what distinguishes task age from wait age.
+ */
+async function appendRemoteFinalBarrier(
+  router: MultiNodeRouter,
+  workspaceId: string,
+  taskId: string,
+  meta: Record<string, unknown> | undefined,
+  response: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const inspected = await router.callWorkspaceTool({
+    workspaceId, name: "task_get", arguments: { workspaceId, taskId, detail: true }, meta,
+  });
+  const fields = inspected.structuredContent;
+  const detail = fields && typeof fields === "object" && !Array.isArray(fields)
+    ? (fields as Record<string, unknown>).detail : undefined;
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)
+    || (detail as DurableTaskView).taskId !== taskId
+    || typeof (detail as DurableTaskView).createdAt !== "string"
+    || typeof (detail as DurableTaskView).runId !== "string") {
+    throw new Error(`Peer did not provide an owner-verified final task receipt for ${taskId}.`);
+  }
+  const barrier = finalBarrierReceipt(detail as DurableTaskView);
+  const message = barrier.stage === "terminal"
+    ? `Final dependency ${taskId} is ${barrier.stage}; verify the saved result before completion.`
+    : barrier.stage === "investigate"
+      ? `Final dependency ${taskId} is still running; inspect the remote run log or checkpoint it.`
+      : `Final dependency ${taskId} is ${barrier.stage}; next suggested check ~${barrier.nextCheckMs}ms.`;
+  const structured = response.structuredContent;
+  return {
+    ...response,
+    content: [...(Array.isArray(response.content) ? response.content : []), { type: "text", text: message }],
+    structuredContent: {
+      ...(structured && typeof structured === "object" && !Array.isArray(structured) ? structured : {}),
+      finalBarrier: barrier,
+    },
+  };
 }
 
 async function legacyRemoteTaskWait(

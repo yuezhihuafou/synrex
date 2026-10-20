@@ -212,6 +212,18 @@ on different nodes.
 
 **M1: reliable GPT coding (parallel with UI0)**
 
+- Integrated production candidate: **Completion Mailbox V0** records only new running
+  durable command handles, appends bounded completion notices to later
+  ordinary MCP tool replies in the same workspace and compatible chat scope,
+  and preserves original tool results. The final dependency uses existing
+  task_wait(final=true) / six-tool `devspace-task final` with exponential
+  backoff advice; after one minute a read-only run-log metadata probe
+  activates diagnosis/checkpoint rather than unsafe command replay.
+  See `docs/decisions/20261020-completion-mailbox-isolated-experiment.md`.
+  Its activation must be confirmed from the actual pinned swy1 service,
+  not inferred from an isolated QA instance. Cross-peer push and host
+  auto-resume are not claimed.
+
 - Keep the six-tool fallback until actual host refresh is verified. Test
   edit/test/review/fix and resume a substantial change through a new GPT chat.
 - Bounded `task_wait` is implemented in the source candidate: it waits up to

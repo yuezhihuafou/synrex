@@ -92,8 +92,14 @@ async function runAuthenticatedProbe(env: NodeJS.ProcessEnv, resumeId?: string) 
   const result = JSON.parse(probeResult ?? "{}") as {
     toolCount?: number; schemaFingerprint?: string; qaWorkflowId?: string;
     qaDurableTaskRecovered?: boolean;
+    qaMailboxDelivered?: boolean;
+    qaFinalBarrierVerified?: boolean;
   };
   assert.equal(result.toolCount, 17);
+  if (!resumeId) {
+    assert.equal(result.qaMailboxDelivered, true, "Normal tool reply must carry completion mailbox event");
+    assert.equal(result.qaFinalBarrierVerified, true, "Legacy final barrier must complete over HTTP");
+  }
   assert.match(result.qaWorkflowId ?? "", /^wf_[a-f0-9]{24}$/);
   return result;
 }
@@ -107,8 +113,9 @@ try {
     storage: Record<string, unknown>;
     oauth: Record<string, unknown>;
     cluster: Record<string, unknown>;
+    workspaces: Record<string, unknown>;
   };
-  assert.ok(config?.server && config.storage && config.oauth && config.cluster);
+  assert.ok(config?.server && config.storage && config.oauth && config.cluster && config.workspaces);
   const port = await freePort();
   const localBase = `http://127.0.0.1:${port}`;
   Object.assign(config.server, {
@@ -116,6 +123,12 @@ try {
     allowedHosts: [], trustProxy: false,
   });
   config.storage.stateDir = stateDir;
+  // QA runs the probe from the source tree whose exact compiled schema is
+  // under test. Permit this tree only in the throwaway private configuration,
+  // never by changing the live owner's allowed root list.
+  const existingRoots = Array.isArray(config.workspaces.allowedRoots)
+    ? config.workspaces.allowedRoots as string[] : [];
+  config.workspaces.allowedRoots = [...new Set([...existingRoots, process.cwd()])];
   config.oauth.allowedResourceUrls = [];
   Object.assign(config.cluster, { role: "standalone", gatewayUrl: null, placementRules: [] });
   await writeFile(join(configDir, "config.jsonc"), JSON.stringify(config, null, 2), { mode: 0o600 });
@@ -210,6 +223,8 @@ try {
   console.log(JSON.stringify({
     qa: "passed", release, authenticatedMcp: true, toolCount: result.toolCount,
     schemaFingerprint: result.schemaFingerprint, isolatedState: true,
+    completionMailboxDelivered: result.qaMailboxDelivered,
+    finalBarrierVerified: result.qaFinalBarrierVerified,
     persistedThroughRestart: true, durableTaskThroughRestart: true,
     duplicateCreateSafe: true, checkpointReplaySafe: true,
     boundedDiagnosticLog: true, correlatedDiagnosticCli: true,

@@ -51,6 +51,7 @@ import { DurableTaskManager } from "./durable-tasks.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
+import { CompletionMailbox, appendMailboxEvents, mailboxScope } from "./completion-mailbox.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
@@ -388,6 +389,7 @@ function registerMcpSurface(
     trackToolActivity,
     learning,
     workspaces,
+    durableTasks,
   );
   const toolSurface = getToolSurface(config.toolMode);
 
@@ -896,8 +898,10 @@ function withTrackedToolHandlers(
   trackToolActivity: TrackToolActivity | undefined,
   learning: LearningStore,
   workspaces: WorkspaceRegistry,
+  durableTasks?: DurableTaskManager,
 ): McpRegistrationTarget {
   const diagnostics = new DiagnosticTrace(config.stateDir);
+  const mailbox = new CompletionMailbox(config.stateDir);
   return {
     registerTool: ((...args: unknown[]) => {
       const toolName = typeof args[0] === "string" ? args[0] : "unknown";
@@ -929,16 +933,19 @@ function withTrackedToolHandlers(
               handlerArgs,
               result,
             );
-            const content = result && typeof result === "object"
-              ? (result as { structuredContent?: { taskId?: unknown; runId?: unknown } }).structuredContent
+            const delivered = await appendCompletionMailbox(
+              mailbox, durableTasks, workspaces, toolName, handlerArgs, result,
+            );
+            const content = delivered && typeof delivered === "object"
+              ? (delivered as { structuredContent?: { taskId?: unknown; runId?: unknown } }).structuredContent
               : undefined;
-            const isToolError = result && typeof result === "object"
-              && (result as { isError?: unknown }).isError === true;
+            const isToolError = delivered && typeof delivered === "object"
+              && (delivered as { isError?: unknown }).isError === true;
             watch.finish(isToolError ? "error" : "ok", {
               taskId: typeof content?.taskId === "string" ? content.taskId : undefined,
               runId: typeof content?.runId === "string" ? content.runId : undefined,
             });
-            return result;
+            return delivered;
           } catch (error) {
             await recordLearningToolCall(
               learning,
@@ -956,6 +963,62 @@ function withTrackedToolHandlers(
     }) as McpRegistrationTarget["registerTool"],
     registerResource: server.registerResource.bind(server),
   };
+}
+
+/** Mail is opportunistic: only next normal tool response, same workspace and
+ * conversation scope, and only after checking the actual durable task state.
+ * No new host API or background model invocation is required.
+ */
+async function appendCompletionMailbox(
+  mailbox: CompletionMailbox,
+  durableTasks: DurableTaskManager | undefined,
+  workspaces: WorkspaceRegistry,
+  toolName: string,
+  handlerArgs: unknown[],
+  result: unknown,
+): Promise<unknown> {
+  if (!durableTasks?.available || !result || typeof result !== "object" || Array.isArray(result)) {
+    return result;
+  }
+  const response = result as Record<string, unknown>;
+  const input = handlerArgs[0];
+  if (!input || typeof input !== "object" || Array.isArray(input)) return result;
+  const workspaceId = (input as { workspaceId?: unknown }).workspaceId;
+  if (typeof workspaceId !== "string") return result;
+  const extra = handlerArgs[1] as { _meta?: Record<string, unknown> } | undefined;
+  const scope = mailboxScope(conversationScopeIdFromRequestMeta(extra?._meta));
+  const content = response.structuredContent;
+  const fields = content && typeof content === "object" && !Array.isArray(content)
+    ? content as Record<string, unknown> : undefined;
+  try {
+    if (toolName === "exec_command"
+      && fields?.running === true && typeof fields.taskId === "string") {
+      mailbox.register(workspaceId, scope, fields.taskId);
+    }
+    const compat = toolName === "exec_command"
+      ? String((input as { cmd?: unknown }).cmd ?? "").trim()
+        .match(/^devspace-task\s+(get|final)\s+(task_(?:[0-9a-f]{16}|[0-9a-f-]{36}))$/i)
+      : null;
+    const inspectedTaskId = compat?.[2] ?? (input as { taskId?: unknown }).taskId;
+    if ((toolName === "task_get" || toolName === "task_wait" || compat)
+      && typeof inspectedTaskId === "string"
+      && ["completed", "cancelled", "failed"].includes(String(fields?.status))) {
+      mailbox.acknowledge(workspaceId, scope, inspectedTaskId);
+      return result;
+    }
+    if (response.isError === true) return result;
+    if (toolName === "task_get" || toolName === "task_wait") return result;
+    // Registry lookup also verifies ownership; a foreign/remote workspace
+    // cannot inspect or leak a local task's result.
+    const workspace = await workspaces.getWorkspace(workspaceId);
+    const events = await mailbox.collect(workspaceId, scope, (taskId) =>
+      durableTasks.get(workspace.root, taskId, { acknowledge: false }),
+    );
+    return appendMailboxEvents(response, events);
+  } catch {
+    // A notification must never change, block, or fail the original tool.
+    return result;
+  }
 }
 
 async function recordLearningToolCall(

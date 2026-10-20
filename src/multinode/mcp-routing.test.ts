@@ -45,7 +45,14 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
       if (call.name === "task_get" || call.name === "task_wait") {
         return {
           content: [{ type: "text", text: `task=${String(call.arguments.taskId)} completed` }],
-          structuredContent: { taskId: call.arguments.taskId, status: "completed", runId: "run_local" },
+          structuredContent: {
+            taskId: call.arguments.taskId, status: "completed", runId: "run_local",
+            ...(call.arguments.detail === true ? { detail: {
+              taskId: "task_local", status: "completed", runId: "run_local",
+              revision: "r3", createdAt: new Date(Date.now() - 3_000).toISOString(),
+              lastUpdatedAt: new Date().toISOString(), outputBytes: 3, outputLines: 1,
+            } } : {}),
+          },
         };
       }
       return { structuredContent: { result: "remote-read" } };
@@ -116,6 +123,19 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
   assert.equal((compatWait.structuredContent as Record<string, unknown>).taskId, globalTaskId);
   assert.equal(calls.at(-1)?.name, "task_wait", "compat wait must not relaunch a command");
   assert.equal(calls.at(-1)?.args.taskId, "task_local");
+
+  const remoteFinal = await handlers.get("exec_command")!(
+    { workspaceId, cmd: `devspace-task final ${globalTaskId}` }, {},
+  ) as { structuredContent: { taskId: string; finalBarrier: { stage: string } } };
+  assert.equal(remoteFinal.structuredContent.taskId, globalTaskId);
+  assert.equal(remoteFinal.structuredContent.finalBarrier.stage, "terminal");
+  assert.equal(calls.at(-2)?.name, "task_wait", "remote final cannot execute a new shell command");
+  assert.equal(calls.at(-1)?.name, "task_get", "final barrier requires verified read-only state");
+  const remoteNativeFinal = await handlers.get("task_wait")!(
+    { workspaceId, taskId: globalTaskId, final: true }, {},
+  ) as { structuredContent: { taskId: string; finalBarrier: { stage: string } } };
+  assert.equal(remoteNativeFinal.structuredContent.taskId, globalTaskId);
+  assert.equal(remoteNativeFinal.structuredContent.finalBarrier.stage, "terminal");
 
   const replayedStart = await handlers.get("exec_command")!(
     { workspaceId, cmd: "sleep 5" },
