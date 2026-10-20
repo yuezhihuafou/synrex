@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { waitForTaskChange } from "../durable-task-wait.js";
+import type { DurableTaskView } from "../durable-task-model.js";
 import type { McpRegistrationTarget } from "../mcp-modern-server.js";
 import type { MultiNodeRouter } from "./router.js";
 import { selectWorkspaceNode, type WorkspacePlacementRule } from "./placement.js";
@@ -103,6 +105,36 @@ export function withMultiNodeRouting(
                 }
               : input
           : input;
+        // A newer swy1 coordinator may serve an older gateway peer. Only
+        // downgrade when the peer explicitly advertises task_get v1 but has
+        // not advertised task_wait at all. Never retry/restart the command,
+        // and never mask an explicitly incompatible task_wait contract.
+        const peer = options.store.getNode(route.nodeId);
+        const contracts = peer?.capabilities.toolContracts;
+        if (name === "task_wait" && contracts && contracts.task_wait === undefined
+          && contracts.task_get === 1 && typeof remoteArguments.taskId === "string") {
+          let latest: Record<string, unknown> | undefined;
+          const waited = await waitForTaskChange(async () => {
+            latest = await options.router.callWorkspaceTool({
+              workspaceId, name: "task_get",
+              arguments: { workspaceId, taskId: remoteArguments.taskId, detail: true },
+              meta: asMeta(extra._meta),
+            });
+            const state = latest.structuredContent;
+            const fields = state && typeof state === "object" && !Array.isArray(state)
+              ? state as Record<string, unknown> : undefined;
+            if (!fields || fields.taskId !== remoteArguments.taskId
+              || !["working", "completed", "failed", "cancelled", "input_required"].includes(String(fields.status))) {
+              throw new Error("Legacy peer task_get returned an invalid or mismatched task receipt.");
+            }
+            return state as DurableTaskView;
+          }, typeof input.sinceRevision === "string" ? input.sinceRevision : undefined,
+          { waitMs: 8_000, pollMs: 1_000 });
+          const response = compactLegacyTaskWaitReceipt(latest!, waited.unchanged);
+          return taskRoute
+            ? rewriteOpaqueId(response, taskRoute.localTaskId, taskRoute.taskId)
+            : response;
+        }
         const result = await options.router.callWorkspaceTool({
           workspaceId,
           name,
@@ -136,6 +168,41 @@ function rewriteCompatTaskCommand(
   toTaskId: string,
 ): string {
   return command.replace(fromTaskId, toTaskId);
+}
+
+function compactLegacyTaskWaitReceipt(
+  response: Record<string, unknown>,
+  unchanged: boolean,
+): Record<string, unknown> {
+  const source = response.structuredContent as Record<string, unknown>;
+  const taskId = source.taskId as string;
+  const status = source.status as string;
+  const revision = typeof source.revision === "string" ? source.revision : undefined;
+  const exitCode = typeof source.exitCode === "number" ? source.exitCode : undefined;
+  const result = `task=${taskId} ${unchanged ? "unchanged" : status}`
+    + (revision ? ` rev=${revision}` : "")
+    + (exitCode !== undefined ? ` exit=${exitCode}` : "");
+  const structuredContent: Record<string, unknown> = {
+    result, taskId, status,
+    ...(revision ? { revision } : {}),
+    ...(typeof source.runId === "string" ? { runId: source.runId } : {}),
+    ...(typeof source.pollIntervalMs === "number" ? { pollIntervalMs: source.pollIntervalMs } : {}),
+    ...(exitCode !== undefined ? { exitCode } : {}),
+    ...(source.isError === true ? { isError: true } : {}),
+    ...(status === "input_required" && Array.isArray(source.inputRequests)
+      ? { inputRequests: source.inputRequests } : {}),
+    ...(source.error && typeof source.error === "object" && !Array.isArray(source.error)
+      ? { error: {
+          code: (source.error as Record<string, unknown>).code,
+          message: String((source.error as Record<string, unknown>).message ?? "").slice(0, 240),
+        } } : {}),
+    ...(unchanged ? { unchanged: true } : {}),
+  };
+  return {
+    content: [{ type: "text", text: result }],
+    isError: response.isError === true,
+    structuredContent,
+  };
 }
 
 function bindTaskIfPresent(

@@ -120,6 +120,90 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
 
 });
 
+test("new task_wait polls legacy task_get-only peer without replaying execution", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "synrex-legacy-task-wait-"));
+  const store = new SqliteControlPlaneStore(stateDir);
+  t.after(async () => { store.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const local = store.ensureLocalNode({
+    alias: "swy1", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {} },
+  });
+  const remote = store.registerRemoteNode({
+    id: "node_legacy", alias: "gateway", platform: { os: "linux", arch: "x64" },
+    capabilities: {
+      toolMode: "codex", features: [], labels: {}, workspaceRoots: ["/gateway"],
+      toolContracts: { open_workspace: 1, exec_command: 1, task_get: 1 },
+    },
+  });
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  let pollCount = 0;
+  let corruptTaskId = false;
+  const transport: NodeTransport = {
+    async call(nodeId, call) {
+      assert.equal(nodeId, remote.id);
+      calls.push({ name: call.name, args: call.arguments });
+      if (call.name === "open_workspace") {
+        return { structuredContent: { workspaceId: "ws_legacy" } };
+      }
+      if (call.name === "exec_command") {
+        return { structuredContent: { taskId: "task_legacy", running: true } };
+      }
+      if (call.name === "task_get") {
+        pollCount++;
+        return {
+          content: [{ type: "text", text: "legacy task status" }],
+          structuredContent: {
+            taskId: corruptTaskId ? "task_other" : "task_legacy",
+            revision: pollCount === 1 ? "r1" : "r2",
+            status: pollCount === 1 ? "working" : "completed",
+            exitCode: pollCount === 1 ? undefined : 0,
+            detail: { command: "must-not-appear-in-model-context".repeat(100) },
+          },
+        };
+      }
+      throw new Error("Legacy node must never receive task_wait");
+    },
+  };
+  const target = {
+    registerTool: (name: string, _definition: unknown, handler: (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown) => {
+      handlers.set(name, handler); return {};
+    },
+    registerResource: () => ({}),
+  } as unknown as McpRegistrationTarget;
+  const handlers = new Map<string, (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown>();
+  const routed = withMultiNodeRouting(target, {
+    router: new MultiNodeRouter(store, transport, local.id), store, localNodeId: local.id,
+  });
+  for (const name of ["open_workspace", "exec_command", "task_wait"]) {
+    (routed.registerTool as unknown as (n: string, def: unknown, handler: (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown) => unknown)(
+      name, {}, async () => ({ structuredContent: { result: "local" } }),
+    );
+  }
+  const opened = await handlers.get("open_workspace")!({ path: "/gateway/project", node: "gateway" }, {});
+  const workspaceId = (opened as { structuredContent: { workspaceId: string } }).structuredContent.workspaceId;
+  const started = await handlers.get("exec_command")!({ workspaceId, cmd: "printf once" }, {});
+  const taskId = (started as { structuredContent: { taskId: string } }).structuredContent.taskId;
+  const waited = await handlers.get("task_wait")!({ workspaceId, taskId }, {}) as {
+    structuredContent: { taskId: string; status: string; exitCode: number };
+  };
+  assert.equal(waited.structuredContent.taskId, taskId);
+  assert.equal(waited.structuredContent.status, "completed");
+  assert.equal(waited.structuredContent.exitCode, 0);
+  assert.ok(JSON.stringify(waited).length < 500, "legacy wait response must remain compact");
+  assert.equal(pollCount, 2);
+  assert.equal(calls.filter((call) => call.name === "exec_command").length, 1);
+  assert.equal(calls.some((call) => call.name === "task_wait"), false);
+  assert.equal(calls.filter((call) => call.name === "task_get").every(
+    (call) => call.args.taskId === "task_legacy" && call.args.detail === true,
+  ), true);
+  corruptTaskId = true;
+  await assert.rejects(
+    async () => handlers.get("task_wait")!({ workspaceId, taskId }, {}),
+    /invalid or mismatched task receipt/,
+  );
+  assert.equal(calls.filter((call) => call.name === "exec_command").length, 1);
+});
+
 
 test("migrated coordinator preserves global workspace/task IDs while executing local sessions", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "devspace-migrated-local-route-"));

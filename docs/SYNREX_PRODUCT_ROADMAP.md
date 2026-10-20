@@ -249,6 +249,11 @@ on different nodes.
 - Verify sticky route, journal reconciliation, orphaned completion receipts,
   peer disconnect and rejoin, task owner liveness and no accidental robot
   command fallback.
+- A post-M1 source-only compatibility change permits coordinator-side bounded
+  task_get polling when an older peer advertises task_get v1 but has no
+  task_wait contract. This preserves global task identity, compact receipts,
+  and no command replay. Unit-tested, **not part of the currently pinned
+  20261020-synrex-m1-v1 production artifact** until a later release.
 - Windows is accepted as an optional peer, not a mandatory health gate.
 - Acceptance: gateway outage leaves local editing operational; one remote
   long task survives link loss; the returned task owner and run ID remain
