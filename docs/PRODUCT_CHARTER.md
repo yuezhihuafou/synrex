@@ -19,6 +19,16 @@ harness. Coding is the product's primary use case. Generic execution primitives
 can also support simulations, builds, tests, data processing, and other
 authorized computational work.
 
+**Primary host boundary:** Synrex is designed for **ordinary ChatGPT
+conversation mode**, with GPT as the visible reasoning/decision agent. Do not
+make ChatGPT Work, dots, a separately billed model/API agent, or a standalone
+chat frontend a requirement for its primary user experience. A ChatGPT MCP App
+widget may be an **optional component within the ordinary conversation**,
+not a substitute for that conversation. Host-specific follow-up bridges may
+only be treated as supported when verified in the actual ordinary-chat host.
+No reverse proxy or server event is assumed to have permission to inject
+messages into a conversation or resume GPT reasoning without host support.
+
 **Boundary:** Research Harness is a separate application/project. It may call
 generic Synrex tools; hypotheses, literature reviews, experiment protocols,
 robotics-specific workflows, research data semantics, and paper generation

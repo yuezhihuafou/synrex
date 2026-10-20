@@ -1,7 +1,8 @@
 # ADR: Event-first task completion, with bounded adaptive fallback
 
-Status: accepted design direction, source-side incremental implementation;
-MCP Events / official Tasks extension integration remains unimplemented.
+Status: accepted direction, scoped to ordinary ChatGPT conversations. Local
+event-first task waiting is implemented; automatic host continuation remains
+unproven. Work/dots integration is outside the product's primary scope.
 Date: 2026-10-20.
 
 ## Problem, observed facts, and scope
@@ -35,12 +36,17 @@ This incurred server I/O but did not produce new GPT tool calls.
    but not task_wait, route task_wait to a bounded coordinator-side
    read-only wait via task_get; preserve global task identity and compact the
    receipt. Never retry exec_command, apply_patch, or other side effects.
-5. **Feature-negotiated push, not an invented callback.** Investigate MCP
-   Tasks extension (io.modelcontextprotocol/tasks) and
-   notifications/tasks over subscriptions/listen when actual clients
-   advertise and honor them. For ChatGPT Work/dots, separately consider
-   OpenAI MCP Events (events/list, subscribe, unsubscribe, verified webhooks).
-   Ordinary ChatGPT chat is not presumed to receive or act on such events.
+5. **Ordinary-conversation bridge, not an invented callback.** Investigate
+   the ChatGPT MCP App widget bridge as an optional *in-conversation*
+   mechanism: `window.openai.callTool` for reading task status and
+   `window.openai.sendFollowUpMessage` for asking the host to submit a new
+   turn. Test this with explicit user clicks first; investigate fully
+   automatic forwarding only in a disposable proof of concept with a visible
+   opt-in and conservative rate limits. Do not assume a widget stays alive
+   in the background or guarantees tools are attached to a follow-up turn.
+   Generic MCP Tasks notifications may be used only when an ordinary-chat
+   client advertises and actually consumes them. **Do not build Work/dots
+   MCP Events or a background model service into the Synrex core.**
 6. **Other-host compatibility.** Expose stable task IDs, status, and an
    immediate task_get regardless of event support. Do not require a
    ChatGPT-specific webhook, Codex hook script, or protocol-version update
@@ -54,33 +60,50 @@ This incurred server I/O but did not produce new GPT tool calls.
 
 | Host | Preferred completion | Fallback | Limitation |
 | --- | --- | --- | --- |
-| Ordinary ChatGPT MCP | Bounded tool wait + compact receipt | task_get with recommended backoff | Cannot force the model to resume after turn end |
-| Work or dots with MCP Events support | Explicit user subscription to verified task-completed events | Bounded task wait | Requires authenticated subscriptions/webhook delivery and currently supported host capability |
-| Generic MCP 2026 Tasks client | notifications/tasks on subscriptions/listen when negotiated | tasks/get suggested interval | Host must consume notifications and decide how to continue |
+| Ordinary ChatGPT MCP, no widget | Bounded task_wait + compact receipt | task_get with recommended backoff | Cannot force model continuation after a turn ends |
+| Ordinary ChatGPT MCP App widget (optional) | Widget can read task status; explicit Resume control can request follow-up message via host bridge | Model-visible task IDs and manual follow-up | Background auto-follow-up and tool continuity are unverified |
+| Generic MCP Tasks-aware host | notifications/tasks on subscriptions/listen when negotiated | tasks/get suggested interval | Generic capability does not imply ordinary ChatGPT supports notifications |
 | Synrex remote peers | Local OS event or peer task status; negotiated read-only route | bounded task_get polling | Old peers may not implement task_wait |
 
 MCP core protocol revision 2026-07-28 removes the old GET SSE
 notifications path; subscriptions/listen uses a long-lived POST-response
 stream. Do not implement an obsolete SSE GET as if it were portable.
-MCP Events uses callback delivery and must not be confused with MCP Tasks
-status notifications. Codex lifecycle hooks are likewise distinct: they
-run trusted scripts where the host's execution runtime is installed, and
-do not automatically grant ordinary browser ChatGPT model-continuation.
+OpenAI MCP Events currently applies to Work/dots, not the ordinary
+conversation target of Synrex, and is **not a planned core integration**.
+Codex lifecycle hooks are likewise distinct from normal ChatGPT chat.
+An HTTP domain, WebSocket, SSE, reverse proxy, or Cloudflare worker can
+transport events, but none confers authority to insert new host messages.
 
-## Event safety if Work/dots integration is later approved
+## Optional ordinary-chat widget feasibility gate
 
-- Use principal-scoped subscriptions with explicit task/project filters;
-  never broadcast another owner's task ID or logs.
-- Verify webhook URLs with a signed, single-use challenge; require TLS,
-  prevent localhost/private-network/redirect SSRF, validate signatures and
-  expiration, and store subscriptions durably and encrypted as appropriate.
-- Outbox with monotonic event ID, bounded retries/jitter, idempotent delivery,
-  dedupe by subscription+event, and cancellation/unsubscribe cleanup.
-- Default terminal events to notification/reporting. Running privileged or
-  destructive follow-on work requires an authenticated, policy-authorized
-  operation and must not be inferred solely from the event.
-- Preserve zero impact on legacy OAuth clients, pinned releases, and normal
-  coding when no event-enabled host is connected.
+The public ChatGPT Plugin UI reference documents
+`window.openai.sendFollowUpMessage({prompt})` and `window.openai.callTool`.
+These are an actual bridge exposed to a *rendered* MCP App component, not a
+general-purpose remote push API. Developer reports describe follow-up
+requests that cause duplicate widgets/tool calls or lose the connector
+toolset. These are reasons to test, not guarantees of failure on every host.
+
+Use a disposable read-only dummy task before touching long-running
+production operations: (1) verify the widget bridge exists; (2) render
+completion from authenticated project-scoped status; (3) press an explicit
+Resume button; (4) verify the next GPT turn receives a non-replayed task
+receipt and can call Synrex tools; (5) test widget suspension, tab switches,
+mobile vs browser, reload, and two simultaneous tasks. Only consider an
+optional auto-follow-up mode if the host reliably accepts a single bounded
+follow-up under explicit user opt-in; prohibit repeated automatic prompts,
+cross-project leakage and destructive follow-on actions.
+
+## Ordinary-chat UI bridge safety
+
+- The widget must be optional: pure conversational tool calls work without it.
+- Enforce authenticated task/project ownership on every status request.
+- Use stable task ID and terminal revision to dedupe follow-up prompts.
+- Make automated resume opt-in, if ever supported; never retry mutating
+  commands automatically from a widget lifecycle event.
+- A background task may continue without a chat; a widget must not claim it
+  can keep the model running independently of the ChatGPT host.
+- Prefer a local completion badge and explicit user Resume control when
+  a follow-up cannot be reliably initiated automatically.
 
 ## Acceptance and evaluation
 
@@ -98,5 +121,5 @@ the release gates, not simply fewer polling requests.
 
 Useful primary references:
 - MCP 2026-07-28 Streamable HTTP and Tasks extension.
-- OpenAI Plugins: MCP Events (Work/dots callback subscription only).
-- OpenAI Plugins: plugin lifecycle hooks (manual/trusted local runtime).
+- OpenAI Plugins: UI reference for window.openai.sendFollowUpMessage and callTool.
+- OpenAI Plugins: MCP Events (Work/dots only; excluded from this product's core).

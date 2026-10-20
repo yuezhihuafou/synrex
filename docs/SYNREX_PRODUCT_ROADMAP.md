@@ -223,9 +223,16 @@ on different nodes.
   change notifications for immediate read-only wakeups, with jittered
   increasing safety-check intervals when events are lost or unavailable.
   The host-visible tool contract and ten-second maximum remain unchanged.
-  See `docs/decisions/20261020-event-driven-execution.md`. Actual MCP
-  Tasks notifications and Work/dots MCP Events are separate future adapters:
-  **neither push integration is shipped in the pinned owner release**.
+  See `docs/decisions/20261020-event-driven-execution.md`. The product
+  target is explicitly **ordinary ChatGPT conversations, not Work or dots**.
+  Next feasibility spike: an optional in-conversation MCP App widget that
+  reads job completion, then uses the documented ChatGPT UI
+  `sendFollowUpMessage` bridge via an explicit Resume action. Validate
+  model/tool continuation and iframe lifetime on a disposable non-mutating
+  task before considering opt-in automatic continuation. Do not assume a
+  remote domain/proxy or MCP Events can inject ordinary GPT context.
+  Generic MCP Tasks notifications are optional only if the actual ordinary
+  ChatGPT host supports them. No event push bridge is shipped yet.
 - Isolated 2026-10-20 QA has verified a 17-tool authenticated MCP schema,
   preserved workflow and durable task IDs across a candidate restart,
   unchanged OAuth/Console access controls and the new wait path. This is
