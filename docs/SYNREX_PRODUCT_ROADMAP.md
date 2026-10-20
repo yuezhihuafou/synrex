@@ -304,8 +304,34 @@ challenge, protected API snapshot, fake cookie rejection, and Chrome headless
 rendering all passed. Production owner runtime and OAuth discovery remained
 healthy after versioned rollback-safe promotion and state backup.
 
-UI0 is an operational MVP rather than full completion of the product plan:
-the **R0 source provenance gap**, ordinary ChatGPT client schema refresh,
-real new-chat continuation, multi-host fault injection and curated memory
-promotion all remain open. Advanced task/process detail and protected write
-actions are intentionally deferred to a later UI milestone.
+UI0 was initially deployed in the historical Rev-named release. See the
+subsequent Synrex release record below for the current pinned version.
+Advanced task/process detail and protected write actions remain deferred.
+
+### M0 source provenance and M1 bounded wait release evidence (2026-10-20)
+
+**M0's source-to-release provenance blocker is closed for the pinned
+`20261020-synrex-m1-v1` release.** Its source was snapshotted to Git commit
+`6d05d3f24fbbb7d056ed6a64d6393919933637dc`, independently rebuilt with
+a frozen offline lockfile, checked as Git-clean, packaged with source archive
+and key asset checksums, and successfully promoted after a verified owner
+state backup. Production's external MCP/OAuth URL, issuer, database and
+legacy CLI compatibility remain unchanged. The previous pinned release and
+the activation rollback path are preserved.
+
+The new release exposes 17 compiled tools, including a read-only, bounded
+`task_wait` that does not replay commands or resume GPT model inference.
+Isolated authenticated HTTP/MCP QA verified tool-schema fingerprint
+`c9dfa18943863a1d5653`, workflow and durable-command recovery after
+restart, and Console security controls. A full regression run passed 272
+tests with 0 failures and 1 explicitly skipped test.
+
+**Remaining M1 gate:** actual new ChatGPT-host tool-list refresh is not yet
+proven. Live enrollment remains locked, so the production schema probe could
+verify compiled identity but not create a new authenticated probing client.
+Real-model task success, polling cost, and ambiguous non-idempotent remote
+write fault injection are still pending. The cross-node resilience and
+evidence-backed memory acceptance milestones also remain open.
+
+Full rollout evidence and precise limitations:
+[`docs/release-evidence/20261020-synrex-m1-v1.md`](release-evidence/20261020-synrex-m1-v1.md).
