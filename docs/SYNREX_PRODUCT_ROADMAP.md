@@ -397,3 +397,10 @@ remaining V1.0 engineering tasks and evidence are tracked in
 [`SYNREX_V1_EXECUTION.md`](SYNREX_V1_EXECUTION.md).
 Successful rollout and component tests are **not** proof of faster
 full-task GPT results against the old Dev baseline.
+
+The subsequent verified swy1 owner fix
+`20261021-synrex-v1-progress-legacy-v2-020ec03` (source `020ec03`)
+also excludes historical incomplete task dispatches from LearningStore
+verified evidence and the Console's reported success count, without
+deleting their raw records. See the
+[`020ec03` rollout evidence](release-evidence/20261021-synrex-v1-progress-legacy-v2-020ec03.md).

@@ -89,17 +89,26 @@ or unpaired shell latency as a 20% GPT productivity gain.
 - **P2 fault testing:** A real gateway service restart with an independent
   durable task has succeeded. This does **not** test all network partitions,
   write-ack loss, cross-peer task reassignment or cancellation races.
-- **P3 evidence:** The capability fixture proved relevant retrieval and
-  explicit promotion, but production has no validated reusable candidate.
-  Do not promote generic `pnpm typecheck` suggestions merely to inflate the
-  memory counter. Evaluate genuine revision-scoped history against no-recall.
-- **P4 production:** The above changes are **live on swy1** in the pinned,
-  rollback-ready `20261021-synrex-v1-progress-3974a10` release, source
-  `3974a10`. The isolated 17-tool HTTP MCP/OAuth/Console acceptance,
-  package smoke, complete 294/0/1 regression, backup, single-owner activation
-  and postflight all passed. Live ChatGPT `workflow_status` returned the
-  new handoff evidence. See the
-  [release acceptance record](release-evidence/20261021-synrex-v1-progress-3974a10.md).
+- **P3 evidence:** Initial deterministic retrieval/promotion fixtures passed,
+  but actual production had historical false-positive `success=1`
+  dispatch-only episodes. The **live** `020ec03` patch prevents those
+  legacy receipts from supplying recall, checks, candidates or success
+  counts while retaining the audit trail. Actual owner `learn_stats`
+  reported 1,961 of 2,000 as successful before and 1,718 of 2,000
+  after filtering. Three successful test episodes back one real
+  version-scoped candidate, verified retrievable but not promoted.
+  Measure revision-scoped retrieval against no-recall before broader use.
+- **P4 production:** The first pinned source release
+  `20261021-synrex-v1-progress-3974a10` passed the full 294/0/1
+  regression and isolated 17-tool HTTP MCP/OAuth/Console QA, live
+  `workflow_status` and backup-backed activation. The incremental
+  **current swy1 production** release is
+  `20261021-synrex-v1-progress-legacy-v2-020ec03` (source `020ec03`),
+  which passed full 296/0/1 regression, package smoke, repeat isolated
+  authenticated QA, owner-state backup and live postflight. gateway remains
+  a compatible v3 execution peer. See
+  [current release record](release-evidence/20261021-synrex-v1-progress-legacy-v2-020ec03.md)
+  and [prior release record](release-evidence/20261021-synrex-v1-progress-3974a10.md).
 
 ## Next independent actions
 
