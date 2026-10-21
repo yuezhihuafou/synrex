@@ -292,6 +292,42 @@ test("committed architecture intent without a verified change cannot silently re
   const afterRestart = await reopened.conformance(root);
   assert.ok(afterRestart.some((issue) => issue.code === "uncommitted-architecture-change"),
     "the protection must survive a new manager instance and a committed Git change");
+
+  await assert.rejects(
+    () => reopened.openChange(root, "Ordinary implementation after unapproved Git change", ["src/a.ts"]),
+    /Ordinary work cannot authorize drift/,
+  );
+  await assert.rejects(
+    () => reopened.openChange(root, "Approve branch architecture", [], { architectureChange: true }),
+    /require a rationale/,
+  );
+  const approved = await reopened.openChange(root, "Review the committed branch architecture", [], {
+    architectureChange: true,
+    rationale: "Explicitly review this branch-intent change before accepting it as authoritative.",
+  });
+  assert.equal(approved.reconciliationOfUnverifiedIntent, true);
+  const closed = await reopened.closeChange(root, approved.id);
+  assert.equal(closed.change.status, "verified");
+  assert.equal(closed.change.reconciliationOfUnverifiedIntent, true);
+  assert.equal((await reopened.conformance(root)).some((issue) => issue.code === "uncommitted-architecture-change"), false);
+
+  // Explicit reconciliation is reviewable, not an unconditional override:
+  // invalid architecture policies cannot advance the trusted seal.
+  await mkdir(join(root, "src", "nested"), { recursive: true });
+  await writeFile(join(root, "src", "nested", "child.ts"), "export const child = 2;\n");
+  const invalidIntent = JSON.parse(await readFile(intentPath, "utf8")) as {
+    policies: { maxDepth: number };
+  };
+  invalidIntent.policies.maxDepth = 1;
+  await writeFile(intentPath, `${JSON.stringify(invalidIntent, null, 2)}\n`);
+  await git(root, ["add", "src/nested/child.ts", ".devspace-architecture.json"]);
+  await git(root, ["commit", "-m", "Attempt to introduce invalid depth limit"]);
+  const invalidReview = await reopened.openChange(root, "Evaluate the proposed depth restriction", [], {
+    architectureChange: true,
+    rationale: "Check that committed but invalid policy changes cannot be accepted.",
+  });
+  await assert.rejects(() => reopened.closeChange(root, invalidReview.id), /Architecture freeze failed/);
+  assert.ok((await reopened.conformance(root)).some((issue) => issue.code === "uncommitted-architecture-change"));
 });
 
 test("reinitialize preserves an explicitly approved uncommitted architecture change", async (t) => {

@@ -302,6 +302,10 @@ on different nodes.
 **2026-10-21 hardening:** A Git commit is no longer proof of user approval for
 architecture intent. The seal advances only when an explicit architecture
 change is verified and closed; an unreviewed committed intent remains drift.
+An authorized branch switch is recoverable: open an explicit architecture
+reconciliation with `architectureChange=true` and a rationale, review its
+observed dependency contract, then close it to advance the seal. Ordinary
+implementation changes remain blocked until that verification succeeds.
 Learning promotion now requires recent successful command-level verification
 evidence with a named command appearing in the proposed procedure, and blocks
 obvious test/review/authorization bypass instructions. These are narrow

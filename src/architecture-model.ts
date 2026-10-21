@@ -248,6 +248,7 @@ export interface ArchitectureChangeRecord {
   afterHead?: string;
   baselineIntentFingerprint?: string;
   afterIntentFingerprint?: string;
+  reconciliationOfUnverifiedIntent?: boolean;
   requestedPaths: string[];
   affectedModules: string[];
 }
@@ -488,13 +489,14 @@ export class ArchitectureModelManager {
     const currentIntentFingerprint = architectureIntentFingerprint(await this.requireIntent(root));
     const sealedIntentFingerprint = await this.readIntentLock(root) ?? currentIntentFingerprint;
     if (!(await this.readIntentLock(root))) await this.writeIntentLock(root, sealedIntentFingerprint);
-    if (currentIntentFingerprint !== sealedIntentFingerprint) {
-      throw new Error("Architecture intent has uncommitted changes. Restore it or close the architecture change before opening another change.");
-    }
     const kind = options.architectureChange ? "architecture" : "implementation";
     const rationale = options.rationale?.trim();
     if (kind === "architecture" && !rationale) {
       throw new Error("Architecture changes require a rationale.");
+    }
+    const reconciliation = currentIntentFingerprint !== sealedIntentFingerprint;
+    if (reconciliation && kind !== "architecture") {
+      throw new Error("Architecture intent differs from its verified seal. Ordinary work cannot authorize drift; explicitly review and close an architecture change with rationale, or restore the previous intent.");
     }
     const affected = await this.affected(root, requestedPaths.length > 0 ? requestedPaths : undefined);
     const record: ArchitectureChangeRecord = {
@@ -506,6 +508,7 @@ export class ArchitectureModelManager {
       openedAt: new Date().toISOString(),
       baselineHead: model.revision.head,
       baselineIntentFingerprint: sealedIntentFingerprint,
+      ...(reconciliation ? { reconciliationOfUnverifiedIntent: true } : {}),
       requestedPaths: affected.changedPaths,
       affectedModules: affected.modules.map((module) => module.id),
     };
