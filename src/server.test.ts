@@ -140,6 +140,26 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
     arguments: { workspaceId: reopened.workspaceId, workflowId },
   });
   assert.equal((structuredContent(inspection).history as unknown[]).length, 1);
+  const handoff = structuredContent(inspection).handoff as {
+    workspaceRoot: string;
+    liveGit: { gitHead?: string; gitStatus?: string };
+    checkpointGitMatchesCurrent: boolean | null;
+    taskIdsToInspect: string[];
+    checksAreSelfReported: boolean;
+  };
+  assert.equal(handoff.workspaceRoot, context.project);
+  assert.match(handoff.liveGit.gitHead ?? "", /^[0-9a-f]{40}$/);
+  assert.equal(handoff.checkpointGitMatchesCurrent, true);
+  assert.deepEqual(handoff.taskIdsToInspect, ["task_0123456789abcdef"]);
+  assert.equal(handoff.checksAreSelfReported, true);
+  await writeFile(join(context.project, "changed-after-checkpoint.txt"), "new state\n");
+  const changed = await context.client.callTool({
+    name: "workflow_status",
+    arguments: { workspaceId: reopened.workspaceId, workflowId },
+  });
+  const changedHandoff = structuredContent(changed).handoff as typeof handoff;
+  assert.equal(changedHandoff.checkpointGitMatchesCurrent, false);
+  assert.match(changedHandoff.liveGit.gitStatus ?? "", /changed-after-checkpoint.txt/);
 });
 
 test("project tool exposes a typed stable schema while retaining legacy args", async (t) => {

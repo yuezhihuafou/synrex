@@ -59,6 +59,11 @@ export class LearningStore {
     error?: unknown;
   }): void {
     if (input.tool === "learning") return;
+    // A detached command returning a task handle has not passed its check.
+    // The durable task ledger owns the eventual outcome; do not convert a
+    // successful MCP dispatch into a false verification episode.
+    if ((input.tool === "exec_command" || input.tool === "bash")
+      && responseIsPending(input.toolOutput)) return;
     const database = openDatabase(this.stateDir);
     try {
       const episode: LearningEpisode = {
@@ -532,7 +537,19 @@ function summarizeOutput(value: unknown): string {
 }
 
 function responseIsError(value: unknown): boolean {
-  return recordValue(value).isError === true;
+  const response = recordValue(value);
+  const structured = recordValue(response.structuredContent);
+  return response.isError === true
+    || structured.isError === true
+    || (typeof structured.exitCode === "number" && structured.exitCode !== 0)
+    || structured.status === "failed"
+    || structured.status === "cancelled";
+}
+
+function responseIsPending(value: unknown): boolean {
+  const response = recordValue(value);
+  const structured = recordValue(response.structuredContent);
+  return structured.running === true || structured.status === "working" || structured.status === "input_required";
 }
 
 function queryTokens(query: string): string[] {

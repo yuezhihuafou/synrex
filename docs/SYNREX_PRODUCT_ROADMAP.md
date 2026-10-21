@@ -383,3 +383,12 @@ evidence-backed memory acceptance milestones also remain open.
 
 Full rollout evidence and precise limitations:
 [`docs/release-evidence/20261020-synrex-m1-v1.md`](release-evidence/20261020-synrex-m1-v1.md).
+
+### 2026-10-21: V1.0 acceptance and implementation handoff
+
+This earlier roadmap contains historical candidate/release observations.
+The subsequently pinned owner and gateway production release is
+`20261021-synrex-reliability-v3` (manifest source `d9b576b`).
+The active, evidence-first V1.0 work and outstanding comparisons are tracked
+in [`SYNREX_V1_EXECUTION.md`](SYNREX_V1_EXECUTION.md). Do not confuse its
+source-only changes or component benchmarks with deployed end-to-end wins.

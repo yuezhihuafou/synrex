@@ -2,6 +2,10 @@ export interface AgentBenchmarkRecord {
   taskId: string;
   variant: string;
   provider?: string;
+  model?: string;
+  effort?: string;
+  startingCommit?: string;
+  environmentId?: string;
   valid?: boolean;
   invalidReason?: string;
   success: boolean;
@@ -15,6 +19,8 @@ export interface AgentBenchmarkRecord {
   architectureViolations: number;
   falsePositiveBlocks: number;
   humanInterventions: number;
+  /** Only defined for a run that exercised actual recovery. */
+  recoverySuccess?: boolean;
 }
 
 export interface AgentBenchmarkSummary {
@@ -28,15 +34,21 @@ export interface AgentBenchmarkSummary {
   meanInputTokens: number | null;
   meanOutputTokens: number | null;
   meanToolCalls: number | null;
+  medianToolCalls: number | null;
   meanRetries: number | null;
   meanWallTimeMs: number | null;
+  medianWallTimeMs: number | null;
   meanArchitectureViolations: number | null;
   meanFalsePositiveBlocks: number | null;
   meanHumanInterventions: number | null;
+  medianHumanInterventions: number | null;
+  recoveryRuns: number;
+  recoverySuccessRate: number | null;
 }
 
 export interface PairedAgentBenchmarkSummary {
   pairs: number;
+  incomparablePairs: number;
   bothSucceeded: number;
   governedOnlySucceeded: number;
   baselineOnlySucceeded: number;
@@ -46,6 +58,7 @@ export interface PairedAgentBenchmarkSummary {
   meanOutputTokenDelta: number | null;
   meanToolCallDelta: number | null;
   meanWallTimeDeltaMs: number | null;
+  medianWallTimeDeltaMs: number | null;
 }
 
 export function summarizeAgentBenchmark(records: AgentBenchmarkRecord[]): AgentBenchmarkSummary[] {
@@ -71,11 +84,16 @@ export function summarizeAgentBenchmark(records: AgentBenchmarkRecord[]): AgentB
         meanInputTokens: meanOrNull(valid.flatMap((row) => row.inputTokens === undefined ? [] : [row.inputTokens])),
         meanOutputTokens: meanOrNull(valid.flatMap((row) => row.outputTokens === undefined ? [] : [row.outputTokens])),
         meanToolCalls: meanOrNull(valid.map((row) => row.toolCalls)),
+        medianToolCalls: medianOrNull(valid.map((row) => row.toolCalls)),
         meanRetries: meanOrNull(valid.map((row) => row.retries)),
         meanWallTimeMs: meanOrNull(valid.map((row) => row.wallTimeMs)),
+        medianWallTimeMs: medianOrNull(valid.map((row) => row.wallTimeMs)),
         meanArchitectureViolations: meanOrNull(valid.map((row) => row.architectureViolations)),
         meanFalsePositiveBlocks: meanOrNull(valid.map((row) => row.falsePositiveBlocks)),
         meanHumanInterventions: meanOrNull(valid.map((row) => row.humanInterventions)),
+        medianHumanInterventions: medianOrNull(valid.map((row) => row.humanInterventions)),
+        recoveryRuns: valid.filter((row) => row.recoverySuccess !== undefined).length,
+        recoverySuccessRate: meanOrNull(valid.flatMap((row) => row.recoverySuccess === undefined ? [] : [row.recoverySuccess ? 1 : 0])),
       };
     });
 }
@@ -85,14 +103,22 @@ export function summarizePairedAgentBenchmark(records: AgentBenchmarkRecord[]): 
   for (const record of records) {
     if (record.valid === false || (record.variant !== "baseline" && record.variant !== "governed")) continue;
     const pair = byTask.get(record.taskId) ?? {};
+    if (pair[record.variant]) {
+      throw new Error(`Duplicate benchmark run for task ${record.taskId}, variant ${record.variant}; use unique repeat taskIds.`);
+    }
     pair[record.variant] = record;
     byTask.set(record.taskId, pair);
   }
-  const pairs = [...byTask.values()].flatMap((pair) => (
+  const candidates = [...byTask.values()].flatMap((pair) => (
     pair.baseline && pair.governed ? [{ baseline: pair.baseline, governed: pair.governed }] : []
   ));
+  // Incompatible model/run controls cannot be presented as paired evidence.
+  const pairs = candidates.filter(({ baseline, governed }) =>
+    (["provider", "model", "effort", "startingCommit", "environmentId"] as const)
+      .every((key) => baseline[key] === governed[key]));
   return {
     pairs: pairs.length,
+    incomparablePairs: candidates.length - pairs.length,
     bothSucceeded: pairs.filter(({ baseline, governed }) => baseline.success && governed.success).length,
     governedOnlySucceeded: pairs.filter(({ baseline, governed }) => !baseline.success && governed.success).length,
     baselineOnlySucceeded: pairs.filter(({ baseline, governed }) => baseline.success && !governed.success).length,
@@ -106,11 +132,19 @@ export function summarizePairedAgentBenchmark(records: AgentBenchmarkRecord[]): 
     ))),
     meanToolCallDelta: meanOrNull(pairs.map(({ baseline, governed }) => governed.toolCalls - baseline.toolCalls)),
     meanWallTimeDeltaMs: meanOrNull(pairs.map(({ baseline, governed }) => governed.wallTimeMs - baseline.wallTimeMs)),
+    medianWallTimeDeltaMs: medianOrNull(pairs.map(({ baseline, governed }) => governed.wallTimeMs - baseline.wallTimeMs)),
   };
 }
 
 function meanOrNull(values: number[]): number | null {
   return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function medianOrNull(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
 function validateRecord(record: AgentBenchmarkRecord): void {

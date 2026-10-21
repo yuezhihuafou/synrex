@@ -173,3 +173,23 @@ test("read-only learning suggestions require repeated successful checks and neve
   assert.equal(store.suggestVerifiedProcedures(workspaceRoot)[0]?.evidenceEpisodeIds.length, 2);
   assert.deepEqual(store.listCandidates(workspaceRoot), []);
 });
+
+test("detached or failed shell commands cannot become verified learning evidence", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-learning-durable-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceRoot = join(root, "project");
+  const store = new LearningStore(join(root, "state"));
+  // exec_command can return a task handle before the actual check has finished.
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm typecheck" },
+    toolOutput: { structuredContent: { running: true, taskId: "task_abc", runId: "run_abc" } } });
+  assert.equal(store.stats(workspaceRoot).episodes, 0);
+
+  // Some adapters report exitCode without setting the MCP isError bit.
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm typecheck" },
+    toolOutput: { structuredContent: { running: false, exitCode: 2, result: "failed" } } });
+  assert.equal(store.stats(workspaceRoot).successful, 0);
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm typecheck" },
+    toolOutput: { structuredContent: { running: false, exitCode: 0, result: "passed" } } });
+  assert.equal(store.stats(workspaceRoot).successful, 1);
+  assert.deepEqual(store.suggestVerifiedProcedures(workspaceRoot), []);
+});

@@ -81,9 +81,29 @@ export function registerCodingWorkflowTools(input: {
     const result = withCodingWorkflowStore(stateDir, (store) => requestedId
       ? { workflow: store.getRequired(requestedId, workspace.root), history: store.history(requestedId, workspace.root) }
       : { workflows: store.list(workspace.root, { includeCompleted, limit: 15 }) });
+    // A checkpoint is historical, potentially self-reported context. Make
+    // takeover show a separate, fresh read of the actual local Git state so a
+    // new conversation cannot mistake a stale summary for current checkout.
+    const workflow = "workflow" in result ? result.workflow : undefined;
+    const handoff = workflow ? (() => {
+      const liveGit = gitSnapshot(workspace.root);
+      const checkpoint = workflow.checkpoint;
+      return {
+        workspaceRoot: workspace.root,
+        observedAt: new Date().toISOString(),
+        liveGit,
+        checkpointGitMatchesCurrent: checkpoint.gitHead && liveGit.gitHead
+          ? checkpoint.gitHead === liveGit.gitHead && checkpoint.gitStatus === liveGit.gitStatus
+          : null,
+        taskIdsToInspect: checkpoint.taskIds,
+        checksAreSelfReported: true,
+      };
+    })() : undefined;
     return {
-      content: [textBlock(JSON.stringify(result))],
-      structuredContent: { ...result },
+      content: [textBlock(handoff && workflow
+        ? `Workflow handoff: ${workflow.workflowId} revision ${workflow.revision}. Git matches saved checkpoint: ${String(handoff.checkpointGitMatchesCurrent)}. Inspect ${handoff.taskIdsToInspect.length} referenced task receipt(s) before retrying; checkpoint checks are self-reported. Next: ${workflow.checkpoint.nextSteps.join("; ") || "none"}.`
+        : JSON.stringify(result))],
+      structuredContent: { ...result, ...(handoff ? { handoff } : {}) },
     };
   });
 

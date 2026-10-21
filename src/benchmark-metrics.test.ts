@@ -23,6 +23,9 @@ test("agent benchmark summaries keep outcome quality separate from efficiency", 
   assert.equal(summaries[0]?.successRate, 0.5);
   assert.equal(summaries[0]?.functionalSuccessRate, 0.5);
   assert.equal(summaries[0]?.meanContextBytes, 2000);
+  assert.equal(summaries[0]?.medianWallTimeMs, 1000);
+  assert.equal(summaries[0]?.recoveryRuns, 0);
+  assert.equal(summaries[0]?.recoverySuccessRate, null);
   assert.equal(summaries[1]?.variant, "governed");
   assert.equal(summaries[1]?.successRate, 1);
   assert.equal(summaries[1]?.meanContextBytes, 1400);
@@ -106,4 +109,31 @@ test("paired summaries compare the same task run rather than unrelated means", (
   assert.equal(summary.meanOutputTokenDelta, -2);
   assert.equal(summary.meanToolCallDelta, 0);
   assert.equal(summary.meanWallTimeDeltaMs, -50);
+  assert.equal(summary.medianWallTimeDeltaMs, -50);
+  assert.equal(summary.incomparablePairs, 0);
+});
+
+test("recovery and median metrics exclude invalid runs and do not fabricate recovery evidence", () => {
+  const common = { variant: "synrex", contextBytes: 100, toolCalls: 3, retries: 0,
+    architectureViolations: 0, falsePositiveBlocks: 0, humanInterventions: 0 };
+  const [summary] = summarizeAgentBenchmark([
+    { ...common, taskId: "one", success: true, wallTimeMs: 100, recoverySuccess: true },
+    { ...common, taskId: "two", success: false, wallTimeMs: 500, recoverySuccess: false },
+    { ...common, taskId: "three", success: true, wallTimeMs: 2000 },
+    { ...common, taskId: "transport", success: false, valid: false, invalidReason: "closed", wallTimeMs: 99999, recoverySuccess: false },
+  ]);
+  assert.equal(summary?.medianWallTimeMs, 500);
+  assert.equal(summary?.recoveryRuns, 2);
+  assert.equal(summary?.recoverySuccessRate, 0.5);
+});
+
+test("paired summaries reject duplicate samples and flag explicitly mismatched controls", () => {
+  const common = { taskId: "test#1", success: true, contextBytes: 12, toolCalls: 1,
+    retries: 0, wallTimeMs: 10, architectureViolations: 0, falsePositiveBlocks: 0, humanInterventions: 0 };
+  const baseline = { ...common, variant: "baseline", provider: "chatgpt", model: "gpt-a" };
+  const governed = { ...common, variant: "governed", provider: "chatgpt", model: "gpt-b" };
+  const summary = summarizePairedAgentBenchmark([baseline, governed]);
+  assert.equal(summary.pairs, 0);
+  assert.equal(summary.incomparablePairs, 1);
+  assert.throws(() => summarizePairedAgentBenchmark([baseline, baseline]), /Duplicate benchmark run/);
 });
