@@ -167,19 +167,37 @@ export class CompletionMailbox {
   }
 }
 
-/** Adds a separate content block; leaves structuredContent and the original
- * result unchanged. No new tool, no callback permission, no model side effects.
+/**
+ * A number of real ChatGPT MCP tool adapters expose only structuredContent.result
+ * and discard additional content blocks. Include a bounded, clearly separated
+ * notice in that model-visible text while retaining the exact original result
+ * as sourceResult. Ordinary responses without notifications are untouched.
+ * Never inject task output, command text, or remote-origin data as instructions.
  */
 export function appendMailboxEvents<T extends Record<string, unknown>>(
   response: T,
   events: readonly MailboxEvent[],
 ): T {
   if (!events.length || response.isError === true || !Array.isArray(response.content)) return response;
+  const structured = response.structuredContent;
+  const fields = structured && typeof structured === "object" && !Array.isArray(structured)
+    ? structured as Record<string, unknown> : undefined;
+  const original = fields && typeof fields.result === "string" ? fields.result : undefined;
+  const notice = CompletionMailbox.format(events);
   return {
     ...response,
     content: [
       ...response.content,
-      { type: "text", text: CompletionMailbox.format(events) },
+      { type: "text", text: notice },
     ],
+    ...(original !== undefined ? { structuredContent: {
+      ...fields,
+      sourceResult: original,
+      result: `${original}\n\n--- Synrex task status (not source content) ---\n${notice}`,
+      completionNotices: events.map(({ taskId, status, runId, exitCode, revision }) => ({
+        taskId, status, ...(runId ? { runId } : {}),
+        ...(exitCode !== undefined ? { exitCode } : {}), revision,
+      })),
+    } } : {}),
   };
 }

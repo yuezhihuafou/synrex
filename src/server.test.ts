@@ -227,7 +227,8 @@ test("completion mailbox relays a finished background job only in the originatin
   assert.match(contentText(response), /hello/);
   assert.match(contentText(response), /Synrex Completion Mailbox/);
   assert.match(contentText(response), new RegExp(taskId));
-  assert.equal(structuredContent(response).result, "hello\n");
+  assert.equal(structuredContent(response).sourceResult, "hello\n");
+  assert.match(String(structuredContent(response).result), /Synrex Completion Mailbox/);
   const again = await context.client.callTool({
     name: "read", arguments: { workspaceId, path: "README.md" }, _meta: metaA,
   } as Parameters<Client["callTool"]>[0]);

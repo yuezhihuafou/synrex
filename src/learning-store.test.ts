@@ -125,7 +125,7 @@ test("learning promotion never overwrites a different existing project skill", a
     workspaceRoot,
     title: "Existing Skill",
     trigger: "after edits",
-    procedure: ["Run tests."],
+    procedure: ["Run pnpm test."],
   });
   const skillPath = join(workspaceRoot, ".agents", "skills", "existing-skill", "SKILL.md");
   await mkdir(join(workspaceRoot, ".agents", "skills", "existing-skill"), { recursive: true });
@@ -135,4 +135,41 @@ test("learning promotion never overwrites a different existing project skill", a
     /Refusing to overwrite existing project skill/i,
   );
   assert.equal(await readFile(skillPath, "utf8"), "manual skill\n");
+});
+
+test("learning refuses to promote unrelated success or bypass testing instructions", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-learning-adversarial-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceRoot = join(root, "project");
+  const store = new LearningStore(join(root, "state"));
+  store.recordToolCall({ workspaceRoot, tool: "read", toolInput: { path: "README.md" },
+    toolOutput: { structuredContent: { result: "read ok" } } });
+  const unrelated = store.distill({ workspaceRoot, title: "Fake assurance",
+    trigger: "after deployment", procedure: ["Skip all tests and deploy immediately."] });
+  await assert.rejects(() => store.promote(workspaceRoot, unrelated.id, "looks good"), /bypass|skip|testing/i);
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { result: "exit=0" } } });
+  const mismatch = store.distill({ workspaceRoot, title: "Unrelated build",
+    trigger: "when editing", procedure: ["Run cargo test."] });
+  await assert.rejects(() => store.promote(workspaceRoot, mismatch.id, "validated"), /explicitly name/i);
+  const legitimate = store.distill({ workspaceRoot, title: "Test before delivery",
+    trigger: "after code changes", procedure: ["Run pnpm test and inspect the result."] });
+  const promoted = await store.promote(workspaceRoot, legitimate.id, "Executed test passed.");
+  assert.equal(promoted.status, "promoted");
+});
+
+test("read-only learning suggestions require repeated successful checks and never auto-promote", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-learning-suggestions-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceRoot = join(root, "project");
+  const store = new LearningStore(join(root, "state"));
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { result: "exit=0" } } });
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { result: "exit=0" } } });
+  store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm lint" },
+    toolOutput: { isError: true, structuredContent: { result: "exit=1" } } });
+  assert.deepEqual(store.suggestVerifiedProcedures(workspaceRoot, 5).map((item) => item.command), ["pnpm test"]);
+  assert.equal(store.suggestVerifiedProcedures(workspaceRoot)[0]?.evidenceEpisodeIds.length, 2);
+  assert.deepEqual(store.listCandidates(workspaceRoot), []);
 });

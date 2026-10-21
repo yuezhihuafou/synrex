@@ -261,7 +261,7 @@ test("fresh local governance state anchors tracked intent to Git HEAD", async (t
   assert.ok(issues.some((issue) => issue.code === "uncommitted-architecture-change"));
 });
 
-test("committed architecture intent from a branch update becomes the trusted baseline", async (t) => {
+test("committed architecture intent without a verified change cannot silently reset its seal", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "devspace-architecture-committed-update-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "src"), { recursive: true });
@@ -287,7 +287,11 @@ test("committed architecture intent from a branch update becomes the trusted bas
   await git(root, ["commit", "-m", "Update architecture intent"]);
 
   const issues = await manager.conformance(root);
-  assert.equal(issues.some((issue) => issue.code === "uncommitted-architecture-change"), false);
+  assert.equal(issues.some((issue) => issue.code === "uncommitted-architecture-change"), true);
+  const reopened = new ArchitectureModelManager();
+  const afterRestart = await reopened.conformance(root);
+  assert.ok(afterRestart.some((issue) => issue.code === "uncommitted-architecture-change"),
+    "the protection must survive a new manager instance and a committed Git change");
 });
 
 test("reinitialize preserves an explicitly approved uncommitted architecture change", async (t) => {

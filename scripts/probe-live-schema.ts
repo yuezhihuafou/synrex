@@ -306,7 +306,8 @@ try {
       if (JSON.stringify(repeatedRead.content ?? []).includes("[Synrex Completion Mailbox]")) {
         throw new Error("QA mailbox repeated a fresh notification");
       }
-      if (typeof related.structuredContent.result !== "string" || !related.structuredContent.result.includes('"name": "synrex"')) {
+      if (typeof related.structuredContent.result !== "string" || !related.structuredContent.result.includes(`task=${mailboxTaskId} status=completed`)
+        || typeof related.structuredContent.sourceResult !== "string" || !related.structuredContent.sourceResult.includes('"name": "synrex"')) {
         throw new Error("QA mailbox changed the original read structuredContent");
       }
       qaMailboxDelivered = true;

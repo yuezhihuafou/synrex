@@ -15,7 +15,7 @@ const PROJECT_ACTIONS = [
   "help",
   "arch_init", "arch_brief", "arch_affected", "arch_validate", "arch_refresh",
   "arch_annotate", "arch_policy", "arch_change_open", "arch_change_close", "arch_render",
-  "learn_recall", "learn_distill", "learn_candidates", "learn_promote", "learn_reject", "learn_stats",
+  "learn_recall", "learn_suggest", "learn_distill", "learn_candidates", "learn_promote", "learn_reject", "learn_stats",
 ] as const;
 type ProjectAction = typeof PROJECT_ACTIONS[number];
 
@@ -102,7 +102,7 @@ export function registerProjectIntelligenceTools(
         result = [
           "Architecture: arch_init, arch_brief(target), arch_affected(paths), arch_validate(semanticEvidence?), arch_refresh, arch_change_open(intent, paths, architectureChange?, rationale?), arch_annotate(changeId + target + summary/contracts/tags), arch_policy(changeId + acyclic/maxDepth/dependencyRules), arch_change_close(changeId), arch_render.",
           "Architecture intent is versioned in .devspace-architecture.json and protected: annotations and policies may change only inside an explicit architecture change with rationale. note contracts document intent; forbid_dependency/require_dependency contracts are executable.",
-          "Learning: learn_recall(query), learn_distill(title, trigger, procedure, evidenceEpisodeIds?), learn_candidates(status?), learn_promote(candidateId, validationNote), learn_reject(candidateId, validationNote?), learn_stats.",
+          "Learning: learn_recall(query), learn_suggest, learn_distill(title, trigger, procedure, evidenceEpisodeIds?), learn_candidates(status?), learn_promote(candidateId, validationNote), learn_reject(candidateId, validationNote?), learn_stats. Suggested evidence is read-only; promotion requires a recent successful verification command explicitly named in the procedure.",
           "Set detail=true to expand supported read results. Legacy args remains accepted for older hosts.",
         ].join("\n");
       } else if (projectAction === "arch_init") {
@@ -201,6 +201,13 @@ export function registerProjectIntelligenceTools(
           candidateIds: recalled.candidates.map((item) => item.id),
           ...(detail ? { detail: recalled } : {}),
         };
+      } else if (projectAction === "learn_suggest") {
+        const suggestions = learning.suggestVerifiedProcedures(workspace.root, 5);
+        result = suggestions.length
+          ? suggestions.map((item) => `${item.occurrences} verified runs: ${item.command} (latest ${item.lastVerifiedAt}; episodes ${item.evidenceEpisodeIds.join(", ")})`).join("\n")
+          : "No repeated recent verification commands. Nothing is proposed or promoted automatically.";
+        details = { ...details, suggestionCount: suggestions.length,
+          ...(detail ? { detail: { suggestions } } : {}) };
       } else if (projectAction === "learn_distill") {
         if (!title || !trigger || !procedure?.length) {
           throw new Error("project learn_distill requires title, trigger, and procedure.");

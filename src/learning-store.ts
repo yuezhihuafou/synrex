@@ -39,6 +39,14 @@ export interface LearningRecallResult {
   candidates: LearningCandidate[];
 }
 
+export interface VerifiedProcedureSuggestion {
+  command: string;
+  occurrences: number;
+  evidenceEpisodeIds: string[];
+  lastVerifiedAt: string;
+  proposedProcedure: string[];
+}
+
 export class LearningStore {
   constructor(private readonly stateDir: string) {}
 
@@ -150,6 +158,46 @@ export class LearningStore {
     }
   }
 
+  /** Read-only evidence-first suggestions; no automatic trust or promotion.
+   * Repeated verified checks offer reusable hints without manufacturing a
+   * broad "learned procedure" from unrelated execution histories.
+   */
+  suggestVerifiedProcedures(workspaceRoot: string, limit = 5): VerifiedProcedureSuggestion[] {
+    const database = openDatabase(this.stateDir);
+    try {
+      const since = new Date(Date.now() - 7 * 24 * 60 * 60_000).toISOString();
+      const rows = database.sqlite.prepare(`
+        select id, input_summary, created_at from learning_episodes
+        where workspace_root = ? and tool = 'exec_command' and success = 1
+          and created_at >= ?
+        order by created_at desc limit 600
+      `).all(workspaceRoot, since) as Array<{ id: string; input_summary: string; created_at: string }>;
+      const groups = new Map<string, { evidenceEpisodeIds: string[]; lastVerifiedAt: string; count: number }>();
+      for (const row of rows) {
+        const cmd = verifiedCheckCommand(row.input_summary);
+        if (!cmd) continue;
+        const existing = groups.get(cmd);
+        if (existing) {
+          existing.count++;
+          if (existing.evidenceEpisodeIds.length < 5) existing.evidenceEpisodeIds.push(row.id);
+        } else groups.set(cmd, { evidenceEpisodeIds: [row.id], lastVerifiedAt: row.created_at, count: 1 });
+      }
+      return [...groups]
+        .filter(([, value]) => value.count >= 2)
+        .sort((a, b) => b[1].count - a[1].count || b[1].lastVerifiedAt.localeCompare(a[1].lastVerifiedAt))
+        .slice(0, Math.max(1, Math.min(limit, 8)))
+        .map(([command, group]) => ({
+          command,
+          occurrences: group.count,
+          evidenceEpisodeIds: group.evidenceEpisodeIds,
+          lastVerifiedAt: group.lastVerifiedAt,
+          proposedProcedure: [`Run ${command}.`, "Inspect the result and stop if the check fails."],
+        }));
+    } finally {
+      database.close();
+    }
+  }
+
   distill(input: {
     workspaceRoot: string;
     title: string;
@@ -254,6 +302,7 @@ export class LearningStore {
     const note = validationNote.trim();
     if (!note) throw new Error("Promotion requires a validation note describing current evidence or tests.");
     this.assertSuccessfulEvidence(workspaceRoot, candidate.evidenceEpisodeIds);
+    this.assertProcedureVerified(workspaceRoot, candidate);
     const slug = skillSlug(candidate.title);
     const relative = `.agents/skills/${slug}/SKILL.md`;
     const absolute = path.join(workspaceRoot, ...relative.split("/"));
@@ -309,6 +358,43 @@ export class LearningStore {
     }
   }
 
+  /** Never turn a plausible-looking note or unrelated successful read into a
+   * reusable coding instruction. For now only bounded, explicitly named
+   * verification commands qualify; other learning stays a candidate until
+   * a richer provenance/approval contract exists. This is a guardrail, not a
+   * claim that command success independently proves semantic correctness.
+   */
+  private assertProcedureVerified(workspaceRoot: string, candidate: LearningCandidate): void {
+    const procedure = candidate.procedure.join("\n");
+    if (/(?:skip|bypass|disable|ignore|omit|circumvent).{0,35}(?:tests?|review|security|approval|safety|auth|checks?)|(?:跳过|绕过|关闭|忽略).{0,15}(?:测试|审查|安全|审批|授权|校验)/i.test(procedure)) {
+      throw new Error("Learning promotion cannot instruct bypassing testing, review, security or approval gates.");
+    }
+    const database = openDatabase(this.stateDir);
+    try {
+      const evidence = database.sqlite.prepare(`
+        select tool, input_summary, created_at from learning_episodes
+        where workspace_root = ? and success = 1 and id in (${candidate.evidenceEpisodeIds.map(() => "?").join(",")})
+      `).all(workspaceRoot, ...candidate.evidenceEpisodeIds) as Array<{
+        tool: string; input_summary: string; created_at: string;
+      }>;
+      const verifications = evidence.flatMap((episode) => {
+        if (episode.tool !== "exec_command" && episode.tool !== "bash") return [];
+        const ageMs = Date.now() - Date.parse(episode.created_at);
+        if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 7 * 24 * 60 * 60_000) return [];
+        const clean = verifiedCheckCommand(episode.input_summary);
+        return clean ? [clean] : [];
+      });
+      if (!verifications.length) {
+        throw new Error("Learning promotion requires a recent successful test/typecheck/check command from the same workspace; a read or a note is not validation evidence.");
+      }
+      if (!verifications.some((cmd) => procedure.toLowerCase().includes(cmd.toLowerCase()))) {
+        throw new Error("Learning procedure must explicitly name a successful verification command from its cited episodes.");
+      }
+    } finally {
+      database.close();
+    }
+  }
+
   reject(workspaceRoot: string, candidateId: string, note = ""): LearningCandidate {
     this.getCandidate(workspaceRoot, candidateId);
     const database = openDatabase(this.stateDir);
@@ -345,6 +431,19 @@ export class LearningStore {
       database.close();
     }
   }
+}
+
+function verifiedCheckCommand(inputSummary: string): string | undefined {
+  let cmd: unknown;
+  try {
+    const input = JSON.parse(inputSummary) as { cmd?: unknown; command?: unknown };
+    cmd = input.cmd ?? input.command;
+  } catch { return undefined; }
+  if (typeof cmd !== "string") return undefined;
+  const clean = cmd.trim().replace(/\s+/g, " ");
+  if (clean.length > 180 || /[;&|\n\r]/.test(clean)) return undefined;
+  if (!/(?:^|\s)(?:(?:pnpm|npm|yarn|bun)\s+(?:-s\s+)?(?:run\s+)?(?:test|typecheck|lint|check)(?:\s|$)|(?:pytest|python3?\s+-m\s+(?:pytest|unittest)|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test)(?:\s|$))/i.test(clean)) return undefined;
+  return clean;
 }
 
 interface LearningEpisodeRow {

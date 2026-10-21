@@ -339,16 +339,15 @@ export class ArchitectureModelManager {
     const sealed = await this.readIntentLock(root);
     const current = architectureIntentFingerprint(await this.requireIntent(root));
     if (sealed && sealed !== current) {
-      const committed = await committedIntentFingerprint(root);
-      if (committed === current) {
-        await this.writeIntentLock(root, current);
-      } else {
-        issues.unshift({
-          severity: "error",
-          code: "uncommitted-architecture-change",
-          message: "Architecture intent changed outside a verified architecture change.",
-        });
-      }
+      // A Git commit made by the same executing agent is not independent
+      // architecture-change authority. Only a verified closeChange() for
+      // kind=architecture can advance the trusted seal. This also detects
+      // unreviewed branch switches containing a different intent.
+      issues.unshift({
+        severity: "error",
+        code: "uncommitted-architecture-change",
+        message: "Architecture intent differs from the last explicitly verified architecture change; a Git commit alone is not approval.",
+      });
     }
     if (options.semantic) issues.push(...await this.semanticEvidenceIssues(root, model));
     return issues;

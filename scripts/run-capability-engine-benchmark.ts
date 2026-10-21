@@ -215,7 +215,7 @@ async function benchmarkLearning(): Promise<CapabilityResult[]> {
       workspaceRoot,
       title: "Architecture Regression Verification",
       trigger: "Use after changing architecture-sensitive code.",
-      procedure: ["Run the architecture regression suite.", "Inspect architecture conformance before review."],
+      procedure: ["Run pnpm test --filter architecture.", "Inspect architecture conformance before review."],
       evidenceEpisodeIds: recalled.episodes
         .filter((episode) => episode.success && /architecture/.test(`${episode.inputSummary} ${episode.outputSummary}`))
         .map((episode) => episode.id),

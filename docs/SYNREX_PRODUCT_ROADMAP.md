@@ -299,6 +299,19 @@ on different nodes.
   an obsolete one is rejected, architecture drift is reported and no hidden
   self-modifying policy is possible.
 
+**2026-10-21 hardening:** A Git commit is no longer proof of user approval for
+architecture intent. The seal advances only when an explicit architecture
+change is verified and closed; an unreviewed committed intent remains drift.
+Learning promotion now requires recent successful command-level verification
+evidence with a named command appearing in the proposed procedure, and blocks
+obvious test/review/authorization bypass instructions. These are narrow
+machine-verifiable guardrails, not a proof of semantic correctness and not a
+Unix-process sandbox. General-purpose automatic skill induction and
+evidence-to-intent semantic checks are still outside the verified milestone.
+The read-only `project learn_suggest` action lists repeated successful check
+commands and their supporting episode IDs, without creating or promoting
+skills. Suggestions are not proof of end-to-end productivity or correctness.
+
 **UI1: guarded owner operations**
 
 - Add task cancel/details, node drain/reconnect and memory candidate

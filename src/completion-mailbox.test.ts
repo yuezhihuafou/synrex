@@ -62,11 +62,29 @@ test("completion mailbox ignores running jobs and never sends raw logs or comman
     structuredContent: { result: "original file content" },
   };
   const result = appendMailboxEvents(original, completed);
-  assert.equal(result.structuredContent, original.structuredContent);
+  assert.equal((result.structuredContent as Record<string, unknown>).sourceResult, original.structuredContent.result);
+  assert.match(result.structuredContent.result, /task=task_0123456789abcdef status=completed/);
   assert.equal(result.content[0], original.content[0]);
   assert.equal(result.content.length, 2);
   assert.match(result.content[1]?.text ?? "", /Synrex Completion Mailbox/);
   assert.match(result.content[1]?.text ?? "", /task=task_0123456789abcdef status=completed/);
   assert.doesNotMatch(result.content[1]?.text ?? "", /original file content/);
   assert.equal(appendMailboxEvents({ ...original, isError: true }, completed).content.length, 1);
+});
+
+test("mailbox exposes status through structured result for six-tool clients and retains exact source", () => {
+  const original = {
+    content: [{ type: "text", text: "file contents\n" }],
+    structuredContent: { result: "file contents\n" },
+  };
+  const event = { taskId: TASK, status: "completed" as const, runId: "run_20261020093000_aabbccdd", revision: "rev1", exitCode: 0 };
+  const delivered = appendMailboxEvents(original, [event]);
+  const fields = delivered.structuredContent as Record<string, unknown>;
+  assert.equal(fields.sourceResult, original.structuredContent.result);
+  assert.match(delivered.structuredContent.result, /Synrex task status \(not source content\)/);
+  assert.match(delivered.structuredContent.result, new RegExp(TASK));
+  assert.equal((fields.completionNotices as Array<{ taskId: string }>)[0]?.taskId, TASK);
+  assert.equal(delivered.content[0]?.text, original.content[0]?.text);
+  assert.deepEqual(original.structuredContent, { result: "file contents\n" });
+  assert.equal(appendMailboxEvents(original, []).structuredContent.result, "file contents\n");
 });
