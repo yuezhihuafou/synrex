@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
+import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
 
 interface NodeRow {
@@ -97,7 +98,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         })),
       memory: {
         episodes: count(db, "select count(*) as n from learning_episodes"),
-        successful: count(db, "select count(*) as n from learning_episodes where success = 1"),
+        successful: count(db, `select count(*) as n from learning_episodes where success = 1 and not ${LEGACY_UNVERIFIED_DISPATCH_SQL}`),
         candidates: count(db, "select count(*) as n from learning_candidates"),
         promoted: count(db, "select count(*) as n from learning_candidates where status = 'promoted'"),
       },

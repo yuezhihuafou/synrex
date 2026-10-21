@@ -193,3 +193,49 @@ test("detached or failed shell commands cannot become verified learning evidence
   assert.equal(store.stats(workspaceRoot).successful, 1);
   assert.deepEqual(store.suggestVerifiedProcedures(workspaceRoot), []);
 });
+
+test("legacy pending task handles stay in history but never qualify as successful verification", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-legacy-pending-evidence-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const workspaceRoot = join(root, "project");
+  const stateDir = join(root, "state");
+  const store = new LearningStore(stateDir);
+  for (let index = 0; index < 2; index++) {
+    store.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
+      toolOutput: { structuredContent: { result: "run=run_abc exit=0" } } });
+  }
+  const database = openDatabase(stateDir);
+  let legacyId = "";
+  let validatedId = "";
+  try {
+    const rows = database.sqlite.prepare("select id from learning_episodes where workspace_root = ? order by rowid")
+      .all(workspaceRoot) as Array<{ id: string }>;
+    assert.equal(rows.length, 2);
+    legacyId = rows[0]!.id;
+    validatedId = rows[1]!.id;
+    // Old releases persisted this dispatch response with success=1.
+    database.sqlite.prepare("update learning_episodes set output_summary = ? where id = ?")
+      .run("task=task_0123456789abcdef working poll=5000ms\nlog=run_abc", legacyId);
+  } finally {
+    database.close();
+  }
+  assert.equal(store.stats(workspaceRoot).episodes, 2, "retain the raw historical receipt");
+  assert.equal(store.stats(workspaceRoot).successful, 1, "a pending receipt is not a verified success");
+  assert.deepEqual(store.recall(workspaceRoot, "pnpm test").episodes.map((episode) => episode.id), [validatedId]);
+  assert.deepEqual(store.recentSuccessfulEpisodes(workspaceRoot).map((episode) => episode.id), [validatedId]);
+  assert.deepEqual(store.suggestVerifiedProcedures(workspaceRoot), []);
+  assert.throws(() => store.distill({
+    workspaceRoot, title: "Unsafe old receipt", trigger: "never",
+    procedure: ["Run pnpm test."], evidenceEpisodeIds: [legacyId],
+  }), /verification|pending|unverified/i);
+  const candidate = store.distill({
+    workspaceRoot, title: "Temporary valid procedure", trigger: "after tests",
+    procedure: ["Run pnpm test."], evidenceEpisodeIds: [validatedId],
+  });
+  const anotherDb = openDatabase(stateDir);
+  try {
+    anotherDb.sqlite.prepare("update learning_episodes set output_summary = ? where id = ?")
+      .run("task=task_fedcba9876543210 input_required poll=60000ms", validatedId);
+  } finally { anotherDb.close(); }
+  await assert.rejects(() => store.promote(workspaceRoot, candidate.id, "Validated."), /verification|pending|unverified/i);
+});

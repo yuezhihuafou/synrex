@@ -7,6 +7,7 @@ import { openDatabase } from "./db/client.js";
 import { CodingWorkflowStore } from "./coding-workflows.js";
 import { readConsoleSnapshot } from "./console-snapshot.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { LearningStore } from "./learning-store.js";
 
 test("console uses existing database read-only and does not invent process status", async (t) => {
   const stateDir = await mkdtemp(path.join(tmpdir(), "rev-console-snapshot-"));
@@ -47,4 +48,25 @@ test("console uses existing database read-only and does not invent process statu
   assert.equal(snapshot.service.release, "test-release");
   assert.equal(snapshot.tasks.length, 0);
   assert.equal(snapshot.memory.episodes, 0);
+});
+
+test("console distinguishes historical detached dispatch receipts from verified success", async (t) => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "synrex-console-learning-quality-"));
+  t.after(() => rm(stateDir, { force: true, recursive: true }));
+  const learning = new LearningStore(stateDir);
+  const workspaceRoot = path.join(stateDir, "project");
+  learning.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { result: "run=run_verified exit=0" } } });
+  learning.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { result: "run=run_legacy exit=0" } } });
+  const database = openDatabase(stateDir);
+  try {
+    const row = database.sqlite.prepare("select id from learning_episodes where workspace_root = ? order by rowid desc limit 1")
+      .get(workspaceRoot) as { id: string };
+    database.sqlite.prepare("update learning_episodes set output_summary = ? where id = ?")
+      .run("task=task_1234abcd working poll=5000ms", row.id);
+  } finally { database.close(); }
+  const snapshot = readConsoleSnapshot(stateDir, "test-release");
+  assert.equal(snapshot.memory.episodes, 2);
+  assert.equal(snapshot.memory.successful, 1);
 });

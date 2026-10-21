@@ -7,6 +7,19 @@ const MAX_EPISODES_PER_WORKSPACE = 2_000;
 const MAX_INPUT_CHARS = 1_200;
 const MAX_OUTPUT_CHARS = 2_000;
 
+// Before detached exec replies were excluded from learning, some releases
+// stored "task=... working" as success=1. Preserve the raw event, but never
+// treat a dispatch acknowledgment as completed verification on read.
+// Use the same predicate for SQLite summaries and evidence eligibility.
+export const LEGACY_UNVERIFIED_DISPATCH_SQL = `(tool in ('exec_command', 'bash')
+  and (output_summary like 'task=task_% working%'
+    or output_summary like 'task=task_% input_required%'))`;
+
+function isLegacyUnverifiedDispatch(value: { tool: string; output_summary: string }): boolean {
+  return (value.tool === "exec_command" || value.tool === "bash")
+    && /^task=task_[a-z0-9-]+\s+(?:working|input_required)\b/i.test(value.output_summary);
+}
+
 export interface LearningEpisode {
   id: string;
   workspaceRoot: string;
@@ -113,7 +126,7 @@ export class LearningStore {
       const tokens = queryTokens(query);
       const episodeRows = database.sqlite.prepare(`
         select * from learning_episodes
-        where workspace_root = ?
+        where workspace_root = ? and not ${LEGACY_UNVERIFIED_DISPATCH_SQL}
         order by created_at desc
         limit 300
       `).all(workspaceRoot) as LearningEpisodeRow[];
@@ -153,7 +166,7 @@ export class LearningStore {
     try {
       const rows = database.sqlite.prepare(`
         select * from learning_episodes
-        where workspace_root = ? and success = 1
+        where workspace_root = ? and success = 1 and not ${LEGACY_UNVERIFIED_DISPATCH_SQL}
         order by created_at desc
         limit ?
       `).all(workspaceRoot, Math.max(1, Math.min(limit, 50))) as LearningEpisodeRow[];
@@ -174,7 +187,7 @@ export class LearningStore {
       const rows = database.sqlite.prepare(`
         select id, input_summary, created_at from learning_episodes
         where workspace_root = ? and tool = 'exec_command' and success = 1
-          and created_at >= ?
+          and created_at >= ? and not ${LEGACY_UNVERIFIED_DISPATCH_SQL}
         order by created_at desc limit 600
       `).all(workspaceRoot, since) as Array<{ id: string; input_summary: string; created_at: string }>;
       const groups = new Map<string, { evidenceEpisodeIds: string[]; lastVerifiedAt: string; count: number }>();
@@ -225,14 +238,14 @@ export class LearningStore {
     try {
       const placeholders = evidence.map(() => "?").join(",");
       const found = database.sqlite.prepare(`
-        select id, success from learning_episodes
+        select id, success, tool, output_summary from learning_episodes
         where workspace_root = ? and id in (${placeholders})
-      `).all(input.workspaceRoot, ...evidence) as Array<{ id: string; success: number }>;
+      `).all(input.workspaceRoot, ...evidence) as Array<{ id: string; success: number; tool: string; output_summary: string }>;
       if (found.length !== evidence.length) {
         throw new Error("One or more evidence episodes do not belong to this workspace or no longer exist.");
       }
-      if (found.some((episode) => episode.success !== 1)) {
-        throw new Error("Learning candidates may use only successful evidence episodes.");
+      if (found.some((episode) => episode.success !== 1 || isLegacyUnverifiedDispatch(episode))) {
+        throw new Error("Learning candidates may use only successful evidence episodes with completed verification, not pending task handles.");
       }
       const now = new Date().toISOString();
       const candidate: LearningCandidate = {
@@ -349,14 +362,14 @@ export class LearningStore {
     try {
       const placeholders = evidenceEpisodeIds.map(() => "?").join(",");
       const rows = database.sqlite.prepare(`
-        select id, success from learning_episodes
+        select id, success, tool, output_summary from learning_episodes
         where workspace_root = ? and id in (${placeholders})
-      `).all(workspaceRoot, ...evidenceEpisodeIds) as Array<{ id: string; success: number }>;
+      `).all(workspaceRoot, ...evidenceEpisodeIds) as Array<{ id: string; success: number; tool: string; output_summary: string }>;
       if (rows.length !== evidenceEpisodeIds.length) {
         throw new Error("Promotion evidence no longer exists in the current workspace learning store.");
       }
-      if (rows.some((row) => row.success !== 1)) {
-        throw new Error("Promotion evidence must consist only of successful episodes.");
+      if (rows.some((row) => row.success !== 1 || isLegacyUnverifiedDispatch(row))) {
+        throw new Error("Promotion evidence must consist only of successful episodes with completed verification, not pending task handles.");
       }
     } finally {
       database.close();
@@ -377,12 +390,13 @@ export class LearningStore {
     const database = openDatabase(this.stateDir);
     try {
       const evidence = database.sqlite.prepare(`
-        select tool, input_summary, created_at from learning_episodes
+        select tool, input_summary, output_summary, created_at from learning_episodes
         where workspace_root = ? and success = 1 and id in (${candidate.evidenceEpisodeIds.map(() => "?").join(",")})
       `).all(workspaceRoot, ...candidate.evidenceEpisodeIds) as Array<{
-        tool: string; input_summary: string; created_at: string;
+        tool: string; input_summary: string; output_summary: string; created_at: string;
       }>;
       const verifications = evidence.flatMap((episode) => {
+        if (isLegacyUnverifiedDispatch(episode)) return [];
         if (episode.tool !== "exec_command" && episode.tool !== "bash") return [];
         const ageMs = Date.now() - Date.parse(episode.created_at);
         if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > 7 * 24 * 60 * 60_000) return [];
@@ -419,7 +433,8 @@ export class LearningStore {
     const database = openDatabase(this.stateDir);
     try {
       const episode = database.sqlite.prepare(`
-        select count(*) as total, sum(case when success = 1 then 1 else 0 end) as successful
+        select count(*) as total,
+          sum(case when success = 1 and not ${LEGACY_UNVERIFIED_DISPATCH_SQL} then 1 else 0 end) as successful
         from learning_episodes where workspace_root = ?
       `).get(workspaceRoot) as { total: number; successful: number | null };
       const candidate = database.sqlite.prepare(`
