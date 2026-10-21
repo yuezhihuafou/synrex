@@ -387,8 +387,13 @@ Full rollout evidence and precise limitations:
 ### 2026-10-21: V1.0 acceptance and implementation handoff
 
 This earlier roadmap contains historical candidate/release observations.
-The subsequently pinned owner and gateway production release is
-`20261021-synrex-reliability-v3` (manifest source `d9b576b`).
-The active, evidence-first V1.0 work and outstanding comparisons are tracked
-in [`SYNREX_V1_EXECUTION.md`](SYNREX_V1_EXECUTION.md). Do not confuse its
-source-only changes or component benchmarks with deployed end-to-end wins.
+The `20261021-synrex-reliability-v3` (manifest source `d9b576b`)
+preceded the now-live **swy1** immutable
+`20261021-synrex-v1-progress-3974a10` (source `3974a10`).
+gateway remains a compatible `reliability-v3` execution peer. Actual
+rollout acceptance and known limitations are recorded in
+[`release-evidence/20261021-synrex-v1-progress-3974a10.md`](release-evidence/20261021-synrex-v1-progress-3974a10.md);
+remaining V1.0 engineering tasks and evidence are tracked in
+[`SYNREX_V1_EXECUTION.md`](SYNREX_V1_EXECUTION.md).
+Successful rollout and component tests are **not** proof of faster
+full-task GPT results against the old Dev baseline.

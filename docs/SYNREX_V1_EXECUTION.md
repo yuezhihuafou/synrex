@@ -93,22 +93,25 @@ or unpaired shell latency as a 20% GPT productivity gain.
   explicit promotion, but production has no validated reusable candidate.
   Do not promote generic `pnpm typecheck` suggestions merely to inflate the
   memory counter. Evaluate genuine revision-scoped history against no-recall.
-- **P4 production:** Source edits are not live until a clean, reproducible
-  immutable candidate passes packaging, relevant/full regressions, isolated
-  authenticated MCP/OAuth and Console QA, owner-state backup, rollback-ready
-  activation and both-node postflight.
+- **P4 production:** The above changes are **live on swy1** in the pinned,
+  rollback-ready `20261021-synrex-v1-progress-3974a10` release, source
+  `3974a10`. The isolated 17-tool HTTP MCP/OAuth/Console acceptance,
+  package smoke, complete 294/0/1 regression, backup, single-owner activation
+  and postflight all passed. Live ChatGPT `workflow_status` returned the
+  new handoff evidence. See the
+  [release acceptance record](release-evidence/20261021-synrex-v1-progress-3974a10.md).
 
 ## Next independent actions
 
-1. Finish typecheck, full regression, architecture and package build for
-   these real source changes. Review the diff and preserve rollback.
-2. Validate current task IDs and new handoff in a real authenticated QA MCP
-   server; measure new-vs-old response bytes and processing time.
-3. Promote only an immutable validated candidate; record new source hash,
-   manifests, asset fingerprints, backups and postflight.
-4. Run comparable full-host T1–T5 pilot tasks with **the same** model,
+1. Run comparable full-host T1–T5 pilot tasks with **the same** model,
    thinking effort and starting SHA for both configurations; report unmatched
    runs honestly.
-5. Extend deterministic fault injection to lost writes, link partitions,
+2. Extend fault injection to lost writes, link partitions,
    cancellation, and actual fresh-chat takeover. Only then consider V1.0
    performance/recovery acceptance achieved.
+3. Collect real hosted per-task latency/tool/context measurements with
+   evidence; pair only genuinely comparable samples.
+4. Test revision-scoped learning recall against no-recall and obsolete
+   history, keeping promoted candidates evidence-linked and bounded.
+5. Repeat selected full-host tasks on the pinned live release and capture
+   any regression; perform a separate deliberate rollback drill when justified.
