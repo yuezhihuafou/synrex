@@ -5,6 +5,8 @@ import { compactPreview } from "../compact-runtime/output-policy.js";
 import { waitForTaskChange } from "../durable-task-wait.js";
 import type { TaskWaitResult } from "../durable-task-wait.js";
 import { finalBarrierReceipt } from "../task-final-barrier.js";
+import { ArchitectureModelManager } from "../architecture-model.js";
+import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
@@ -33,7 +35,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs/checkpoint, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs/checkpoint, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. Six-tool clients can inspect project memory/architecture read-only with 'devspace-project learn-suggest', 'devspace-project learn-recall QUERY', 'devspace-project learn-stats', and 'devspace-project arch-validate'; never claim memory promotion or architectural approval from these reads. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -385,6 +387,8 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       if (taskCompat) return taskCompat;
       const runLogResult = await handleRunLogCommand(cmd);
       if (runLogResult !== null) return runLogToolResponse(cmd, runLogResult);
+      const projectCompat = await handleProjectCompatCommand(cmd, workspace.root, config.stateDir);
+      if (projectCompat) return projectCompat;
 
       const startedAt = performance.now();
       const snapshot = await runLoggedToolOperation(
@@ -618,6 +622,58 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       return processToolResponse(snapshot);
     },
   );
+}
+
+/** Preserve access to existing, owner-scoped project intelligence in ChatGPT
+ * clients that cached only six Codex tools. These commands are read-only,
+ * exact-prefix checked and do not reach the shell or introduce a second store.
+ */
+async function handleProjectCompatCommand(command: string, root: string, stateDir: string) {
+  const normalized = command.trim();
+  if (!/^devspace-project(?:\s|$)/.test(normalized)) return undefined;
+  if (normalized.length > 260 || /[\r\n;&|`$\\]/.test(normalized)) {
+    throw new Error("Invalid devspace-project compatibility command; use one read-only action without shell syntax.");
+  }
+  const action = normalized.slice("devspace-project".length).trim();
+  const learning = new LearningStore(stateDir);
+  let result: string;
+  if (!action || action === "help") {
+    result = "Read-only six-tool project commands: devspace-project learn-suggest | learn-recall QUERY | learn-stats | arch-validate. Use the project tool for explicit architecture changes or verified learning promotion when available.";
+  } else if (action === "learn-suggest") {
+    const suggestions = learning.suggestVerifiedProcedures(root, 5);
+    result = suggestions.length ? suggestions.map((entry) => (
+      `${entry.occurrences} passed checks: ${entry.command} (latest ${entry.lastVerifiedAt}; episodes ${entry.evidenceEpisodeIds.join(",")})`
+    )).join("\n") : "No recent repeated verified checks. No skill was created or promoted.";
+  } else if (action === "learn-stats") {
+    const stats = learning.stats(root);
+    result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.candidates} candidates, ${stats.promoted} promoted.`;
+  } else if (action.startsWith("learn-recall ")) {
+    const query = action.slice("learn-recall ".length).trim();
+    if (!query || query.length > 140) throw new Error("learn-recall query must contain 1-140 characters.");
+    const recalled = learning.recall(root, query, 5);
+    const lines = [
+      ...recalled.candidates.map((candidate) => `candidate=${candidate.id} status=${candidate.status} title=${candidate.title.slice(0, 100)}`),
+      ...recalled.episodes.map((episode) => `episode=${episode.id} ${episode.success ? "ok" : "failed"} tool=${episode.tool} input=${episode.inputSummary.slice(0, 135)} output=${episode.outputSummary.slice(0, 135)}`),
+    ];
+    result = lines.join("\n") || "No relevant project learning evidence found.";
+  } else if (action === "arch-validate") {
+    const manager = new ArchitectureModelManager();
+    if (!await manager.hasModel(root)) {
+      result = "Architecture policy not initialized in this workspace. Use the full project tool for an explicit arch_init, rather than inventing constraints.";
+    } else {
+      const issues = await manager.conformance(root);
+      const errors = issues.filter((issue) => issue.severity === "error").length;
+      result = `Architecture validation: ${errors} error(s), ${issues.length - errors} warning(s).`
+        + (issues.length ? "\n" + issues.slice(0, 8).map((issue) =>
+          `${issue.severity}:${issue.code} ${issue.message.slice(0, 220)}`).join("\n") : "");
+    }
+  } else {
+    throw new Error("Unknown read-only devspace-project action; use devspace-project help.");
+  }
+  return {
+    content: [textBlock(result)],
+    structuredContent: { result, projectAction: action.split(" ")[0] || "help", readOnly: true },
+  };
 }
 
 async function handleTaskCompatCommand(

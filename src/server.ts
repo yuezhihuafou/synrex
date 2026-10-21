@@ -1030,6 +1030,14 @@ async function recordLearningToolCall(
   error?: unknown,
 ): Promise<void> {
   if (toolName === "open_workspace" || toolName === "project") return;
+  // Polling and inspecting stored evidence are meta-operations, not new
+  // learning episodes. Recording these would recursively pollute recall and
+  // bury the real engineering history behind the agent's own status checks.
+  if (toolName === "exec_command") {
+    const input = handlerArgs[0] as { cmd?: unknown } | undefined;
+    const command = typeof input?.cmd === "string" ? input.cmd.trim() : "";
+    if (/^devspace-project(?:\s|$)|^devspace-log(?:\s|$)|^devspace-task\s+(?:get|wait|final)\s+/i.test(command)) return;
+  }
   if (
     toolName === "task_get"
     && output

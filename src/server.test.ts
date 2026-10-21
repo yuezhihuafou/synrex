@@ -235,6 +235,34 @@ test("completion mailbox relays a finished background job only in the originatin
   assert.doesNotMatch(contentText(again), /Completion Mailbox/);
 });
 
+test("six-tool clients can inspect bounded project evidence without a new tool schema or shell command", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const opened = structuredContent(await callOpen(context.client, context.project));
+  const workspaceId = opened.workspaceId as string;
+  for (const [cmd, expected] of [
+    ["devspace-project help", "read-only"],
+    ["devspace-project learn-stats", "Learning:"],
+    ["devspace-project learn-suggest", "No recent repeated"],
+    ["devspace-project learn-recall test", "No relevant"],
+  ]) {
+    const response = await context.client.callTool({
+      name: "exec_command", arguments: { workspaceId, cmd },
+    });
+    assert.match(contentText(response), new RegExp(expected, "i"));
+    const fields = structuredContent(response);
+    assert.equal(fields.readOnly, true);
+    assert.equal(fields.taskId, undefined, "compat should not run as shell or launch durable work");
+  }
+  const missing = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "devspace-project arch-validate" },
+  });
+  assert.match(contentText(missing), /not initialized/i);
+  const rejected = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "devspace-project learn-suggest; touch invalid" },
+  });
+  assert.equal(rejected.isError, true);
+});
+
 test("legacy final task command waits and reports a terminal final barrier receipt", async (t) => {
   const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
   const opened = structuredContent(await callOpen(context.client, context.project));
