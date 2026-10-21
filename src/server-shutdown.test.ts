@@ -117,6 +117,17 @@ await shutdownHttpServer(
 );
 assert.equal(forcedClose, true, "shutdown must bound HTTP drain time");
 
+let cleanupDespiteUnresponsiveHttp = false;
+await shutdownHttpServer(
+  {
+    close(_callback: (error?: Error) => void) { /* A wedged upgraded connection never drains. */ },
+    closeAllConnections() {},
+  },
+  async () => { cleanupDespiteUnresponsiveHttp = true; },
+  10, 10,
+);
+assert.equal(cleanupDespiteUnresponsiveHttp, true);
+
 const httpCloseError = new Error("http close failed");
 await assert.rejects(
   shutdownHttpServer(
@@ -135,3 +146,12 @@ await assert.rejects(shutdownHttpServer({
   close(callback: (error?: Error) => void) { callback(httpCloseError); },
 }, async () => { cleanedAfterHttpError = true; }), httpCloseError);
 assert.equal(cleanedAfterHttpError, true);
+
+let didTimeout = false;
+await shutdownHttpServer(
+  { close(callback: (error?: Error) => void) { callback(); } },
+  () => new Promise<void>(() => undefined),
+  10, 10,
+  (phase) => { if (phase === "application_cleanup") didTimeout = true; },
+);
+assert.equal(didTimeout, true, "stalled cleanup must not exhaust systemd's stop budget");

@@ -134,3 +134,44 @@ test("separate identical invocations receive distinct request ids", async () => 
     hub.close();
   }
 });
+
+test("delivered request timeout is explicitly indeterminate, and late completion is logged", async () => {
+  const events: Array<{ event: string; outcome: string }> = [];
+  const hub = new NodeLinkHub(20, 10, (event, fields) => events.push({ event, outcome: fields.outcome }));
+  try {
+    const call = hub.call("node_a", { name: "apply_patch", arguments: {} });
+    const sent = await hub.poll("node_a", 1);
+    assert.ok(sent);
+    const rejection = assert.rejects(call, /indeterminate_after_dispatch.*may still be running/);
+    // Hub timers are intentionally unref'd. Keep this isolated test alive.
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await rejection;
+    assert.equal(hub.complete("node_a", sent.id, { ok: true }), true);
+    assert.deepEqual(events, [
+      { event: "node_request_timeout", outcome: "indeterminate_after_dispatch" },
+      { event: "node_late_completion", outcome: "completed_after_host_timeout" },
+    ]);
+  } finally { hub.close(); }
+});
+
+test("timeout before dispatch is never classified as an executed mutation", async () => {
+  const events: string[] = [];
+  const hub = new NodeLinkHub(20, 10, (_event, fields) => events.push(fields.outcome));
+  try {
+    const call = hub.call("node_absent", { name: "apply_patch", arguments: {} });
+    const rejection = assert.rejects(call, /not_dispatched/);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await rejection;
+    assert.deepEqual(events, ["not_dispatched"]);
+  } finally { hub.close(); }
+});
+
+test("a failing observability callback cannot strand a timed-out RPC", async () => {
+  const hub = new NodeLinkHub(20, 10, () => { throw new Error("diagnostic output failed"); });
+  try {
+    const call = hub.call("offline", { name: "read", arguments: {} });
+    const rejected = assert.rejects(call, /not_dispatched/);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    await rejected;
+  } finally { hub.close(); }
+});

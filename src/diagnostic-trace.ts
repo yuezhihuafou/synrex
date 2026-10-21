@@ -17,7 +17,11 @@ const DIAGNOSTIC_FILE = "recent.jsonl";
 
 export type DiagnosticEvent =
   | "conversation_labeled"
+  | "node_request_timeout"
+  | "node_late_completion"
   | "mcp_received"
+  | "mcp_handler_returned"
+  | "mcp_stream_closed"
   | "mcp_finished"
   | "mcp_closed_early"
   | "mcp_failed"
@@ -34,6 +38,8 @@ export interface DiagnosticEntry {
   conversationId?: string;
   conversationTitle?: string;
   tool?: string;
+  method?: string;
+  responseMode?: string;
   durationMs?: number;
   elapsedMs?: number;
   status?: number;
@@ -45,9 +51,10 @@ export interface DiagnosticEntry {
 
 const SAFE_ID = /^[a-zA-Z0-9_-]{1,110}$/;
 const SAFE_OUTCOME = /^(ok|error)$/;
+const SAFE_NODE_OUTCOME = /^(indeterminate_after_dispatch|not_dispatched|completed_after_host_timeout)$/;
 const EVENT_NAMES: readonly string[] = [
-  "conversation_labeled",
-  "mcp_received", "mcp_finished", "mcp_closed_early", "mcp_failed",
+  "conversation_labeled", "node_request_timeout", "node_late_completion",
+  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
 
@@ -73,7 +80,9 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   // prompts, headers or long/multiline strings as diagnostic labels.
   const conversationTitle = boundedString(fields.conversationTitle, /^[^\x00-\x1f\x7f]{1,120}$/);
   const tool = boundedString(fields.tool, /^[a-z][a-z0-9_-]{0,79}$/);
-  const outcome = boundedString(fields.outcome, SAFE_OUTCOME);
+  const method = boundedString(fields.method, /^(GET|POST|DELETE|OPTIONS)$/);
+  const responseMode = boundedString(fields.responseMode, /^(sse|json|unknown)$/);
+  const outcome = boundedString(fields.outcome, event.startsWith("node_") ? SAFE_NODE_OUTCOME : SAFE_OUTCOME);
   const taskId = boundedString(fields.taskId, /^task_[a-zA-Z0-9-]{1,80}$/);
   const runId = boundedString(fields.runId, /^run_[a-zA-Z0-9_-]{1,90}$/);
   const durationMs = boundedNumber(fields.durationMs, 365 * 24 * 3600 * 1000);
@@ -88,6 +97,8 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     item.conversationTitle = conversationTitle;
   }
   if (tool) item.tool = tool;
+  if (method) item.method = method;
+  if (responseMode) item.responseMode = responseMode;
   if (outcome) item.outcome = outcome;
   if (taskId) item.taskId = taskId;
   if (runId) item.runId = runId;

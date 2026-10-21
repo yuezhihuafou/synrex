@@ -48,6 +48,9 @@ test("small persistent diagnostic log keeps only safe metadata and correlates re
     classification: "rev_http_completed",
   }]);
   assert.equal(sanitizeDiagnostic("mcp_failed", { requestId: "../../private" }).requestId, undefined);
+  assert.equal(sanitizeDiagnostic("mcp_received", { method: "POST", responseMode: "json" }).method, "POST");
+  assert.equal(sanitizeDiagnostic("mcp_received", { method: "POST /mcp?token=secret" }).method, undefined);
+  assert.equal(sanitizeDiagnostic("mcp_stream_closed", { responseMode: "sse" }).responseMode, "sse");
 });
 
 test("diagnostic trace rotates at 1 MiB and caps retained data to two files", async (t) => {

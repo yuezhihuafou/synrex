@@ -98,3 +98,44 @@ test("remote workspace recovery binds pending local tasks to stable global task 
   assert.equal(route?.localTaskId, localTaskId);
   assert.match((opened.content as Array<{ text: string }>)[0]?.text ?? "", new RegExp(globalTaskId));
 });
+
+test("remote workspace recovery maps active task handles and retains their global identities", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "synrex-active-task-route-"));
+  const store = new SqliteControlPlaneStore(stateDir);
+  t.after(async () => { store.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const local = store.ensureLocalNode({
+    alias: "local", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {} },
+  });
+  const remote = store.registerRemoteNode({
+    id: "node_recovery", alias: "remote", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {} },
+  });
+  const localTaskId = "task_aaaaaaaaaaaaaaaa";
+  const transport: NodeTransport = {
+    async call(_node, input) {
+      if (input.name === "open_workspace") return {
+        content: [{ type: "text", text: `Active task ${localTaskId}` }],
+        structuredContent: {
+          workspaceId: "ws_remote", root: "/repo", activeTaskCount: 1,
+          activeTasks: [{ taskId: localTaskId, status: "working" }],
+        },
+      };
+      return { structuredContent: { result: "working", taskId: input.arguments.taskId } };
+    },
+  };
+  const router = new MultiNodeRouter(store, transport, local.id);
+  const first = await router.openWorkspace({ node: remote.id, arguments: { path: "/repo" } });
+  const fields = first.structuredContent as { workspaceId: string; activeTasks: Array<{ taskId: string }> };
+  const globalId = fields.activeTasks[0]!.taskId;
+  assert.match(globalId, /^task_[a-f0-9]{32}$/);
+  assert.notEqual(globalId, localTaskId);
+  assert.equal(store.resolveTask(globalId)?.localTaskId, localTaskId);
+  assert.match(JSON.stringify(first.content), new RegExp(globalId));
+  const recovered = await router.openWorkspace({ node: remote.id, arguments: { path: "/repo" } });
+  assert.equal((recovered.structuredContent as typeof fields).activeTasks[0]?.taskId, globalId);
+  const inspected = await router.callWorkspaceTool({
+    workspaceId: fields.workspaceId, name: "task_get", arguments: { taskId: localTaskId },
+  });
+  assert.equal((inspected.structuredContent as Record<string, unknown>).taskId, localTaskId);
+});

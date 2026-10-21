@@ -1150,7 +1150,10 @@ export function createServer(
   }));
   const toolActivities = new ToolActivityTracker();
   const linkHub = hostsDirectory(config.cluster.role)
-    ? new NodeLinkHub(config.cluster.requestTimeoutMs)
+    ? new NodeLinkHub(config.cluster.requestTimeoutMs, undefined, (event, fields) => {
+        diagnostics.record(event, fields);
+        logEvent(config.logging, "warn", event, fields);
+      })
     : undefined;
   if (hostsDirectory(config.cluster.role) && !config.cluster.joinToken) {
     throw new Error("Coordinator mode requires a node join token. Run `devspace nodes coordinator` first.");
@@ -1262,18 +1265,30 @@ export function createServer(
     const pathAtStart = requestPath(req);
     const oauthPhase = oauthPhaseForPath(pathAtStart);
     res.locals.requestId = requestId;
-    if (pathAtStart === "/mcp") diagnostics.record("mcp_received", { requestId });
+    if (pathAtStart === "/mcp") diagnostics.record("mcp_received", { requestId, method: req.method });
+
+    const responseMode = () => {
+      const contentType = String(res.getHeader("content-type") ?? "").toLowerCase();
+      return contentType.includes("text/event-stream") ? "sse"
+        : contentType.includes("json") ? "json" : "unknown";
+    };
 
     res.on("close", () => {
       if (pathAtStart !== "/mcp" || res.writableFinished) return;
-      diagnostics.record("mcp_closed_early", {
+      const mode = responseMode();
+      const event = mode === "sse" ? "mcp_stream_closed" : "mcp_closed_early";
+      diagnostics.record(event, {
         requestId,
+        method: req.method,
+        responseMode: mode,
         elapsedMs: Math.round(performance.now() - startedAt),
         status: res.statusCode,
       });
-      logEvent(config.logging, "warn", "mcp_response_closed_early", {
+      logEvent(config.logging, mode === "sse" ? "info" : "warn", event, {
         requestId,
         path: pathAtStart,
+        method: req.method,
+        responseMode: mode,
         elapsedMs: Math.round(performance.now() - startedAt),
         status: res.statusCode,
       });
@@ -1283,6 +1298,8 @@ export function createServer(
       const path = pathAtStart;
       if (path === "/mcp") diagnostics.record("mcp_finished", {
         requestId,
+        method: req.method,
+        responseMode: responseMode(),
         durationMs: Math.round(performance.now() - startedAt),
         status: res.statusCode,
       });
@@ -1349,34 +1366,33 @@ export function createServer(
 
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
-
-    await new Promise<void>((resolve, reject) => {
-      bearerAuth(req, res, (error?: unknown) => {
-        if (error) reject(error);
-        else resolve();
+    try {
+      await new Promise<void>((resolve, reject) => {
+        bearerAuth(req, res, (error?: unknown) => {
+          if (error) reject(error);
+          else resolve();
+        });
       });
-    });
-    if (res.headersSent) return;
+      if (res.headersSent) return;
 
-    if (!req.auth?.resource || !oauthProvider.isResourceAllowed(req.auth.resource)) {
-      logEvent(config.logging, "warn", "auth_denied", {
+      if (!req.auth?.resource || !oauthProvider.isResourceAllowed(req.auth.resource)) {
+        logEvent(config.logging, "warn", "auth_denied", {
+          requestId,
+          method: req.method,
+          path: requestPath(req),
+          reason: "invalid_oauth_resource",
+          ...requestLogFields(req, config),
+        });
+        sendJsonRpcError(res, 401, -32001, "Unauthorized");
+        return;
+      }
+
+      logEvent(config.logging, "debug", "mcp_request", {
         requestId,
         method: req.method,
-        path: requestPath(req),
-        reason: "invalid_oauth_resource",
-        ...requestLogFields(req, config),
       });
-      sendJsonRpcError(res, 401, -32001, "Unauthorized");
-      return;
-    }
-
-    logEvent(config.logging, "debug", "mcp_request", {
-      requestId,
-      method: req.method,
-    });
-
-    try {
       await mcpNodeHandler(req, res, req.body);
+      diagnostics.record("mcp_handler_returned", { requestId, method: req.method });
     } catch (error) {
       diagnostics.record("mcp_failed", { requestId });
       logEvent(config.logging, "error", "mcp_request_error", {
@@ -1385,6 +1401,11 @@ export function createServer(
       });
       if (!res.headersSent) {
         sendJsonRpcError(res, 500, -32603, "Internal server error");
+      } else if (!res.writableEnded && !res.destroyed) {
+        // An adapter error after response headers cannot be repaired with a
+        // second JSON-RPC payload. Terminate that broken response explicitly;
+        // never leave a failed POST hanging until the client gives up.
+        res.destroy();
       }
     }
   });
@@ -1454,7 +1475,9 @@ if (await isMainModule()) {
   const shutdown = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    await shutdownHttpServer(httpServer, close);
+    await shutdownHttpServer(httpServer, close, 5_000, 12_000, (phase) => {
+      logEvent(config.logging, "warn", "shutdown_forced", { phase });
+    });
     process.exit(0);
   };
   const handleShutdown = () => {

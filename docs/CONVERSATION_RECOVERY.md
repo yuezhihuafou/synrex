@@ -43,7 +43,24 @@ Historical titles absent from retained host metadata cannot be recovered.
 5. A closed or stalled ChatGPT turn **cannot be awakened** by this MCP server.
    Resume through a new user message/chat after collecting the task receipt.
 
-During a release switch the HTTP listener first stops accepting new requests;
-accepted requests drain (at most the configured forced-close interval) before
-shared SQLite and router resources are disposed. Tool output may still be lost
-at the host transport boundary; durable receipts must be checked afterwards.
+During a release switch the HTTP listener first stops accepting new requests.
+Ordinary requests may drain for up to five seconds; a wedged connection is
+forcibly closed. Application cleanup is separately bounded to twelve seconds
+so that systemd does not indefinitely hold a retiring release. If cleanup
+exceeds this budget, the process exits and any in-memory work has an
+indeterminate outcome; durable receipts must be checked afterwards.
+
+## Interpreting transport and multi-node diagnostics
+
+`mcp_handler_returned` means the handler promise resolved, **not** that ChatGPT
+received the result. `mcp_finished` records HTTP completion, while
+`mcp_closed_early` means a non-streaming connection closed before finishing.
+`mcp_stream_closed` denotes a streaming SSE connection disconnect; the
+disconnection alone is not proof of a failed tool call.
+
+For remote peers, `node_request_timeout` distinguishes `not_dispatched` from
+`indeterminate_after_dispatch`. A `node_late_completion` confirms only that
+the original peer subsequently supplied a completion receipt; it does not
+retroactively deliver the lost result to ChatGPT. Never automatically replay
+an operation marked indeterminate. A remote workspace's `activeTasks` and
+`pendingTasks` have globally routable task IDs after `open_workspace`.

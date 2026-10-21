@@ -30,10 +30,14 @@ export class NodeLinkHub implements NodeTransport {
   private readonly pollWaiters = new Map<string, Set<PollWaiter>>();
   private closed = false;
   private readonly acknowledgements = new Map<string, { nodeId: string; expiresAt: number }>();
+  private readonly timedOut = new Map<string, { nodeId: string; expiresAt: number }>();
 
   constructor(
     private readonly requestTimeoutMs: number,
     private readonly deliveryLeaseMs = Math.min(30_000, Math.max(1_000, Math.floor(requestTimeoutMs / 3))),
+    private readonly onEvent?: (event: "node_request_timeout" | "node_late_completion", fields: {
+      requestId: string; nodeId: string; tool?: string; outcome: string;
+    }) => void,
   ) {}
 
   call(nodeId: string, input: NodeToolCall): Promise<NodeToolResult> {
@@ -51,7 +55,11 @@ export class NodeLinkHub implements NodeTransport {
         delivered: false,
         timeout: setTimeout(() => {
           this.removePending(nodeId, request.id);
-          const error = new Error(`Node ${nodeId} did not complete request ${request.id} within ${this.requestTimeoutMs}ms.`);
+          const outcome = pending.delivered ? "indeterminate_after_dispatch" : "not_dispatched";
+          if (pending.delivered) this.rememberTimeout(nodeId, request.id);
+          this.emitEvent("node_request_timeout", { requestId: request.id, nodeId, tool: input.name, outcome });
+          const error = new Error(`Node ${nodeId} did not complete request ${request.id} within ${this.requestTimeoutMs}ms (${outcome}).`
+            + (pending.delivered ? " The remote operation may still be running or completed. Inspect its owner before retrying; do not replay a mutating operation." : " The request was never delivered."));
           for (const waiter of pending.waiters) waiter.reject(error);
         }, this.requestTimeoutMs),
       };
@@ -96,7 +104,9 @@ export class NodeLinkHub implements NodeTransport {
 
   complete(nodeId: string, requestId: string, result: NodeToolResult): boolean {
     const pending = this.pendingById.get(requestId);
-    if (!pending) return this.wasAcknowledged(nodeId, requestId);
+    if (!pending) {
+      return this.recordLateCompletion(nodeId, requestId) || this.wasAcknowledged(nodeId, requestId);
+    }
     if (!this.belongsToNode(nodeId, pending)) {
       throw new Error(`Request ${requestId} does not belong to node ${nodeId}.`);
     }
@@ -108,7 +118,9 @@ export class NodeLinkHub implements NodeTransport {
 
   fail(nodeId: string, requestId: string, message: string): boolean {
     const pending = this.pendingById.get(requestId);
-    if (!pending) return this.wasAcknowledged(nodeId, requestId);
+    if (!pending) {
+      return this.recordLateCompletion(nodeId, requestId) || this.wasAcknowledged(nodeId, requestId);
+    }
     if (!this.belongsToNode(nodeId, pending)) {
       throw new Error(`Request ${requestId} does not belong to node ${nodeId}.`);
     }
@@ -137,6 +149,33 @@ export class NodeLinkHub implements NodeTransport {
     this.pendingById.clear();
     this.queues.clear();
     this.acknowledgements.clear();
+    this.timedOut.clear();
+  }
+
+  private rememberTimeout(nodeId: string, requestId: string): void {
+    const now = Date.now();
+    for (const [id, entry] of this.timedOut) if (entry.expiresAt <= now) this.timedOut.delete(id);
+    while (this.timedOut.size >= 4096) this.timedOut.delete(this.timedOut.keys().next().value!);
+    this.timedOut.set(requestId, { nodeId, expiresAt: now + 300_000 });
+  }
+
+  private recordLateCompletion(nodeId: string, requestId: string): boolean {
+    const entry = this.timedOut.get(requestId);
+    if (!entry || entry.expiresAt <= Date.now()) return false;
+    if (entry.nodeId !== nodeId) throw new Error(`Request ${requestId} does not belong to node ${nodeId}.`);
+    this.emitEvent("node_late_completion", { requestId, nodeId, outcome: "completed_after_host_timeout" });
+    this.timedOut.delete(requestId);
+    this.rememberAcknowledgement(nodeId, requestId);
+    // Acknowledge receipt so the peer can drop its durable completion record.
+    // This does NOT retroactively mark the timed-out host tool call successful.
+    return true;
+  }
+
+  private emitEvent(event: "node_request_timeout" | "node_late_completion", fields: {
+    requestId: string; nodeId: string; tool?: string; outcome: string;
+  }): void {
+    try { this.onEvent?.(event, fields); }
+    catch { /* Diagnostic emitters must never strand the pending RPC. */ }
   }
 
   private rememberAcknowledgement(nodeId: string, requestId: string): void {

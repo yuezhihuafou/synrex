@@ -1110,6 +1110,17 @@ test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) =
   assert.equal(legacyTools.status, 200, await legacyTools.clone().text());
   assert.equal(legacyTools.headers.get("mcp-session-id"), null);
   assert.match(await legacyTools.text(), /"open_workspace"/);
+
+  // Trace the actual HTTP request lifecycle rather than equating a completed
+  // tool handler with a delivered HTTP/MCP response.
+  const entries = new DiagnosticTrace(join(root, ".state")).read({ minutes: 5, limit: 200 });
+  const received = entries.filter((entry) => entry.event === "mcp_received");
+  const handlerReturned = entries.filter((entry) => entry.event === "mcp_handler_returned");
+  const finished = entries.filter((entry) => entry.event === "mcp_finished");
+  assert.ok(received.some((entry) => entry.method === "POST"));
+  assert.ok(handlerReturned.length > 0, "MCP handler completion must be separately observable");
+  assert.ok(finished.some((entry) => entry.method === "POST" && entry.status === 200));
+  assert.ok(finished.every((entry) => ["json", "sse", "unknown"].includes(entry.responseMode ?? "unknown")));
 });
 
 test("server shutdown waits for an active MCP tool call", async (t) => {

@@ -72,7 +72,10 @@ export class MultiNodeRouter {
     const workspaceId = existing?.workspaceId ?? createGlobalWorkspaceId();
     if (!existing) this.store.bindWorkspace({ workspaceId, nodeId: node.id, localWorkspaceId });
     let rewritten = rewriteOpaqueId(result, localWorkspaceId, workspaceId);
-    for (const localTaskId of readPendingTaskIds(result)) {
+    // A fresh GPT conversation needs routable IDs for tasks that are still
+    // running, not just unacknowledged terminal notifications. Both lists are
+    // owner-verified by the peer's open_workspace implementation.
+    for (const localTaskId of readRecoverableTaskIds(result)) {
       const existingTask = this.store.findTaskByLocal(node.id, localTaskId);
       const taskId = existingTask?.taskId ?? createGlobalTaskId();
       if (!existingTask) {
@@ -149,16 +152,21 @@ function readWorkspaceId(result: NodeToolResult): string {
   return workspaceId;
 }
 
-function readPendingTaskIds(result: NodeToolResult): string[] {
+function readRecoverableTaskIds(result: NodeToolResult): string[] {
   const structured = result.structuredContent;
   if (!structured || typeof structured !== "object" || Array.isArray(structured)) return [];
-  const pending = (structured as Record<string, unknown>).pendingTasks;
-  if (!Array.isArray(pending)) return [];
-  return pending.flatMap((item) => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const taskId = (item as Record<string, unknown>).taskId;
-    return typeof taskId === "string" && taskId.startsWith("task_") ? [taskId] : [];
-  });
+  const fields = structured as Record<string, unknown>;
+  const ids = new Set<string>();
+  for (const key of ["pendingTasks", "activeTasks"]) {
+    const items = fields[key];
+    if (!Array.isArray(items)) continue;
+    for (const item of items) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+      const taskId = (item as Record<string, unknown>).taskId;
+      if (typeof taskId === "string" && /^task_(?:[a-f0-9]{16}|[a-f0-9]{32})$/i.test(taskId)) ids.add(taskId);
+    }
+  }
+  return [...ids];
 }
 
 function rewriteOpaqueId<T>(value: T, from: string, to: string): T {
