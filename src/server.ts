@@ -50,7 +50,12 @@ import {
 import { DurableTaskManager } from "./durable-tasks.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
-import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
+import {
+  conversationScopeIdFromRequestMeta,
+  conversationTitleFromRequestMeta,
+  conversationTraceIdFromRequestMeta,
+  safeConversationTitle,
+} from "./request-meta.js";
 import { CompletionMailbox, appendMailboxEvents, mailboxScope } from "./completion-mailbox.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
@@ -430,27 +435,29 @@ function registerMcpSurface(
     {
       title: "Open workspace",
       description:
-        "Start work in a project directory or isolated worktree when no usable workspaceId exists for it. During continued work, reuse the existing workspaceId instead of calling this tool again. By default this uses the actual checkout; set mode=\"worktree\" for isolated or parallel work.",
+        "Open a project checkout or isolated worktree. Reuse an existing workspaceId for continued work.",
       inputSchema: {
         path: z
           .string()
           .describe(
-            "Absolute path, or a leading-tilde home path such as ~/project, to a project directory inside an allowed root.",
+            "Absolute project path or ~/path within an allowed root.",
           ),
         mode: z
           .enum(["checkout", "worktree"])
           .optional()
           .describe(
-            "Defaults to checkout, which works in the actual directory. Use worktree for isolated or parallel Git work.",
+            "checkout (default) or isolated Git worktree.",
           ),
         baseRef: z
           .string()
           .optional()
-          .describe("Git ref to base a worktree on. Only used with mode=\"worktree\". Defaults to HEAD."),
+          .describe("Worktree base Git ref; defaults to HEAD."),
         node: z
           .string()
           .optional()
-          .describe("Node id/alias only for explicit host intent or ambiguity; otherwise omit."),
+          .describe("Explicit node alias/id, only when needed."),
+        conversationTitle: z.string().max(120).optional()
+          .describe("Optional actual chat title for diagnostics. Do not guess."),
       },
       outputSchema: {
         workspaceId: z.string(),
@@ -485,6 +492,10 @@ function registerMcpSurface(
           status: z.enum(["completed", "cancelled", "failed"]),
         })).optional(),
         pendingTaskCount: z.number().int().nonnegative().optional(),
+        activeTasks: z.array(z.object({
+          taskId: z.string(), status: z.enum(["working", "input_required"]),
+        })).optional(),
+        activeTaskCount: z.number().int().nonnegative().optional(),
         resumableWorkflows: z.array(z.object({
           workflowId: z.string(),
           title: z.string(),
@@ -521,6 +532,9 @@ function registerMcpSurface(
         taskId: task.taskId,
         status: task.status,
       }));
+      const allActiveTasks = durableTasks?.available
+        ? await durableTasks.activeTaskHandles(workspace.root)
+        : [];
       const resumableWorkflows = withCodingWorkflowStore(config.stateDir, (store) =>
         store.list(workspace.root, { limit: 5 }).map((workflow) => ({
           workflowId: workflow.workflowId,
@@ -625,7 +639,10 @@ function registerMcpSurface(
               ? `Available subagent profiles: ${visibleAgents.map(formatVisibleAgent).join(", ")}`
               : undefined,
             pendingTasks.length > 0
-              ? `Pending durable task notifications (${allPendingTasks.length} total): ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. For tasks relevant to this work, use task_get or exec_command 'devspace-task get <taskId>' to inspect terminal state and saved output before dependent work. Unrelated historical notifications do not block the current request.`
+              ? `Unacknowledged TERMINAL command receipts (${allPendingTasks.length} historical results, not active processes): ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. A completed command does not prove the user's objective is done. Use task_get or 'devspace-task get <taskId>' to inspect results. Unrelated receipts do not block this request.`
+              : undefined,
+            allActiveTasks.length > 0
+              ? `Currently ACTIVE durable commands (${allActiveTasks.length}): ${allActiveTasks.slice(0, 8).map((task) => `${task.taskId}=${task.status}`).join(", ")}. Inspect these handles before retrying or cancelling work.`
               : undefined,
             resumableWorkflows.length > 0
               ? `Resumable coding workflows: ${resumableWorkflows.map((item) => `${item.workflowId}(${item.status},rev=${item.revision}): ${item.title}`).join("; ")}. Use workflow_open with workflowId to resume, and check actual code and test evidence.`
@@ -679,6 +696,7 @@ function registerMcpSurface(
           worktree: workspace.worktree,
           review,
           ...(pendingTasks.length > 0 ? { pendingTasks, pendingTaskCount: allPendingTasks.length } : {}),
+          ...(allActiveTasks.length > 0 ? { activeTasks: allActiveTasks.slice(0, 8), activeTaskCount: allActiveTasks.length } : {}),
           ...(resumableWorkflows.length > 0 ? { resumableWorkflows } : {}),
           ...(includeBootstrapContext
             ? {
@@ -910,14 +928,27 @@ function withTrackedToolHandlers(
         ...args.slice(0, -1),
         async (...handlerArgs: unknown[]) => {
           const suppliedInput = handlerArgs[0] as { workspaceId?: unknown } | undefined;
+          const extra = handlerArgs[1] as { _meta?: unknown } | undefined;
+          const conversationId = conversationTraceIdFromRequestMeta(extra?._meta);
+          const explicitTitle = toolName === "open_workspace"
+            ? safeConversationTitle((suppliedInput as { conversationTitle?: unknown } | undefined)?.conversationTitle)
+            : undefined;
+          const conversationTitle = explicitTitle ?? conversationTitleFromRequestMeta(extra?._meta);
+          if (conversationId && conversationTitle) {
+            diagnostics.record("conversation_labeled", {
+              conversationId, conversationTitle,
+              requestId: currentRequestLogContext()?.requestId,
+            });
+          }
           const watch = watchToolExecution({
             tool: toolName,
             workspaceId: typeof suppliedInput?.workspaceId === "string" ? suppliedInput.workspaceId : undefined,
             requestId: currentRequestLogContext()?.requestId,
             emit: (level, event, fields) => {
-              diagnostics.record(event, fields);
+              const taggedFields = { ...fields, conversationId };
+              diagnostics.record(event, taggedFields);
               if (config.logging.toolCalls || level === "warn") {
-                logEvent(config.logging, level, event, fields);
+                logEvent(config.logging, level, event, taggedFields);
               }
             },
           });

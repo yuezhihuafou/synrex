@@ -12,20 +12,37 @@ const drainingHttpServer = {
 
 const drainingShutdown = shutdownHttpServer(drainingHttpServer, async () => {
   applicationCloseStarted = true;
-  assert.ok(
-    finishHttpClose,
-    "HTTP draining must start before application cleanup",
-  );
-  finishHttpClose();
 });
 
 await Promise.resolve();
 assert.equal(
   applicationCloseStarted,
-  true,
-  "application cleanup must start while the HTTP server is draining",
+  false,
+  "application state must remain available while accepted HTTP requests drain",
 );
+assert.ok(finishHttpClose, "HTTP drain must begin before application cleanup");
+finishHttpClose();
 await drainingShutdown;
+assert.equal(applicationCloseStarted, true);
+
+// Simulate an accepted request still reading the shared store during shutdown.
+// It must complete before closeApplication disposes that store.
+let storeAvailable = true;
+let completeRequest: (() => void) | undefined;
+let httpCloseCallback: (() => void) | undefined;
+const inFlight = new Promise<void>((resolve) => { completeRequest = resolve; });
+const activeRequestShutdown = shutdownHttpServer({
+  close(callback: (error?: Error) => void) { httpCloseCallback = () => callback(); },
+}, async () => { storeAvailable = false; });
+await Promise.resolve();
+assert.equal(storeAvailable, true);
+assert.equal(storeAvailable, true, "an accepted request must see the store while it drains");
+completeRequest?.();
+await inFlight;
+assert.equal(storeAvailable, true);
+httpCloseCallback?.();
+await activeRequestShutdown;
+assert.equal(storeAvailable, false);
 
 let finishApplicationClose: (() => void) | undefined;
 let shutdownResolved = false;
@@ -112,3 +129,9 @@ await assert.rejects(
   ),
   httpCloseError,
 );
+
+let cleanedAfterHttpError = false;
+await assert.rejects(shutdownHttpServer({
+  close(callback: (error?: Error) => void) { callback(httpCloseError); },
+}, async () => { cleanedAfterHttpError = true; }), httpCloseError);
+assert.equal(cleanedAfterHttpError, true);

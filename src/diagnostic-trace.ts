@@ -16,6 +16,7 @@ const DIAGNOSTIC_DIR = "diagnostics";
 const DIAGNOSTIC_FILE = "recent.jsonl";
 
 export type DiagnosticEvent =
+  | "conversation_labeled"
   | "mcp_received"
   | "mcp_finished"
   | "mcp_closed_early"
@@ -30,6 +31,8 @@ export interface DiagnosticEntry {
   requestId?: string;
   callId?: string;
   workspaceId?: string;
+  conversationId?: string;
+  conversationTitle?: string;
   tool?: string;
   durationMs?: number;
   elapsedMs?: number;
@@ -43,6 +46,7 @@ export interface DiagnosticEntry {
 const SAFE_ID = /^[a-zA-Z0-9_-]{1,110}$/;
 const SAFE_OUTCOME = /^(ok|error)$/;
 const EVENT_NAMES: readonly string[] = [
+  "conversation_labeled",
   "mcp_received", "mcp_finished", "mcp_closed_early", "mcp_failed",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
@@ -64,6 +68,10 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   const requestId = boundedString(fields.requestId, SAFE_ID);
   const callId = boundedString(fields.callId, SAFE_ID);
   const workspaceId = boundedString(fields.workspaceId, SAFE_ID);
+  const conversationId = boundedString(fields.conversationId, /^conv_[a-f0-9]{32}$/);
+  // Titles are opt-in and may be human-readable; never accept arbitrary
+  // prompts, headers or long/multiline strings as diagnostic labels.
+  const conversationTitle = boundedString(fields.conversationTitle, /^[^\x00-\x1f\x7f]{1,120}$/);
   const tool = boundedString(fields.tool, /^[a-z][a-z0-9_-]{0,79}$/);
   const outcome = boundedString(fields.outcome, SAFE_OUTCOME);
   const taskId = boundedString(fields.taskId, /^task_[a-zA-Z0-9-]{1,80}$/);
@@ -75,6 +83,10 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   if (requestId) item.requestId = requestId;
   if (callId) item.callId = callId;
   if (workspaceId) item.workspaceId = workspaceId;
+  if (conversationId) item.conversationId = conversationId;
+  if (event === "conversation_labeled" && conversationId && conversationTitle) {
+    item.conversationTitle = conversationTitle;
+  }
   if (tool) item.tool = tool;
   if (outcome) item.outcome = outcome;
   if (taskId) item.taskId = taskId;
@@ -118,7 +130,7 @@ export class DiagnosticTrace {
     }
   }
 
-  read(input: { minutes?: number; limit?: number; requestId?: string } = {}): DiagnosticEntry[] {
+  read(input: { minutes?: number; limit?: number; requestId?: string; conversationId?: string; title?: string } = {}): DiagnosticEntry[] {
     const minutes = Math.min(Math.max(input.minutes ?? 30, 1), 24 * 60);
     const limit = Math.min(Math.max(input.limit ?? 70, 1), 200);
     const cutoff = Date.now() - minutes * 60_000;
@@ -131,23 +143,39 @@ export class DiagnosticTrace {
         try {
           const entry = JSON.parse(line) as DiagnosticEntry;
           if (!EVENT_NAMES.includes(entry.event) || Date.parse(entry.ts) < cutoff) continue;
-          if (input.requestId && entry.requestId !== input.requestId) continue;
           entries.push(entry);
         } catch { /* Ignore a truncated final line after a process interruption. */ }
       }
     }
-    return entries.slice(-limit);
+    // Resolve an explicit title from retained label records before filtering.
+    // A chat title is not a unique identity; matching titles can map to
+    // multiple distinct opaque conversations.
+    const matchedIds = input.title === undefined ? undefined : new Set(
+      entries.filter((entry) => entry.conversationTitle === input.title && entry.conversationId)
+        .map((entry) => entry.conversationId!),
+    );
+    return entries.filter((entry) => (
+      (!input.requestId || entry.requestId === input.requestId)
+      && (!input.conversationId || entry.conversationId === input.conversationId)
+      && (!matchedIds || (entry.conversationId !== undefined && matchedIds.has(entry.conversationId)))
+    )).slice(-limit);
   }
 }
 
 export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
-  const requests = new Map<string, { requestId: string; lastEvent: DiagnosticEvent; tool?: string; callId?: string; status?: number; taskId?: string; runId?: string; lastAt: string }>();
+  const requests = new Map<string, { requestId: string; lastEvent: DiagnosticEvent; conversationId?: string; tool?: string; callId?: string; status?: number; taskId?: string; runId?: string; lastAt: string }>();
+  const conversationTitles = new Map<string, string>();
   for (const entry of entries) {
+    if (entry.conversationId && entry.conversationTitle) {
+      conversationTitles.set(entry.conversationId, entry.conversationTitle);
+    }
     if (!entry.requestId) continue;
     const previous = requests.get(entry.requestId);
     requests.set(entry.requestId, {
       requestId: entry.requestId,
       lastEvent: entry.event,
+      ...(entry.conversationId ?? previous?.conversationId
+        ? { conversationId: entry.conversationId ?? previous?.conversationId } : {}),
       tool: entry.tool ?? previous?.tool,
       callId: entry.callId ?? previous?.callId,
       status: entry.status ?? previous?.status,
@@ -158,8 +186,11 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
   }
   return {
     note: "If tool and HTTP finished, Synrex returned; this cannot diagnose ChatGPT model/UI continuation.",
+    conversations: [...conversationTitles].map(([conversationId, conversationTitle]) => ({ conversationId, conversationTitle })),
     requests: [...requests.values()].map((request) => ({
       ...request,
+      ...(request.conversationId && conversationTitles.has(request.conversationId)
+        ? { conversationTitle: conversationTitles.get(request.conversationId) } : {}),
       classification: request.lastEvent === "mcp_finished"
         ? "rev_http_completed"
         : request.lastEvent === "mcp_closed_early"

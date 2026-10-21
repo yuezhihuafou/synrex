@@ -21,9 +21,14 @@ export async function shutdownHttpServer(
     httpServer.closeAllConnections?.();
   }, drainTimeoutMs);
   try {
-    await closeApplication();
+    // The HTTP close callback fires after accepted requests have drained.
+    // Closing SQLite/routers first can strand an already-dispatched MCP tool
+    // against a disposed control plane during a release switch.
     await httpClosed;
   } finally {
     clearTimeout(forceDrain);
+    // Also clean up when HTTP close itself fails. Never close shared state
+    // while an accepted request may still be using it.
+    await closeApplication();
   }
 }

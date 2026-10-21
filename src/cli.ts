@@ -123,15 +123,26 @@ async function main(argv: string[]): Promise<void> {
       await runWorkflowCommand(args, loadConfig());
       return;
     case "diagnose": {
-      const [flag, rawMinutes, ...rest] = args;
-      if (args.length && (flag !== "--minutes" || rest.length !== 0 || !/^\d+$/.test(rawMinutes ?? ""))) {
-        throw new Error("Usage: synrex diagnose [--minutes 1-1440]");
+      const options = new Map<string, string>();
+      for (let i = 0; i < args.length; i += 2) {
+        if (i + 1 >= args.length || !["--minutes", "--conversation", "--title"].includes(args[i]!)
+          || options.has(args[i]!) || !args[i + 1]) {
+          throw new Error("Usage: synrex diagnose [--minutes 1-1440] [--conversation conv_<id>] [--title <exact title>]");
+        }
+        options.set(args[i]!, args[i + 1]!);
       }
+      const rawMinutes = options.get("--minutes");
       const minutes = rawMinutes === undefined ? 30 : Number(rawMinutes);
       if (!Number.isInteger(minutes) || minutes < 1 || minutes > 1440) {
         throw new Error("Diagnostic range must be between 1 and 1440 minutes");
       }
-      const traces = new DiagnosticTrace(loadConfig().stateDir).read({ minutes, limit: 120 });
+      const conversationId = options.get("--conversation");
+      if (conversationId && !/^conv_[0-9a-f]{32}$/.test(conversationId)) {
+        throw new Error("Invalid conversation diagnostic identifier");
+      }
+      const traces = new DiagnosticTrace(loadConfig().stateDir).read({
+        minutes, limit: 120, conversationId, title: options.get("--title"),
+      });
       console.log(JSON.stringify({ minutes, count: traces.length, ...summarizeDiagnosticTrace(traces), events: traces }, null, 2));
       return;
     }

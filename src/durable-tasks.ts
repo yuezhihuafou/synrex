@@ -391,6 +391,27 @@ export class DurableTaskManager {
     return notifications.sort((left, right) => right.lastUpdatedAt.localeCompare(left.lastUpdatedAt));
   }
 
+  /** Active handles are separate from terminal, unacknowledged notifications. */
+  async activeTaskHandles(workspaceRoot: string): Promise<Array<{ taskId: string; status: "working" | "input_required" }>> {
+    await this.reconcileActiveTasks(workspaceRoot);
+    await this.reconcileOrphanedIndexedTasks(workspaceRoot);
+    const directory = path.join(this.runRoot, ".task-active", workspaceKey(workspaceRoot));
+    const entries = await readdir(directory, { withFileTypes: true }).catch(() => []);
+    const active: Array<{ taskId: string; status: "working" | "input_required" }> = [];
+    for (const entry of entries.filter((candidate) => candidate.isFile()).slice(0, 100)) {
+      try {
+        const marker = JSON.parse(await readFile(path.join(directory, entry.name), "utf8")) as DurableTaskActiveMarker;
+        if (path.resolve(marker.root) !== path.resolve(workspaceRoot)) continue;
+        const state = await readState(this.validateTaskPath(marker.taskPath));
+        if (state.taskId !== marker.taskId || path.resolve(state.root) !== path.resolve(workspaceRoot)) continue;
+        if (state.status === "working" || state.status === "input_required") {
+          active.push({ taskId: state.taskId, status: state.status });
+        }
+      } catch { /* Ignore concurrent completion or malformed markers. */ }
+    }
+    return active;
+  }
+
   async cancel(workspaceRoot: string, taskId: string): Promise<void> {
     const state = await this.findTask(taskId);
     this.assertOwned(state, workspaceRoot);

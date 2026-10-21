@@ -15,6 +15,7 @@ import type { SubagentsConfig } from "./local-agent-config.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { DurableTaskManager } from "./durable-tasks.js";
+import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { runDurableTask } from "./durable-task-runner.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { createMcpServer, createServer } from "./server.js";
@@ -33,6 +34,21 @@ test("MCP initialization identifies Synrex and preserves the coding tool surface
   assert.match(server?.description ?? "", /self-hosted, GPT-first coding and execution harness/);
   const tools = await context.client.listTools();
   assert.ok(tools.tools.some((tool) => tool.name === "open_workspace"));
+});
+
+test("MCP open_workspace records an actual chat title against a pseudonymous session", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const response = await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: context.project, conversationTitle: "Synrex问题分析" },
+    _meta: { "openai/session": "host-chat-session-for-test" },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.notEqual(response.isError, true);
+  const traces = new DiagnosticTrace(join(context.project, "..", ".state")).read({ minutes: 5 });
+  const labeled = traces.find((entry) => entry.event === "conversation_labeled");
+  assert.equal(labeled?.conversationTitle, "Synrex问题分析");
+  assert.match(labeled?.conversationId ?? "", /^conv_[a-f0-9]{32}$/);
+  assert.ok(!JSON.stringify(traces).includes("host-chat-session-for-test"));
 });
 
 test("tool modes expose the expected host-facing tool surface", async (t) => {
@@ -500,6 +516,11 @@ test("known long codex commands detach early instead of occupying the MCP reques
   assert.equal(typeof state.taskId, "string");
   assert.ok(elapsedMs < 2_500, `expected early detach, got ${Math.round(elapsedMs)}ms`);
   assert.ok((state.pollIntervalMs as number) > 0);
+  const recoveryOpen = structuredContent(await callOpen(context.client, context.project, "task-early-detach-recover"));
+  const activeHandles = recoveryOpen.activeTasks as Array<{ taskId: string; status: string }> | undefined;
+  assert.ok(activeHandles?.some((task) => task.taskId === state.taskId && task.status === "working"),
+    "a new conversation must identify executing commands separately from completed receipts");
+  assert.equal(recoveryOpen.pendingTaskCount, undefined);
   assert.match(
     contentText(response),
     new RegExp(`devspace-task wait ${state.taskId as string}`),
@@ -1252,6 +1273,9 @@ async function fixture(
   }));
   const modeConfig: ServerConfig = {
     ...loadedConfig,
+    // Keep the MCP diagnostics/learning store isolated from the real user's
+    // default state directory, alongside this fixture's workspace store.
+    stateDir,
     toolMode: options.toolMode ?? loadedConfig.toolMode,
     uiEnabled: options.uiEnabled ?? loadedConfig.uiEnabled,
   };

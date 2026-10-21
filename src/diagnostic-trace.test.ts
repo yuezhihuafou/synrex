@@ -81,3 +81,26 @@ test("last tool result without HTTP completion is identifiable, not falsely call
   assert.equal(report.requests[0]?.classification, "tool_finished_http_not_observed");
   assert.equal(report.requests[1]?.classification, "connection_closed_early");
 });
+
+test("explicit chat titles are correlated but never synthesized or accepted from other events", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-title-trace-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const d = new DiagnosticTrace(root);
+  const id = "conv_" + "a".repeat(32);
+  d.record("conversation_labeled", { conversationId: id, conversationTitle: "Synrex问题分析", requestId: "r1" });
+  d.record("tool_execution_started", { conversationId: id, tool: "read", requestId: "r1", conversationTitle: "SHOULD_NOT_LEAK" });
+  d.record("tool_execution_finished", { conversationId: id, tool: "read", requestId: "r1", outcome: "ok" });
+  d.record("mcp_finished", { requestId: "r1", status: 200 });
+  const contents = await readFile(d.file, "utf8");
+  assert.ok(contents.includes("Synrex问题分析"));
+  assert.ok(!contents.includes("SHOULD_NOT_LEAK"));
+  const report = summarizeDiagnosticTrace(d.read());
+  assert.deepEqual(report.conversations, [{ conversationId: id, conversationTitle: "Synrex问题分析" }]);
+  assert.equal(report.requests[0]?.conversationId, id);
+  assert.equal(report.requests[0]?.conversationTitle, "Synrex问题分析");
+  assert.equal(d.read({ conversationId: "conv_" + "b".repeat(32) }).length, 0);
+  assert.equal(d.read({ conversationId: id }).length, 3);
+  assert.equal(d.read({ title: "Synrex问题分析" }).length, 3);
+  assert.equal(d.read({ title: "unrelated" }).length, 0);
+  assert.equal(sanitizeDiagnostic("conversation_labeled", { conversationId: id, conversationTitle: "bad\ntitle" }).conversationTitle, undefined);
+});
