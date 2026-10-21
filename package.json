@@ -48,6 +48,8 @@
     "schema:config": "tsx scripts/generate-config-schema.ts",
     "start": "node dist/cli.js serve",
     "test": "tsx --test --test-concurrency=1 \"src/**/*.test.ts\"",
+    "verify:focused": "tsx scripts/verify-efficient.ts focused",
+    "verify:final": "tsx scripts/verify-efficient.ts final",
     "test:package-install": "tsx --test --test-concurrency=1 \"test/package-install-smoke.test.ts\"",
     "benchmark:compare": "tsx scripts/compare-agent-benchmark.ts",
     "benchmark:governance": "tsx scripts/run-governance-benchmark.ts",

@@ -97,6 +97,16 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
   ]);
   assert.equal(calls[1]?.args.workspaceId, "ws_remote");
 
+  const grouped = await handlers.get("read")!({ workspaceId, files: [
+    { path: "a.ts" }, { path: "b.ts", offset: 10, limit: 20 },
+  ] }, {}) as { structuredContent: { files: Array<{ path: string; result: string }>; errorCount: number } };
+  assert.deepEqual(grouped.structuredContent.files.map((file) => file.path), ["a.ts", "b.ts"]);
+  assert.deepEqual(grouped.structuredContent.files.map((file) => file.result), ["remote-read", "remote-read"]);
+  assert.equal(grouped.structuredContent.errorCount, 0);
+  assert.equal(calls[2]?.args.path, "a.ts");
+  assert.equal(calls[3]?.args.path, "b.ts");
+  assert.equal(calls[3]?.args.files, undefined);
+
   const started = await handlers.get("exec_command")!({ workspaceId, cmd: "sleep 5" }, {}) as Record<string, unknown>;
   const globalTaskId = (started.structuredContent as Record<string, unknown>).taskId as string;
   assert.match(globalTaskId, /^task_[0-9a-f]{32}$/);

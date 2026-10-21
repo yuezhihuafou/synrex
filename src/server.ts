@@ -40,6 +40,7 @@ import {
   runWithRequestLogContext,
 } from "./logger.js";
 import { readFileTool } from "./pi-tools.js";
+import { readBatch, validateBatchFiles } from "./batch-read.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import {
   compileMcpRegistrationSurface,
@@ -169,8 +170,8 @@ function serverInstructions(
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
   const common = `Use Synrex for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, selecting a different execution node, or when the current workspaceId is rejected.`;
   const placement = " In multi-node mode, normally omit the open_workspace node selector and let Synrex resolve placement. Never guess a node. Set node only when the user explicitly identifies a host or Synrex reports an ambiguity with candidate nodes; required placement rules cannot be overridden by the model.";
-  const intelligence = " Use project for architecture contracts/impact/drift and for relevant local experience; promote learned skills only after current validation.";
-  const workflows = " For substantial multi-step coding work, create or resume a workflow with workflow_open and observable acceptance criteria. Continue inspect-edit-test-fix-verify in the current GPT turn; record truthful evidence and outstanding task IDs using workflow_checkpoint after significant milestones and before stopping. A checkpoint does not make unfinished work complete. On a later conversation inspect resumableWorkflows or workflow_status and actual Git/tests/logs before continuing. Synrex persists execution and progress, but cannot continue GPT reasoning after the host turn ends.";
+  const intelligence = " Use project for relevant architecture changes or verified local experience, not for repetitive approval of ordinary reads/edits. Do not run the same project check without new evidence.";
+  const workflows = " For genuinely long or multi-session tasks, use workflow_open/checkpoint at meaningful handoff boundaries, not after each step. Batch independent reads, prefer task_wait to repeated task_get polling, and run focused tests during edits with final comprehensive checks before release. Keep GPT responsible for design and correctness; deterministic execution needs no repeated model confirmations. On recovery check current Git/tasks rather than trusting summaries. Synrex cannot resume GPT reasoning after a host turn ends.";
 
   return `${common}${placement} ${toolSurface.instructions({ agents, skills })}${intelligence}${workflows}${artifactInstruction}${showChangesInstruction}`;
 }
@@ -718,26 +719,16 @@ function registerMcpSurface(
     toolNames.read,
     {
       title: "Read file",
-      description:
-        [
-          "Read a file in a workspace. Use this for file inspection instead of shell commands like cat or sed.",
-          "Use this tool to inspect relevant AGENTS.md or CLAUDE.md files listed by open_workspace before working in nested directories.",
-          config.skillsEnabled
-            ? "If available skills were returned and a task matches one, read that skill's path before proceeding. Skill paths may be outside the workspace; files within advertised skill directories are readable."
-            : "",
-        ]
-          .filter(Boolean)
-          .join(" "),
+      description: "Read path or up to 8 file ranges via files, concurrently; full text and errors, not summaries. Read nested AGENTS and matching skills from open_workspace first. Advertised skill paths may be outside workspace.",
       inputSchema: {
         workspaceId: z
           .string()
           .describe(workspaceIdDescription),
         path: z
           .string()
+          .optional()
           .describe(
-            config.skillsEnabled
-              ? "File path to read, relative to the workspace root. May also be an advertised skill path from open_workspace skills."
-              : "File path to read, relative to the workspace root.",
+            config.skillsEnabled ? "Workspace file or advertised skill path." : "Workspace file.",
           ),
         offset: z
           .number()
@@ -751,13 +742,37 @@ function registerMcpSurface(
           .positive()
           .max(500)
           .optional()
-          .describe("Lines to read (max 500). Defaults to 250; continue with offset for more."),
+          .describe("1-500 lines; default 250."),
+        files: z.array(z.object({
+          path: z.string().min(1),
+          offset: z.number().int().positive().optional(),
+          limit: z.number().int().positive().max(500).optional(),
+        })).min(1).max(8).optional(),
       },
       annotations: { readOnlyHint: true },
     },
     async ({ workspaceId, ...input }) => {
       const startedAt = performance.now();
       const workspace = await workspaces.getWorkspace(workspaceId);
+      if (input.files !== undefined) {
+        if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined) {
+          throw new Error("Use read.path or read.files, not both.");
+        }
+        const response = await readBatch(validateBatchFiles(input.files), async (file) => {
+          const readPath = workspaces.resolveReadPath(workspace, file.path);
+          const result = await readFileTool({ ...file, path: readPath.absolutePath }, {
+            cwd: workspace.root, root: workspace.root, readRoots: readPath.readRoots,
+          });
+          return { ...result, structuredContent: { result: contentText(result.content) } };
+        });
+        logToolCall(config, { tool: toolNames.read, workspaceId,
+          success: response.structuredContent.errorCount === 0,
+          durationMs: Math.round(performance.now() - startedAt) });
+        return response;
+      }
+      if (typeof input.path !== "string" || !input.path.trim()) {
+        throw new Error("read.path is required when read.files is not supplied.");
+      }
       const readPath = workspaces.resolveReadPath(workspace, input.path);
       const response = await readFileTool(
         { ...input, path: readPath.absolutePath, limit: input.limit ?? 250 },

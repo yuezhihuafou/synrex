@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { readBatch, validateBatchFiles } from "../batch-read.js";
 import { waitForTaskChange } from "../durable-task-wait.js";
 import { finalBarrierReceipt } from "../task-final-barrier.js";
 import type { DurableTaskView } from "../durable-task-model.js";
@@ -112,6 +113,19 @@ export function withMultiNodeRouting(
         // and never mask an explicitly incompatible task_wait contract.
         const peer = options.store.getNode(route.nodeId);
         const contracts = peer?.capabilities.toolContracts;
+        // Fan out on the coordinator so legacy peers still only receive
+        // their existing single-file read v1 contract.
+        if (name === "read" && input.files !== undefined) {
+          if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined) {
+            throw new Error("Use read.path or read.files, not both.");
+          }
+          return readBatch(validateBatchFiles(input.files), (file) =>
+            options.router.callWorkspaceTool({
+              workspaceId, name: "read", arguments: { workspaceId, ...file },
+              meta: asMeta(extra._meta),
+            }),
+          );
+        }
         if (name === "exec_command" && isCompatTaskWait(name, input)) {
           // Keep legacy six-tool clients on the safe read-only wait path.
           // An older peer must never try to execute an unrecognised

@@ -36,6 +36,25 @@ test("MCP initialization identifies Synrex and preserves the coding tool surface
   assert.ok(tools.tools.some((tool) => tool.name === "open_workspace"));
 });
 
+test("batch read preserves separate file ranges and existing single-file reads", async (t) => {
+  const context = await fixture(t);
+  await writeFile(join(context.project, "a.ts"), "alpha\nbeta\n");
+  await writeFile(join(context.project, "b.ts"), "gamma\n");
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const batch = await context.client.callTool({ name: "read", arguments: { workspaceId, files: [
+    { path: "a.ts", offset: 2, limit: 1 }, { path: "b.ts" }, { path: "missing.ts" },
+  ] } });
+  const fields = structuredContent(batch) as { files: Array<{ path: string; result: string; isError: boolean }>; errorCount: number };
+  assert.deepEqual(fields.files.map((file) => file.path), ["a.ts", "b.ts", "missing.ts"]);
+  assert.match(fields.files[0]?.result ?? "", /beta/);
+  assert.match(fields.files[1]?.result ?? "", /gamma/);
+  assert.equal(fields.files[2]?.isError, true);
+  assert.equal(fields.errorCount, 1);
+  const original = await context.client.callTool({ name: "read", arguments: { workspaceId, path: "a.ts" } });
+  assert.notEqual(original.isError, true);
+  assert.match(String(structuredContent(original).result), /alpha/);
+});
+
 test("MCP open_workspace records an actual chat title against a pseudonymous session", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const response = await context.client.callTool({
