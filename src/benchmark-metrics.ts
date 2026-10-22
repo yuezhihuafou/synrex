@@ -1,3 +1,5 @@
+import { medianOrNull } from "./benchmark-statistics.js";
+
 export interface AgentBenchmarkRecord {
   taskId: string;
   variant: string;
@@ -32,6 +34,7 @@ export interface AgentBenchmarkSummary {
   successRate: number | null;
   functionalSuccessRate: number | null;
   meanContextBytes: number | null;
+  contextMeasurementRuns: number;
   meanInputTokens: number | null;
   meanOutputTokens: number | null;
   meanToolCalls: number | null;
@@ -82,6 +85,7 @@ export function summarizeAgentBenchmark(records: AgentBenchmarkRecord[]): AgentB
         successRate: meanOrNull(valid.map((row) => row.success ? 1 : 0)),
         functionalSuccessRate: meanOrNull(valid.map((row) => (row.functionalSuccess ?? row.success) ? 1 : 0)),
         meanContextBytes: meanOrNull(valid.flatMap((row) => row.contextBytes === undefined ? [] : [row.contextBytes])),
+        contextMeasurementRuns: valid.filter((row) => row.contextBytes !== undefined).length,
         meanInputTokens: meanOrNull(valid.flatMap((row) => row.inputTokens === undefined ? [] : [row.inputTokens])),
         meanOutputTokens: meanOrNull(valid.flatMap((row) => row.outputTokens === undefined ? [] : [row.outputTokens])),
         meanToolCalls: meanOrNull(valid.map((row) => row.toolCalls)),
@@ -144,13 +148,6 @@ function meanOrNull(values: number[]): number | null {
   return values.length === 0 ? null : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function medianOrNull(values: number[]): number | null {
-  if (values.length === 0) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
-}
-
 function validateRecord(record: AgentBenchmarkRecord): void {
   if (!record.taskId || !record.variant) throw new Error("Benchmark records require taskId and variant.");
   for (const key of [
@@ -162,5 +159,11 @@ function validateRecord(record: AgentBenchmarkRecord): void {
   }
   if (record.contextBytes !== undefined && (!Number.isFinite(record.contextBytes) || record.contextBytes < 0)) {
     throw new Error("Benchmark contextBytes must be a non-negative finite number when supplied.");
+  }
+  for (const key of ["inputTokens", "outputTokens"] as const) {
+    const value = record[key];
+    if (value !== undefined && (!Number.isFinite(value) || value < 0)) {
+      throw new Error(`Benchmark ${key} must be a non-negative finite number when supplied.`);
+    }
   }
 }

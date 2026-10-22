@@ -167,10 +167,20 @@ test("host-unobservable context stays missing, never converts to a fictitious ze
     wallTimeMs: 1500, architectureViolations: 0, falsePositiveBlocks: 0, humanInterventions: 0 };
   const [unknown] = summarizeAgentBenchmark([{ ...base, taskId: "unobservable" }]);
   assert.equal(unknown?.meanContextBytes, null);
+  assert.equal(unknown?.contextMeasurementRuns, 0);
   const [mixed] = summarizeAgentBenchmark([
     { ...base, taskId: "measured", contextBytes: 240 },
     { ...base, taskId: "unobservable" },
   ]);
   assert.equal(mixed?.meanContextBytes, 240);
+  assert.equal(mixed?.contextMeasurementRuns, 1);
   assert.throws(() => summarizeAgentBenchmark([{ ...base, taskId: "bad", contextBytes: -1 }]), /contextBytes/);
+});
+
+test("optional token counts reject negative or nonfinite evidence", () => {
+  const row = { taskId: "t1", variant: "governed", success: true, toolCalls: 1,
+    retries: 0, wallTimeMs: 10, architectureViolations: 0,
+    falsePositiveBlocks: 0, humanInterventions: 0 };
+  assert.throws(() => summarizeAgentBenchmark([{ ...row, inputTokens: -3 }]), /inputTokens/);
+  assert.throws(() => summarizeAgentBenchmark([{ ...row, outputTokens: Infinity }]), /outputTokens/);
 });
