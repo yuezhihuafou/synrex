@@ -139,3 +139,68 @@ test("remote workspace recovery maps active task handles and retains their globa
   });
   assert.equal((inspected.structuredContent as Record<string, unknown>).taskId, localTaskId);
 });
+
+test("lost acknowledgment of a remote write is not retried, and reconnect recovers its task identity", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "synrex-remote-lost-ack-"));
+  const store = new SqliteControlPlaneStore(stateDir);
+  t.after(async () => { store.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const local = store.ensureLocalNode({
+    alias: "swy1", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {} },
+  });
+  const remote = store.registerRemoteNode({
+    id: "node_remote_lost_ack", alias: "gateway",
+    platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {} },
+  });
+  let effects = 0;
+  let calls = 0;
+  const localTaskId = "task_abcdefabcdefabcd";
+  const transport: NodeTransport = {
+    async call(_nodeId, call) {
+      calls++;
+      if (call.name === "open_workspace") return {
+        content: [{ type: "text", text: "resumed remote project" }],
+        structuredContent: {
+          workspaceId: "ws_remote_stable", root: "/gateway/project",
+          pendingTasks: effects > 0 ? [{ taskId: localTaskId, status: "completed" }] : [],
+        },
+      };
+      if (call.name === "exec_command") {
+        effects++;
+        throw new Error("simulated: remote command committed but reply disconnected");
+      }
+      if (call.name === "task_get") return {
+        structuredContent: { taskId: localTaskId, status: "completed", exitCode: 0 },
+      };
+      throw new Error("unexpected transport operation");
+    },
+  };
+  const router = new MultiNodeRouter(store, transport, local.id);
+  const opened = await router.openWorkspace({ node: remote.id, arguments: { path: "/gateway/project" } });
+  const globalWorkspaceId = (opened.structuredContent as { workspaceId: string }).workspaceId;
+  await assert.rejects(() => router.callWorkspaceTool({
+    workspaceId: globalWorkspaceId,
+    name: "exec_command",
+    arguments: { workspaceId: globalWorkspaceId, cmd: "append-once" },
+  }), /reply disconnected/);
+  assert.equal(effects, 1, "a lost response must not implicitly replay a non-idempotent operation");
+  const recovered = await router.openWorkspace({ node: remote.id, arguments: { path: "/gateway/project" } });
+  const fields = recovered.structuredContent as {
+    workspaceId: string; pendingTasks: Array<{ taskId: string }>;
+  };
+  assert.equal(fields.workspaceId, globalWorkspaceId);
+  const globalTaskId = fields.pendingTasks[0]?.taskId;
+  assert.ok(globalTaskId && globalTaskId !== localTaskId);
+  const reopened = await router.openWorkspace({ node: remote.id, arguments: { path: "/gateway/project" } });
+  assert.equal((reopened.structuredContent as typeof fields).pendingTasks[0]?.taskId, globalTaskId);
+  assert.equal(store.resolveTask(globalTaskId)?.localTaskId, localTaskId);
+  const receipt = await router.callWorkspaceTool({
+    workspaceId: globalWorkspaceId,
+    name: "task_get",
+    arguments: { workspaceId: globalWorkspaceId, taskId: localTaskId },
+  });
+  assert.equal((receipt.structuredContent as { status: string }).status, "completed");
+  assert.equal(effects, 1);
+  assert.equal(calls, 5);
+});

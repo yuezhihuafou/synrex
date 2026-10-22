@@ -1,8 +1,36 @@
 # Synrex V1.0 — outcome-first execution and acceptance ledger
 
-Last verified: 2026-10-21. This is a working evidence ledger, not a claim that V1.0
+Last verified: 2026-10-22. This is a working evidence ledger, not a claim that V1.0
 has passed final acceptance. Source, test receipts and active release manifests
 take precedence over this document.
+
+## 2026-10-22 continued-work evidence (new conversation)
+
+- The new ordinary ChatGPT conversation successfully called the connected
+  Synrex MCP, reopened `/home/swy/DevSpace`, inspected
+  `wf_d8ec6462633c505e20431c3c` revision 3, and found current live
+  developer HEAD `12a4486` differs from the prior saved `211b2e3`.
+  **Real fresh-conversation read-side takeover succeeded.** This does not
+  show that ChatGPT autonomously resumes after a turn ends.
+- Production is newer than the 2026-10-21 entries below: swy1 is actually
+  running pinned `20261022-synrex-efficiency-v1-147af0e` (source
+  `147af0e`); gateway is online on the older but tool-compatible build.
+  The newer version already implements bounded multi-file read and
+  deterministic staged verification. See
+  `docs/SYNREX_EFFICIENCY_IMPLEMENTATION.md`.
+- A disposable **deterministic remote lost-ack fault test** applies a
+  simulated non-idempotent side effect before the remote transport throws:
+  router does not retry; a subsequent workspace re-open recovers the same
+  global workspace and task identities, with one side effect. This is
+  fault-injection evidence, **not** a genuine WAN network-partition test.
+  The new routing + benchmark focused set passed **14/14**, run
+  `run_20261022050741_bdce08e9`.
+- Host-visible benchmark context is optional: absent `contextBytes` now
+  summarizes to `null`, rather than fabricating 0. This corrects evidence
+  collection but cannot reveal ChatGPT's hidden context budget.
+- No paired full GPT+original Dev versus GPT+current Synrex T1–T5 result has
+  yet been collected. Do not infer the 20%/50% outcome targets from the
+  routing fixture, request traces, or earlier 215-tool-call session.
 
 ## Verified starting state
 

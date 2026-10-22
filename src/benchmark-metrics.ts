@@ -10,7 +10,8 @@ export interface AgentBenchmarkRecord {
   invalidReason?: string;
   success: boolean;
   functionalSuccess?: boolean;
-  contextBytes: number;
+  /** Omit when the host does not expose comparable context or wire bytes. Never substitute zero. */
+  contextBytes?: number;
   inputTokens?: number;
   outputTokens?: number;
   toolCalls: number;
@@ -80,7 +81,7 @@ export function summarizeAgentBenchmark(records: AgentBenchmarkRecord[]): AgentB
         tasks: valid.length,
         successRate: meanOrNull(valid.map((row) => row.success ? 1 : 0)),
         functionalSuccessRate: meanOrNull(valid.map((row) => (row.functionalSuccess ?? row.success) ? 1 : 0)),
-        meanContextBytes: meanOrNull(valid.map((row) => row.contextBytes)),
+        meanContextBytes: meanOrNull(valid.flatMap((row) => row.contextBytes === undefined ? [] : [row.contextBytes])),
         meanInputTokens: meanOrNull(valid.flatMap((row) => row.inputTokens === undefined ? [] : [row.inputTokens])),
         meanOutputTokens: meanOrNull(valid.flatMap((row) => row.outputTokens === undefined ? [] : [row.outputTokens])),
         meanToolCalls: meanOrNull(valid.map((row) => row.toolCalls)),
@@ -150,10 +151,13 @@ function medianOrNull(values: number[]): number | null {
 function validateRecord(record: AgentBenchmarkRecord): void {
   if (!record.taskId || !record.variant) throw new Error("Benchmark records require taskId and variant.");
   for (const key of [
-    "contextBytes", "toolCalls", "retries", "wallTimeMs", "architectureViolations",
+    "toolCalls", "retries", "wallTimeMs", "architectureViolations",
     "falsePositiveBlocks", "humanInterventions",
   ] as const) {
     const value = record[key];
     if (!Number.isFinite(value) || value < 0) throw new Error(`Benchmark ${key} must be a non-negative finite number.`);
+  }
+  if (record.contextBytes !== undefined && (!Number.isFinite(record.contextBytes) || record.contextBytes < 0)) {
+    throw new Error("Benchmark contextBytes must be a non-negative finite number when supplied.");
   }
 }

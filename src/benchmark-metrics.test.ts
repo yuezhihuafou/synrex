@@ -137,3 +137,16 @@ test("paired summaries reject duplicate samples and flag explicitly mismatched c
   assert.equal(summary.incomparablePairs, 1);
   assert.throws(() => summarizePairedAgentBenchmark([baseline, baseline]), /Duplicate benchmark run/);
 });
+
+test("host-unobservable context stays missing, never converts to a fictitious zero", () => {
+  const base = { variant: "synrex", success: true, toolCalls: 2, retries: 0,
+    wallTimeMs: 1500, architectureViolations: 0, falsePositiveBlocks: 0, humanInterventions: 0 };
+  const [unknown] = summarizeAgentBenchmark([{ ...base, taskId: "unobservable" }]);
+  assert.equal(unknown?.meanContextBytes, null);
+  const [mixed] = summarizeAgentBenchmark([
+    { ...base, taskId: "measured", contextBytes: 240 },
+    { ...base, taskId: "unobservable" },
+  ]);
+  assert.equal(mixed?.meanContextBytes, 240);
+  assert.throws(() => summarizeAgentBenchmark([{ ...base, taskId: "bad", contextBytes: -1 }]), /contextBytes/);
+});
