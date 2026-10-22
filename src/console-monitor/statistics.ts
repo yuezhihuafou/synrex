@@ -60,7 +60,10 @@ export class StatisticsStore {
     // Upgrade legacy monitor databases without scanning or modifying production stores.
     if (!this.db.prepare("select value from meta where key='request_minutes_v1'").get()) {
       this.db.transaction(() => {
-        for (const row of this.db.prepare("select id,at,tool,workspace,status,duration from requests").iterate() as Iterable<RequestMetric>) this.adjustMinute(row, 1);
+        // better-sqlite3 cannot write on the same connection while an iterator
+        // has an active SELECT cursor. The detail table is already bounded.
+        const retained = this.db.prepare("select id,at,tool,workspace,status,duration from requests").all() as RequestMetric[];
+        for (const row of retained) this.adjustMinute(row, 1);
         this.db.prepare("insert into meta values ('request_minutes_v1','1')").run();
       })();
     }

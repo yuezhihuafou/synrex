@@ -144,6 +144,17 @@ test("S3 minute buckets survive raw request eviction, restart and event replay",
   assert.equal(store.query({minutes:60}).series.reduce((n,b)=>n+b.count,0),2);
 });
 
+test("S3 upgrade backfills a populated legacy requests table without busy SQLite cursors",async t=>{
+  const f=await fixture(t), file=path.join(f.dir,"legacy.sqlite");
+  let store=new StatisticsStore(file);
+  store.ingest([event("mcp_received","legacy_a"),event("mcp_finished","legacy_a",{status:200,durationMs:42})]);
+  store.db.exec("delete from request_minutes; delete from meta where key='request_minutes_v1'");
+  store.close();
+  store=new StatisticsStore(file);t.after(()=>store.close());
+  assert.equal(store.query({minutes:60}).requests.count,1);
+  assert.equal(store.query({minutes:60}).requests.p50,42);
+});
+
 test("S1 optional SSH peer is bounded, read-only and marks failed sampling unavailable",async()=>{
   assert.deepEqual(validatePeerConfig("gateway=gateway"),["gateway","gateway"]);
   assert.throws(()=>validatePeerConfig("x=host;rm"));
