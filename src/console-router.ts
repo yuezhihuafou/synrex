@@ -187,13 +187,20 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       const localHistory=readArchivedTrace(config.stateDir,requestId);
       const peerKey=localHistory.events.find(e=>e.otelTraceId)?.otelTraceId ?? requestId;
       const peerHistory=await readGatewayArchivedTrace(peerKey);
-      const archived = [...localHistory.events,...peerHistory.events,...readOtelFileTail(config.stateDir).logs].filter(e =>
-        e.requestId === requestId || e.traceId === requestId || e.nodeRequestId === requestId);
+      const relatedNodeRequestIds=new Set(localHistory.events.map(e=>e.nodeRequestId).filter(Boolean));
+      const linkedPeerEvents=peerHistory.events.filter(e=>e.nodeRequestId && relatedNodeRequestIds.has(e.nodeRequestId));
+      const linkedPeerRequestIds=new Set(linkedPeerEvents.map(e=>e.requestId).filter(Boolean));
+      const archived = [
+        ...[...localHistory.events,...readOtelFileTail(config.stateDir).logs].filter(e=>
+          e.requestId === requestId || e.traceId === requestId || e.nodeRequestId === requestId),
+        ...linkedPeerEvents,
+      ];
       const found = new Map([...archived, ...recent].map(e => [
         [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId].join("|"), e,
       ]));
       const all = [...found.values()].sort((a, b) => a.ts.localeCompare(b.ts));
-      const allSpans=[...localHistory.spans,...peerHistory.spans];
+      const allSpans=[...localHistory.spans,...peerHistory.spans.filter(s=>
+        s.requestId && linkedPeerRequestIds.has(s.requestId))];
       const uniqueSpans=[...new Map(allSpans.map(s=>[s.traceId+":"+s.spanId,s])).values()];
       const ownerLabel=readConversationLabels(config.stateDir,[requestId])[0];
       const hostLabel=all.find(e=>e.event==="conversation_labeled" && e.conversationTitle)?.conversationTitle;
@@ -202,7 +209,9 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
         events: all.slice(-1000), spans:uniqueSpans.slice(-1000),
         truncated: all.length > 1000 || uniqueSpans.length>1000,
         archiveCoverage: historyStats(config.stateDir).events ? "indexed_7d" : "bounded_tail",
-        remoteState:peerHistory.remoteState, hostInternalStages: "not_observed" });
+        remoteState:peerHistory.remoteState,
+        remoteTraceGroupExcluded:peerHistory.spans.length-allSpans.length+localHistory.spans.length,
+        hostInternalStages: "not_observed" });
     } catch {
       res.status(503).json({ error: "Trace temporarily unavailable" });
     }

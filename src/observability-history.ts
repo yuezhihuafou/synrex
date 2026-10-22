@@ -24,11 +24,10 @@ function archivedTrace(root: string, id: string): ArchivedTrace {
     const events = (db.prepare(`SELECT data FROM events
       WHERE request_id=? OR trace_id=? OR node_request_id=? ORDER BY ts ASC LIMIT 1500`)
       .all(id,id,id) as Array<{data:string}>).map(r=>parse<DiagnosticEntry>(r.data));
-    const traceIds = [...new Set([...events.map(e=>e.otelTraceId),/^[a-f0-9]{32}$/.test(id)?id:undefined]
-      .filter((s):s is string=>Boolean(s)))].slice(0,8);
-    const spans = traceIds.flatMap(traceId =>
-      (db.prepare("SELECT data FROM spans WHERE trace_id=? ORDER BY ts ASC LIMIT 1000")
-        .all(traceId) as Array<{data:string}>).map(r=>parse<ArchivedSpan>(r.data))).slice(0,1500);
+    const spans = (/^[a-f0-9]{32}$/.test(id)
+      ?db.prepare("SELECT data FROM spans WHERE trace_id=? ORDER BY ts ASC LIMIT 1500").all(id)
+      :db.prepare("SELECT data FROM spans WHERE json_extract(data,'$.requestId')=? ORDER BY ts ASC LIMIT 1500").all(id)
+    ).map((r:any)=>parse<ArchivedSpan>(r.data));
     return { events, spans };
   });
 }

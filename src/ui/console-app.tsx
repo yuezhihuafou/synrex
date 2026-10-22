@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
+import { analyzeBrowserTransport } from "../browser-transport-analysis.js";
 import "./console-app.css";
 
 type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
 type ObservedSpan = {ts:string;traceId:string;spanId:string;parentSpanId?:string;
   name:string;durationMs:number;status:string;requestId?:string};
-type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title";reason:string;tabId?:number;
-  requestType?:string;durationMs?:number;status?:number;startedAt?:string;host?:string;conversationTitle?:string};
+type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"health";
+  reason:string;tabId?:number;flowId?:string;endpointGroup?:string;requestType?:string;
+  durationMs?:number;status?:number;errorCategory?:string;startedAt?:string;
+  host?:string;conversationTitle?:string};
 type Snapshot = {
   generatedAt: string;
   service: { status: string; release: string };
@@ -229,6 +232,7 @@ function Diagnostics({d}:{d:Snapshot}) {
     if(!times.length)return false;
     return e.ts>=Math.min(...times)-120000&&e.ts<=Math.max(...times)+120000;
   }).slice(-100);
+  const browserFindings=analyzeBrowserTransport(browserEvents);
   async function loadHistory(){
     const params=new URLSearchParams();
     if(filter)params.set("event",filter);
@@ -241,14 +245,22 @@ function Diagnostics({d}:{d:Snapshot}) {
   }
   async function loadBrowserMetadata(file:File){
     setBrowserError("");
-    if(file.size>1024*1024){setBrowserError("文件超过 1 MiB 上限");return;}
+    if(file.size>4*1024*1024){setBrowserError("文件超过 4 MiB 上限");return;}
     try{
       const data=JSON.parse(await file.text()) as {schema?:string;events?:BrowserEvent[]};
       if(data.schema!=="synrex.browser.v1"||!Array.isArray(data.events))throw Error("Invalid schema");
-      const accepted=data.events.filter(e=>e && (e.kind==="network"||e.kind==="ui"||e.kind==="conversation_title") &&
+      const accepted=data.events.filter(e=>e && ["network","ui","conversation_title","tab","health"].includes(e.kind) &&
         typeof e.ts==="number"&&Number.isFinite(e.ts)&&
-        ["completed","network_error","transport_timeout","retry_requested","observed"].includes(e.reason))
-        .map(e=>({ts:e.ts,kind:e.kind,reason:e.reason,tabId:e.tabId,
+        ["started","headers_received","first_response","redirect","completed","handshake_completed","network_error",
+          "transport_timeout","retry_requested","observed","heartbeat",
+          "visible","hidden","pagehide","pageshow","incomplete"].includes(e.reason))
+        .map(e=>({ts:e.ts,kind:e.kind,reason:e.reason,
+          ...(typeof e.tabId==="number"?{tabId:e.tabId}:{}),
+          ...(typeof e.flowId==="string"&&/^[0-9a-f-]{36}$/.test(e.flowId)?{flowId:e.flowId}:{}),
+          ...(typeof e.endpointGroup==="string"&&["conversation","other","self_test","websocket_handshake"].includes(e.endpointGroup)
+            ?{endpointGroup:e.endpointGroup}:{}),
+          ...(typeof e.requestType==="string"?{requestType:e.requestType}:{}),
+          ...(typeof e.errorCategory==="string"?{errorCategory:e.errorCategory}:{}),
           ...(e.kind==="conversation_title" && typeof e.conversationTitle==="string" &&
             e.conversationTitle.length<=120?{conversationTitle:e.conversationTitle}:{}),
           ...(typeof e.durationMs==="number"?{durationMs:e.durationMs}:{}),
@@ -326,15 +338,27 @@ function Diagnostics({d}:{d:Snapshot}) {
         const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
       }}/>
       {browserError&&<p className="form-error">{browserError}</p>}
-      <p className="footnote">浏览器扩展需由用户自行在 Chrome 启用。无共享请求 ID 的事件仅按时间推测关联。</p>
+      <p className="footnote">扩展 v1.1：在 ChatGPT 标签页打开扩展并点击“测试实际页面网络采集”。
+        看到通过后导出 JSON，再导入 Console。无共享请求 ID 的记录只按时间推测关联。</p>
+      {browserEvents.length>0&&<p className="footnote">已导入 {browserEvents.length} 条；
+        请求开始 {browserEvents.filter(e=>e.reason==="started").length}，
+        首响应 {browserEvents.filter(e=>e.reason==="first_response").length}，
+        结束 {browserEvents.filter(e=>e.reason==="completed"||e.reason==="network_error").length}，
+        页面超时 {browserEvents.filter(e=>e.reason==="transport_timeout").length}。</p>}
+      {browserFindings.map((f,i)=><p className="footnote" key={i}>
+        超时诊断（{time(new Date(f.at).toISOString())}）：{f.description}
+        候选流 {f.candidateFlows} 条，均非精确请求级归因。</p>)}
       {relatedBrowser.some(e=>e.conversationTitle)&&<p className="footnote">
         观测到的浏览器对话标题：
         {[...new Set(relatedBrowser.map(e=>e.conversationTitle).filter(Boolean))].slice(0,5).join("、")}。
         这些仅是时间上接近的候选标题，不代表已关联到当前请求。
       </p>}
-      <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>结果</th><th>耗时</th></tr></thead>
-        <tbody>{relatedBrowser.slice(-40).map((e,i)=><tr key={i}>
-          <td>{time(new Date(e.ts).toISOString())}</td><td>{e.kind}</td><td>{e.reason}</td>
+      <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>阶段</th><th>本地流 ID</th><th>耗时</th></tr></thead>
+        <tbody>{(relatedBrowser.length?relatedBrowser:browserEvents.slice(-100)).slice(-60).map((e,i)=><tr key={i}>
+          <td>{time(new Date(e.ts).toISOString())}</td><td>{e.endpointGroup??e.kind}</td>
+          <td>{e.reason}{e.status!==undefined?" / HTTP "+e.status:""}
+            {e.errorCategory?" / "+e.errorCategory:""}</td>
+          <td title={e.flowId??""}>{e.flowId?.slice(0,8)??"—"}</td>
           <td>{e.durationMs===undefined?"未知":e.durationMs+" ms"}</td></tr>)}</tbody></table></div>
       {browserEvents.length>0&&!relatedBrowser.length&&<Blank>已导入 {browserEvents.length} 条；当前请求时间窗口无匹配。</Blank>}
     </Panel></div>;

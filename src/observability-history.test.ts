@@ -54,6 +54,15 @@ test("seven-day index survives file rotation/restart and rejects unexpected cont
   scan();
   assert.equal(historyStats(root).spans,1);
   assert.equal(readArchivedTrace(root,ctx.otelTraceId).spans[0]?.spanId,ctx.otelSpanId);
+  const sibling={...ctx,otelSpanId:"1234567890abcdef"};
+  appendFileSync(path.join(dir,"traces.otlp.json"),JSON.stringify(spanPayload({
+    context:sibling,name:"tool_handler",startMs:Date.now()-4,endMs:Date.now(),
+    fields:{"synrex.request_id":"different-request-same-trace"},
+  }))+"\n");
+  scan();
+  assert.equal(readArchivedTrace(root,"request-c").spans.length,1);
+  assert.equal(readArchivedTrace(root,"different-request-same-trace").spans.length,1);
+  assert.equal(readArchivedTrace(root,ctx.otelTraceId).spans.length,2);
   // A backlog of multiline OTLP JSONL records is ingested in one pass.
   appendFileSync(first,Array.from({length:300},(_,i)=>record(now,"queue-"+i)).join(""));
   scan();

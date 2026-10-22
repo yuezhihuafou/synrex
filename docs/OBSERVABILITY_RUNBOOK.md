@@ -115,6 +115,45 @@ and annotated as `source=owner`; it never auto-binds nearby conversations.
 The optional browser extension records tab titles locally and exports them
 with timestamps. Time-only suggestions are never treated as exact.
 
+### 2026-10-22: browser capture coverage audit
+
+The v1.0 extension stored terminal network events only and did not verify that
+the user's installed Chrome extension was actually receiving events. Its
+background Map could be lost during Chrome MV3 service-worker suspension.
+In v1.1, the browser side captures `started`, `headers_received`,
+`first_response`, and terminal `completed`/`network_error` events,
+each grouped under a randomized browser-local `flowId`. It preserves
+in-flight metadata across worker suspension in storage.session, labels
+service-worker network requests as tab-unknown, and keeps data local in
+five-minute shards (up to 5000 recent events or seven days, whichever is
+shorter). It includes a popup self-test that sends a credential-free favicon
+request from the current ChatGPT page and verifies real webRequest events.
+Re-load any previously installed unpacked extension after a v1.1 upgrade.
+
+The Console now accepts these richer records, keeps the raw browser event
+sequence, and emits bounded candidate findings: browser-reported network
+errors near a UI timeout; UI timeouts without nearby network records; and
+ambiguous cases where HTTP completes despite UI timeout. Inferred/time-window
+links remain clearly labeled non-exact. Querying one MCP request's native
+waterfall uses its exact `synrex.request_id`; different requests under a shared
+W3C trace are not merged. The gateway contributes only correlated
+`nodeRequestId` events and peer-local spans, not arbitrary same-trace events.
+
+Audit of the last 30 minutes around 22:43 local: 91/91 logged MCP HTTP
+requests completed; all had OTel trace context, while only nine distinct W3C
+trace IDs were in the native span archive because trace context was reused
+across multiple calls. A real gateway test generated the expected owner
+`node_queued`/`node_delivered`/`node_completed` and gateway
+`node_peer_*` events. These establish cross-node diagnostic coverage, but
+native spans for every network hop are not guaranteed.
+
+The tests use a mocked Chrome event API and isolated HTTP/MCP browsers.
+They **cannot** prove that a particular user's actual Chrome has the extension
+enabled or that ChatGPT will render any given error under a detected selector.
+The operator must run the popup's live self-test and export the metadata.
+WebSocket message frames, ChatGPT internal inference/acknowledgment and
+client-to-MCP exact host correlation remain unknown.
+
 ### 2026-10-22 21:51 client transport timeout incident
 
 For 21:49–21:52:30 Asia/Kuala_Lumpur, the owner history had 10 completed

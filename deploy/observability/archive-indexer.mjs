@@ -33,6 +33,7 @@ db.exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout
     value REAL NOT NULL, PRIMARY KEY(minute,name,node,dimension));
   CREATE INDEX IF NOT EXISTS metrics_minute ON metrics(minute);
   `);
+db.exec("CREATE INDEX IF NOT EXISTS spans_request ON spans(json_extract(data,'$.requestId'),ts)");
 const allowedEvents = new Set([
   "stage_started","stage_finished","mcp_received","mcp_body_ready","mcp_handler_returned",
   "mcp_headers_sent","mcp_finished","mcp_failed","mcp_closed_early","mcp_stream_closed",
@@ -174,10 +175,12 @@ function query(args) {
   if(mode==="trace" && /^[a-zA-Z0-9_-]{1,110}$/.test(term)){
     const events=db.prepare(`SELECT data FROM events WHERE request_id=? OR trace_id=? OR node_request_id=? ORDER BY ts LIMIT 1500`)
       .all(term,term,term).map(r=>JSON.parse(r.data));
-    const traces=[...new Set(events.map(x=>x.otelTraceId).filter(Boolean)
-      .concat(/^[0-9a-f]{32}$/.test(term)?[term]:[]))].slice(0,8);
-    const spans=traces.flatMap(id=>db.prepare("SELECT data FROM spans WHERE trace_id=? ORDER BY ts LIMIT 1000")
-      .all(id).map(r=>JSON.parse(r.data))).slice(0,1500);
+    // W3C Trace IDs can cover *many* HTTP/tool calls. A request-level
+    // waterfall must not import unrelated siblings with the same traceId.
+    const spans=(/^[0-9a-f]{32}$/.test(term)
+      ?db.prepare("SELECT data FROM spans WHERE trace_id=? ORDER BY ts LIMIT 1500").all(term)
+      :db.prepare("SELECT data FROM spans WHERE json_extract(data,'$.requestId')=? ORDER BY ts LIMIT 1500").all(term))
+      .map(r=>JSON.parse(r.data));
     console.log(JSON.stringify({events,spans}));
   }else if(mode==="search"){
     const after=date(start)||new Date(Date.now()-7*86400000).toISOString();
