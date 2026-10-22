@@ -12,6 +12,7 @@ import { createMonitorApp } from "./server.js";
 import { DurableTaskManager } from "../durable-tasks.js";
 import type { DiagnosticEntry } from "../diagnostic-trace.js";
 import { parseProcStat } from "./resources.js";
+import { normalizeEvent } from "./events.js";
 
 async function fixture(t: { after: (fn:()=>unknown)=>void }) {
   const dir = await mkdtemp(path.join(tmpdir(), "synrex-monitor-"));
@@ -96,4 +97,15 @@ test("real detached task is visible, output follows, cancel reaches terminal rec
 test("Linux stat parser handles spaces and parentheses in process name",()=>{
   const fields=Array(50).fill("0");fields[0]="S";fields[1]="42";fields[11]="200";fields[12]="50";fields[19]="1234";fields[21]="10";
   const parsed=parseProcStat(`123 (worker (job)) ${fields.join(" ")}`);assert.equal(parsed.row.name,"worker (job)");assert.equal(parsed.row.ppid,42);assert.equal(parsed.ticks,250);assert.equal(parsed.row.rssBytes,40960);
+});
+
+test("full-chain trace adapter retains stage/node/task identity and excludes unapproved payloads",async t=>{
+  const f=await fixture(t), store=new StatisticsStore(path.join(f.dir,"monitor","stats.sqlite"));t.after(()=>store.close());
+  const now=new Date().toISOString();
+  const raw={ts:now,event:"stage_finished",requestId:"req_full",traceId:"trace_full",nodeId:"node_gateway",stage:"peer_execute",durationMs:125,outcome:"ok",tool:"exec_command",command:"secret command",authorization:"secret token"};
+  const safe=normalizeEvent(raw)!;assert.equal(safe.stage,"peer_execute");assert.equal(safe.nodeId,"node_gateway");assert.equal(safe.traceId,"trace_full");assert.ok(!JSON.stringify(safe).includes("secret"));
+  store.ingest([raw,event("mcp_finished","req_full",{status:200,durationMs:150})]);
+  assert.equal(store.query({minutes:60}).stages[0].p50,125);
+  assert.equal(store.query({minutes:60}).requests.count,1);
+  assert.equal(store.events("peer_execute").length,1);
 });

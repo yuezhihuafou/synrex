@@ -16,6 +16,8 @@ Research Harness remains a separate project.
 - P2: independent restart-safe SQLite statistics, incremental diagnostic import,
   rotation deduplication, HTTP latency P50/P95, tool-error-aware request outcomes,
   task completion/failure/cancellation counts and time/tool/workspace filters.
+  The monitor-side full-chain adapter also retains stage/node/task identities and
+  reports stage P50/P95 without requiring changes in the observed logger.
 
 ## Important scope
 

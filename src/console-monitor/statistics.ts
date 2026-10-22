@@ -3,8 +3,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
-import type { DiagnosticEntry } from "../diagnostic-trace.js";
-import { sanitizeDiagnostic } from "../diagnostic-trace.js";
+import { normalizeEvent, type MonitorEvent } from "./events.js";
 import type { Execution, MetricSummary, Statistics, StatsFilter } from "./types.js";
 
 export const HISTORY_LIMIT = 20_000;
@@ -47,20 +46,21 @@ export class StatisticsStore {
       create table if not exists cursors (file text primary key, inode text not null, offset integer not null);
     `);
     this.db.prepare("insert or ignore into meta values ('started', ?)").run(new Date().toISOString());
+    const normalizer = this.db.prepare("select value from meta where key='normalizer'").get() as {value:string}|undefined;
+    if(normalizer?.value!=="2") { this.db.exec("delete from cursors"); this.db.prepare("insert or replace into meta values ('normalizer','2')").run(); }
     this.observationStartedAt = (this.db.prepare("select value from meta where key='started'").get() as { value: string }).value;
   }
   close() { this.db.close(); }
 
-  ingest(entries: DiagnosticEntry[]) {
+  ingest(entries: unknown[]) {
     const insert = this.db.prepare("insert or ignore into events values (?,?,?,?,?,?,?)");
     const get = this.db.prepare("select * from requests where id=?");
     const save = this.db.prepare(`insert into requests(id,at,started,tool,workspace,status,duration,tool_error) values (@id,@at,@started,@tool,@workspace,@status,@duration,@tool_error)
       on conflict(id) do update set at=excluded.at,started=excluded.started,tool=excluded.tool,workspace=excluded.workspace,status=excluded.status,duration=excluded.duration,tool_error=excluded.tool_error`);
     this.db.transaction(() => {
       for (const raw of entries) {
-        let entry: DiagnosticEntry;
-        try { entry = { ...sanitizeDiagnostic(raw.event, raw as unknown as Record<string, unknown>), ts: new Date(raw.ts).toISOString() }; }
-        catch { continue; }
+        const entry = normalizeEvent(raw);
+        if(!entry) continue;
         const body = JSON.stringify(entry), id = createHash("sha256").update(body).digest("hex");
         if (!insert.run(id, entry.ts, entry.requestId ?? null, entry.tool ?? "", entry.workspaceId ?? "", entry.event, body).changes || !entry.requestId) continue;
         const old = get.get(entry.requestId) as (RequestMetric & { started: string | null; tool_error: number }) | undefined;
@@ -105,7 +105,7 @@ export class StatisticsStore {
         if (end < 0) continue;
         const lines = buffer.subarray(0, end + 1).toString("utf8").split("\n");
         if (skipFirst) lines.shift();
-        const rows: DiagnosticEntry[] = [];
+        const rows: unknown[] = [];
         for (const line of lines) { try { if (line) rows.push(JSON.parse(line)); } catch { /* truncated rotation */ } }
         this.ingest(rows);
         this.db.prepare("insert into cursors values (?,?,?) on conflict(file) do update set inode=excluded.inode,offset=excluded.offset").run(file, inode, offset + end + 1);
@@ -126,9 +126,14 @@ export class StatisticsStore {
     for (const row of rows) { const bucket = series[Math.min(23, Math.max(0, Math.floor((Date.parse(row.at) - start) / width)))]; bucket.count++; if (row.status === "error") bucket.errors++; }
     const runs = this.db.prepare(`select status,duration from runs where at >= ? ${filter.workspace ? "and workspace = ?" : ""} limit ${HISTORY_LIMIT}`).all(...(filter.workspace ? [since, filter.workspace] : [since])) as { status: string; duration: number | null }[];
     const durations = runs.filter(r => r.duration !== null).map(r => r.duration!);
+    const stageRows = this.db.prepare(`select id,at,coalesce(tool,'') as tool,coalesce(workspace,'') as workspace,
+      coalesce(json_extract(body,'$.stage'),'unknown') as name,
+      case when json_extract(body,'$.outcome')='error' then 'error' else 'ok' end as status,
+      json_extract(body,'$.durationMs') as duration from events where event='stage_finished' and ${clauses.join(" and ")} limit ${HISTORY_LIMIT}`).all(...args) as Array<RequestMetric&{name:string}>;
+    const stages = [...new Set(stageRows.map(x=>x.name))].map(name=>({name,...summarize(stageRows.filter(x=>x.name===name))}));
     return { since, until: until.toISOString(), observationStartedAt: this.observationStartedAt,
       coverage: "保留窗口内已观测数据；历史日志可能已轮转，最多 7 天 / 每类 20,000 条。调用成功与任务验收分别统计。",
-      requests: summarize(rows), tools, series,
+      requests: summarize(rows), tools, stages, series,
       tasks: { count: runs.length, completed: runs.filter(r => r.status === "completed").length, failed: runs.filter(r => r.status === "failed").length,
         cancelled: runs.filter(r => r.status === "cancelled").length, active: runs.filter(r => ["working", "input_required"].includes(r.status)).length,
         p50: percentile(durations, .5), p95: percentile(durations, .95) },
@@ -138,7 +143,7 @@ export class StatisticsStore {
 
   events(query = "", request = "") {
     const rows = this.db.prepare(`select body from events ${request ? "where request_id = ?" : ""} order by at desc limit 400`).all(...(request ? [request] : [])) as { body: string }[];
-    return rows.map(x => JSON.parse(x.body) as DiagnosticEntry).filter(x => JSON.stringify(x).toLowerCase().includes(query.toLowerCase())).slice(0, 200);
+    return rows.map(x => JSON.parse(x.body) as MonitorEvent).filter(x => JSON.stringify(x).toLowerCase().includes(query.toLowerCase())).slice(0, 200);
   }
   receipt(id: string, action: string, target: string, status: string) {
     this.db.prepare("insert or ignore into receipts values (?,?,?,?,?)").run(id, new Date().toISOString(), action, target, status);

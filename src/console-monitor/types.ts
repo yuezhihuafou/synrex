@@ -64,6 +64,7 @@ export interface Statistics {
   coverage: string;
   requests: MetricSummary;
   tools: Array<MetricSummary & { name: string }>;
+  stages: Array<MetricSummary & { name: string }>;
   series: Array<{ at: string; count: number; errors: number }>;
   tasks: { count: number; completed: number; failed: number; cancelled: number; active: number; p50: number | null; p95: number | null };
   options: { tools: string[]; workspaces: string[] };
