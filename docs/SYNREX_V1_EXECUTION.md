@@ -6,6 +6,12 @@ take precedence over this document.
 
 ## 2026-10-22 continued-work evidence (new conversation)
 
+- Follow-up found that paired benchmarks with both model and environment
+  controls missing were incorrectly accepted as comparable. Revision
+  `7f4961d` requires matching, nonempty provider, model, effort, source
+  commit and environment ID. Missing controls now give zero pairs and a null
+  latency delta. Focused tests 8/8 passed, typecheck passed.
+
 - The new ordinary ChatGPT conversation successfully called the connected
   Synrex MCP, reopened `/home/swy/DevSpace`, inspected
   `wf_d8ec6462633c505e20431c3c` revision 3, and found current live
