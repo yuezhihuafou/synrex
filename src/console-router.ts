@@ -158,6 +158,13 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       res.status(503).json({ error: "Status data temporarily unavailable" });
     }
   });
+  app.get("/console/api/usage", auth, (_req,res)=>{
+    try{
+      const file=path.join(config.stateDir,"observability","usage-rollup.json");
+      if(!existsSync(file)){res.status(202).json({status:"awaiting_offline_rollup"});return;}
+      res.type("json").send(readFileSync(file,"utf8"));
+    }catch{res.status(503).json({error:"Offline usage report unavailable"});}
+  });
   app.get("/console/api/history", auth, async (req, res) => {
     try {
       const start=typeof req.query.start==="string"?req.query.start:undefined;

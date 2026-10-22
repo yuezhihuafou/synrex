@@ -3,7 +3,13 @@ import { createRoot } from "react-dom/client";
 import { analyzeBrowserTransport } from "../browser-transport-analysis.js";
 import "./console-app.css";
 
-type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
+type View = "overview" | "usage" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
+type Usage = {generatedAt?:string;status?:string;requests?:number;completed?:number;failed?:number;toolCalls?:number;
+  mcpWire?:{inputBytes:number;outputBytes:number;observedInputRequests:number;observedOutputRequests:number};
+  duration?:{observedRequests:number;meanMs:number|null};
+  modelTokens?:{input:null;output:null;reason:string};
+  comparison?:{baseline:null;savingsPercent:null;reason:string};
+  code?:{commits:number;added:number;deleted:number;net:number;fileChanges:number;warning:string}|null};
 type ObservedSpan = {ts:string;traceId:string;spanId:string;parentSpanId?:string;
   name:string;durationMs:number;status:string;requestId?:string};
 type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"health";
@@ -43,6 +49,7 @@ type Snapshot = {
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
+  { id: "usage", title: "效能统计", symbol: "▤", caption: "离线统计与对照" },
   { id: "workflows", title: "工作流", symbol: "☷", caption: "任务与检查点" },
   { id: "tasks", title: "执行索引", symbol: ">_", caption: "持久任务位置" },
   { id: "nodes", title: "主机节点", symbol: "⌘", caption: "版本与契约" },
@@ -76,6 +83,54 @@ function Metric({ label, value, info, symbol }: { label:string; value:string|num
 }
 function Blank({ children }: { children:ReactNode }) {
   return <div className="blank"><span>◌</span><p>{children}</p></div>;
+}
+function UsagePage(){
+  const [data,setData]=useState<Usage|null>(null);
+  const [error,setError]=useState("");
+  useEffect(()=>{
+    let live=true;
+    const load=()=>getJson<Usage>("/console/api/usage").then(x=>{if(live)setData(x);})
+      .catch(()=>{if(live)setError("离线统计暂不可用");});
+    void load();const timer=setInterval(()=>void load(),60000);
+    return()=>{live=false;clearInterval(timer);};
+  },[]);
+  if(error)return <Blank>{error}</Blank>;
+  if(!data||data.status)return <Blank>等待独立统计进程首次生成数据，不在 MCP 主进程中计算。</Blank>;
+  const format=(n?:number|null)=>n===undefined||n===null?"未知":n.toLocaleString("zh-CN");
+  return <div className="stack">
+    <Panel title="7 天执行效率" hint="后台独立进程生成，只读取缓存；不会调用模型，也不会占用上下文">
+      <p className="footnote">更新于 {time(data.generatedAt)}；统计口径为服务端实际观测的 MCP 请求。</p>
+      <div className="metrics">
+        <Metric label="MCP 请求" value={format(data.requests)} info="服务端观测" symbol="▤"/>
+        <Metric label="已完成" value={format(data.completed)} info="HTTP 完成，不代表模型成功" symbol="✓"/>
+        <Metric label="失败" value={format(data.failed)} info="已记录失败" symbol="!"/>
+        <Metric label="工具调用" value={format(data.toolCalls)} info="执行完成事件" symbol="⌘"/>
+        <Metric label="平均 MCP 耗时" value={data.duration?.meanMs==null?"未知":data.duration.meanMs+" ms"}
+          info="仅统计可观测请求" symbol="◷"/>
+      </div>
+    </Panel>
+    <Panel title="Token 与传输开销" hint="真实模型 Token 不可观测时保持未知，不把网络字节伪装成 Token">
+      <div className="metrics">
+        <Metric label="输入 Token" value="未知" info="宿主未开放用量" symbol="↗"/>
+        <Metric label="输出 Token" value="未知" info="宿主未开放用量" symbol="↙"/>
+        <Metric label="MCP 输入流量" value={format(data.mcpWire?.inputBytes)+" B"} info="HTTP 请求字节" symbol="⇢"/>
+        <Metric label="MCP 输出流量" value={format(data.mcpWire?.outputBytes)+" B"} info="HTTP 响应字节" symbol="⇠"/>
+      </div>
+      <p className="footnote">输入字节覆盖 {format(data.mcpWire?.observedInputRequests)} 次请求；
+        输出字节覆盖 {format(data.mcpWire?.observedOutputRequests)} 次请求。仅作为传输开销，不推断模型推理 Token。</p>
+    </Panel>
+    <Panel title="代码产出" hint="Git 七天提交记录，不将改动行数直接等同于有效代码">
+      {data.code?<><div className="metrics">
+        <Metric label="提交" value={format(data.code.commits)} info="不含合并提交" symbol="◇"/>
+        <Metric label="新增行" value={format(data.code.added)} info="Git numstat" symbol="+"/>
+        <Metric label="删除行" value={format(data.code.deleted)} info="Git numstat" symbol="−"/>
+        <Metric label="净变动" value={format(data.code.net)} info="新增减删除" symbol="≡"/>
+      </div><p className="footnote">{data.code.warning}</p></>:<Blank>未配置仓库路径，暂无可验证代码统计。</Blank>}
+    </Panel>
+    <Panel title="GPT / Codex 对照" hint="对照数据未采集前不展示虚构的节省百分比">
+      <Blank>{data.comparison?.reason??"尚无可比较的基线数据"}</Blank>
+    </Panel>
+  </div>;
 }
 async function getJson<T>(url:string, init?:RequestInit):Promise<T> {
   const r=await fetch(url,{ credentials:"same-origin",cache:"no-store",...init });
@@ -499,6 +554,7 @@ function App() {
       <span>更新于 {time(data?.generatedAt)}</span></div></div>
     {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh()}>重试</button></div>}
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
+      {view==="usage"&&<UsagePage/>}
       {view==="workflows"&&<Workflows d={data}/>}
       {view==="tasks"&&<Tasks d={data}/>}
       {view==="nodes"&&<Nodes d={data}/>}
