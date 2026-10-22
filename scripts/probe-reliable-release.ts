@@ -68,7 +68,8 @@ async function stopCandidate(): Promise<void> {
 }
 
 async function runAuthenticatedProbe(env: NodeJS.ProcessEnv, resumeId?: string) {
-  const child = spawn("pnpm", ["exec", "tsx", "scripts/probe-live-schema.ts"], {
+  // QA must not trigger package-manager installs or alter candidate dependencies.
+  const child = spawn(process.execPath, ["--import", "tsx", "scripts/probe-live-schema.ts"], {
     env: {
       ...env,
       DEVSPACE_QA_WORKFLOW_PROBE: "1",
