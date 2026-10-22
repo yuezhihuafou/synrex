@@ -2,7 +2,7 @@ import { appendFileSync } from "node:fs";
 import path from "node:path";
 import { diagnosticRuntime, sanitizeDiagnostic, type DiagnosticEvent, type DiagnosticEntry } from "./diagnostic-trace.js";
 
-export type TaskTraceContext = Pick<DiagnosticEntry, "requestId" | "traceId" | "callId" | "nodeRequestId" | "workspaceId">;
+export type TaskTraceContext = Pick<DiagnosticEntry, "requestId" | "traceId" | "otelTraceId" | "otelSpanId" | "otelParentSpanId" | "callId" | "nodeRequestId" | "workspaceId">;
 
 /** Each run has its own tiny append-only lifecycle file. Independent runners
  * never contend on the coordinator's rotating diagnostic file. Run retention

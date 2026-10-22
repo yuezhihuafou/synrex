@@ -1,0 +1,113 @@
+# Local-only OpenTelemetry Collector contrib configuration.
+# Set SYNREX_STATE_DIR, SYNREX_OTEL_ROOT and SYNREX_NODE_ID for each peer.
+# Validate with the installed otelcol-contrib version before enabling the service.
+extensions:
+  file_storage/offsets:
+    directory: ${env:SYNREX_OTEL_ROOT}/offsets
+    create_directory: true
+  health_check:
+    endpoint: 127.0.0.1:13133
+
+receivers:
+  filelog/synrex:
+    include:
+      - ${env:SYNREX_STATE_DIR}/diagnostics/recent.jsonl*
+    start_at: beginning
+    storage: file_storage/offsets
+    include_file_path: true
+    retry_on_failure:
+      enabled: true
+    operators:
+      - type: json_parser
+        parse_from: body
+  filelog/network:
+    include:
+      - ${env:SYNREX_STATE_DIR}/observability/network.jsonl*
+    start_at: beginning
+    storage: file_storage/offsets
+    retry_on_failure:
+      enabled: true
+    operators:
+      - type: json_parser
+        parse_from: body
+  hostmetrics:
+    collection_interval: 10s
+    scrapers:
+      cpu: {}
+      memory: {}
+      disk: {}
+      filesystem: {}
+      network: {}
+      load: {}
+      processes: {}
+      process:
+        mute_process_all_errors: true
+        mute_process_name_error: true
+        include:
+          names: [node, cloudflared]
+          match_type: strict
+        # PIDs and executable names are sufficient for process management.
+        # Command lines, arguments, owners and full executable paths may expose
+        # passwords or private workspaces; never export them.
+        resource_attributes:
+          process.command:
+            enabled: false
+          process.command_line:
+            enabled: false
+          process.executable.path:
+            enabled: false
+          process.owner:
+            enabled: false
+          process.parent_pid:
+            enabled: false
+        metrics:
+          process.cpu.utilization:
+            enabled: true
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 128
+    spike_limit_mib: 32
+  batch:
+    timeout: 5s
+    send_batch_size: 256
+  resource/synrex:
+    attributes:
+      - key: service.name
+        value: synrex
+        action: upsert
+      - key: deployment.environment.name
+        value: production
+        action: upsert
+      - key: synrex.node.id
+        value: ${env:SYNREX_NODE_ID}
+        action: upsert
+
+exporters:
+  # Local JSONL OTLP only. 32 MiB x 13 files per signal at most, retained for
+  # up to seven days (subject to available disk and rotation semantics).
+  file/synrex_logs:
+    path: ${env:SYNREX_OTEL_ROOT}/data/logs.otlp.json
+    rotation:
+      max_megabytes: 32
+      max_days: 7
+      max_backups: 12
+  file/synrex_metrics:
+    path: ${env:SYNREX_OTEL_ROOT}/data/metrics.otlp.json
+    rotation:
+      max_megabytes: 32
+      max_days: 7
+      max_backups: 12
+
+service:
+  extensions: [file_storage/offsets, health_check]
+  pipelines:
+    logs:
+      receivers: [filelog/synrex, filelog/network]
+      processors: [memory_limiter, resource/synrex, batch]
+      exporters: [file/synrex_logs]
+    metrics:
+      receivers: [hostmetrics]
+      processors: [memory_limiter, resource/synrex, batch]
+      exporters: [file/synrex_metrics]

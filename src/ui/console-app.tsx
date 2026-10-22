@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNo
 import { createRoot } from "react-dom/client";
 import "./console-app.css";
 
-type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "memory";
+type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
 type Snapshot = {
   generatedAt: string;
   service: { status: string; release: string };
@@ -13,7 +13,23 @@ type Snapshot = {
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string }>;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
   diagnostics: { count: number; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
-    classification: string; status?: number }> };
+    classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
+    traceId?:string; nodeRequestId?:string; callId?:string; taskId?:string; nodeId?:string;
+    stage?:string; durationMs?:number; elapsedMs?:number; status?:number; outcome?:string; tool?:string;
+    rssBytes?:number; heapUsedBytes?:number; cpuUserMicros?:number; cpuSystemMicros?:number; eventLoopLagMs?:number; bootId?:string;
+    eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number; gcDurationMs?:number; gcCount?:number;
+    activeToolCount?:number; tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
+    tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number }> };
+  observability: { collector:"bounded_tail"|"not_collected"; peerSync: {
+    gateway:"current"|"stale"|"unavailable"; at?:string }; runtime: {
+    rssBytes?:number; heapUsedBytes?:number; eventLoopLagMs?:number;
+    eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number;
+    gcDurationMs?:number; gcCount?:number; activeToolCount?:number;
+    cpuUserMicros?:number; cpuSystemMicros?:number; at?:string };
+    network: { tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
+      tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number; at?:string };
+    collectorHealth: { refusedLogs?:number; refusedMetrics?:number; exporterFailed?:number; at?:string };
+    metrics: Array<{ts:string;name:string;value:number;nodeId?:string;processPid?:number;processName?:string}> };
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
@@ -21,6 +37,7 @@ const menus: Array<{ id: View; title: string; symbol: string; caption: string }>
   { id: "tasks", title: "执行索引", symbol: ">_", caption: "持久任务位置" },
   { id: "nodes", title: "主机节点", symbol: "⌘", caption: "版本与契约" },
   { id: "diagnostics", title: "诊断中心", symbol: "⌁", caption: "MCP 时间线" },
+  { id: "resources", title: "资源与网络", symbol: "▥", caption: "进程 / CPU / 网络" },
   { id: "memory", title: "记忆与治理", symbol: "◇", caption: "学习证据" },
 ];
 const statusText: Record<string,string> = {
@@ -154,17 +171,114 @@ function Nodes({d}:{d:Snapshot}) {
 }
 function Diagnostics({d}:{d:Snapshot}) {
   const [query,setQuery]=useState("");
+  const [selected,setSelected]=useState<string|null>(null);
+  const [detail,setDetail]=useState<{events:Snapshot["diagnostics"]["events"];truncated:boolean;archiveCoverage:string}|null>(null);
   const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??""))
     .toLowerCase().includes(query.toLowerCase())),[d,query]);
+  const chosen=selected??matched[0]?.requestId;
+  useEffect(()=>{
+    let cancelled=false;
+    setDetail(null);
+    if(chosen)void getJson<{events:Snapshot["diagnostics"]["events"];truncated:boolean;archiveCoverage:string}>(
+      "/console/api/trace?requestId="+encodeURIComponent(chosen)).then(result=>{
+        if(!cancelled)setDetail(result);
+      }).catch(()=>{if(!cancelled)setDetail(null);});
+    return()=>{cancelled=true;};
+  },[chosen]);
+  const trace=(detail?.events??d.diagnostics.events.filter(e=>chosen && [e.requestId,e.traceId,e.nodeRequestId].includes(chosen)))
+    .slice().reverse();
+  const durations=d.diagnostics.events.filter(e=>e.event==="mcp_finished" && typeof e.durationMs==="number").map(e=>e.durationMs!);
+  const percentile=(p:number)=>durations.length ? [...durations].sort((a,b)=>a-b)[Math.floor((durations.length-1)*p)]!+" ms" : "—";
   return <div className="stack"><div className="notice"><strong>把卡顿定位到正确层级</strong>
     <p>工具执行结束且 HTTP 200，说明 Synrex 已返回；它无法证明 ChatGPT 模型或界面已经继续。</p></div>
-    <Panel title="MCP 请求时间线" hint="最小可用诊断 · 约 2 MB 滚动容量"
+    <div className="metrics"><Metric label="诊断事件" value={d.diagnostics.count} info="当前读取窗口" symbol="⌁"/>
+      <Metric label="HTTP p50" value={percentile(.5)} info="近期请求" symbol="◷"/>
+      <Metric label="HTTP p95" value={percentile(.95)} info="近期请求" symbol="◷"/>
+      <Metric label="HTTP p99" value={percentile(.99)} info="样本量有限" symbol="◷"/></div>
+    <Panel title="MCP 请求时间线" hint="点击请求查看已记录阶段"
       extra={<input className="filter" placeholder="按请求或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>}>
-      {matched.map(r=><div className="list-row" key={r.requestId}><span className="round-symbol">⌁</span>
+      {matched.map(r=><button className={`pick ${chosen===r.requestId?"picked":""}`} key={r.requestId} onClick={()=>setSelected(r.requestId)}><span className="round-symbol">⌁</span>
         <div className="grow"><strong>{r.tool??"MCP 请求"}</strong><small>{r.requestId}</small>
-          {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></div>)}
+          {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></button>)}
       {!matched.length&&<Blank>没有匹配的请求记录</Blank>}
+    </Panel><Panel title="关联事件" hint={detail?.truncated?"记录超过每次查询上限，显示最近 1000 条":"归档检索有窗口限制，缺失阶段保持未知"}>
+      {trace.length?<div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>阶段</th><th>耗时</th><th>状态</th></tr></thead><tbody>
+        {trace.map((e,i)=><tr key={`${e.ts}-${i}`}><td>{time(e.ts)}</td><td>{e.event}</td><td>{e.stage??e.tool??"—"}</td>
+          <td>{e.durationMs===undefined?"未知":`${e.durationMs} ms`}</td><td>{e.outcome??e.status??"—"}</td></tr>)}
+      </tbody></table></div>:<Blank>当前窗口没有关联事件，不能据此认定请求未发生。</Blank>}
     </Panel></div>;
+}
+function Resources({d}:{d:Snapshot}) {
+  const [host,setHost]=useState("swy1");
+  const runtime=d.observability.runtime;
+  const latestNodeNetwork=d.diagnostics.events.find(e=>e.event==="network_sampled"&&(e.nodeId??"swy1")===host);
+  const networkStatus=latestNodeNetwork??(host==="swy1"?d.observability.network:{});
+  const mib=(bytes?:number)=>bytes===undefined?"未知":(bytes/1048576).toFixed(1)+" MiB";
+  const runtimeSamples=d.diagnostics.events.filter(e=>e.event==="runtime_sampled"&&typeof e.rssBytes==="number"&&
+    (e.nodeId??"swy1")===host);
+  const latestBoot=runtimeSamples[0]?.bootId;
+  const samples=runtimeSamples.filter(e=>!latestBoot||e.bootId===latestBoot)
+    .slice().reverse().slice(-50);
+  const max=Math.max(1,...samples.map(e=>e.rssBytes!));
+  const points=samples.map((e,i)=>`${samples.length===1?0:i*600/(samples.length-1)},${110-100*e.rssBytes!/max}`).join(" ");
+  const latest=new Map<string,Snapshot["observability"]["metrics"][number]>();
+  for(const sample of d.observability.metrics){
+    const key=[sample.nodeId,sample.processPid,sample.name].join(":");
+    if(!latest.has(key)||latest.get(key)!.ts<sample.ts)latest.set(key,sample);
+  }
+  const processMetrics=[...latest.values()].filter(e=>e.processPid!==undefined)
+    .sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,30);
+  const network=[...latest.values()].filter(e=>e.name.startsWith("system.network"))
+    .sort((a,b)=>a.name.localeCompare(b.name)).slice(0,18);
+  return <div className="stack">
+    <div className="notice"><strong>采集范围：可控主机与进程</strong><p>
+      Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取（仅尾部窗口）":"尚无本地归档数据"}。
+      gateway 元数据：{d.observability.peerSync.gateway==="current"?"最近同步":d.observability.peerSync.gateway==="stale"?"已过期":"尚无同步"}。
+      网络计数器不能替代单次 MCP 请求 RTT；缺失数据显示“未知”。</p></div>
+    <label>节点 <select className="filter" value={host} onChange={e=>setHost(e.target.value)}>
+      <option value="swy1">swy1</option><option value="gateway">gateway（近一分钟元数据）</option>
+    </select></label>
+    <div className="metrics">
+      <Metric symbol="▥" label="Synrex RSS" value={host==="swy1"?mib(runtime.rssBytes):"未知"} info={host==="swy1"?time(runtime.at):"gateway 未部署新版进程埋点"}/>
+      <Metric symbol="▦" label="JS Heap" value={host==="swy1"?mib(runtime.heapUsedBytes):"未知"} info={host}/>
+      <Metric symbol="◷" label="事件循环采样延迟" value={host==="swy1"&&runtime.eventLoopLagMs!==undefined?runtime.eventLoopLagMs+" ms":"未知"} info="10 秒采样偏移"/>
+      <Metric symbol="⌁" label="正在执行工具" value={host==="swy1"?runtime.activeToolCount??"未知":"未知"} info="采样时刻的活动数量"/>
+    </div>
+    <Panel title="进程内存曲线" hint="真实采集记录 · 同一服务实例 · 采样缺失处不插值">
+      {samples.length>=2?<svg role="img" aria-label="Synrex 内存采样历史曲线"
+        viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:140}}>
+        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2" vectorEffect="non-scaling-stroke"/>
+      </svg>:<Blank>运行版本尚未产生足够的资源采样。</Blank>}
+    </Panel>
+    <div className="metrics">
+      <Metric symbol="◷" label="TCP RTT p95" value={networkStatus.tcpRttP95Ms===undefined?"未知":networkStatus.tcpRttP95Ms+" ms"}
+        info="主机已建立连接样本，非 MCP 请求 RTT"/>
+      <Metric symbol="⌁" label="TCP 已采样连接" value={networkStatus.tcpConnections??"未知"} info={time(latestNodeNetwork?.ts??(host==="swy1"?d.observability.network.at:undefined))}/>
+      <Metric symbol="▥" label="重传连接数" value={networkStatus.tcpRetransSockets??"未知"} info="采样窗口"/>
+      <Metric symbol="◷" label="GC 耗时" value={host==="swy1"&&runtime.gcDurationMs!==undefined?runtime.gcDurationMs+" ms":"未知"} info="最近 10 秒采样区间"/>
+    </div>
+    <Panel title="采集完整性" hint="Collector 计数器 · 计数非零表示存在丢失风险，并非全部丢失量">
+      <div className="metrics">
+        <Metric symbol="⌁" label="拒收日志" value={d.observability.collectorHealth.refusedLogs??"未知"} info="Collector 累计计数"/>
+        <Metric symbol="⌁" label="拒收指标" value={d.observability.collectorHealth.refusedMetrics??"未知"} info="Collector 累计计数"/>
+        <Metric symbol="⌁" label="导出失败" value={d.observability.collectorHealth.exporterFailed??"未知"} info={time(d.observability.collectorHealth.at)}/>
+      </div>
+    </Panel>
+    <div className="columns">
+      <Panel title="活动进程指标" hint="来自 Collector 的 PID 采样；不等于任务存活证明">
+        <div className="table-scroll"><table><thead><tr><th>进程</th><th>PID</th><th>指标</th><th>数值</th></tr></thead>
+          <tbody>{processMetrics.map((e,i)=><tr key={i}><td>{e.processName??"未知"}</td><td>{e.processPid}</td>
+            <td>{e.name}</td><td>{Math.round(e.value).toLocaleString()}</td></tr>)}</tbody></table></div>
+        {!processMetrics.length&&<Blank>尚未收到可识别 PID 的进程指标。</Blank>}
+      </Panel>
+      <Panel title="网络指标" hint="网络吞吐、错误与连接计数 · 不估计单次请求 RTT">
+        <div className="table-scroll"><table><thead><tr><th>指标</th><th>节点</th><th>值</th></tr></thead>
+          <tbody>{network.map((e,i)=><tr key={i}><td>{e.name}</td><td>{e.nodeId??"本机"}</td>
+            <td>{Math.round(e.value).toLocaleString()}</td></tr>)}</tbody></table></div>
+        {!network.length&&<Blank>Collector 网络数据尚不可用。</Blank>}
+      </Panel>
+    </div>
+  </div>;
 }
 function Memory({d}:{d:Snapshot}) {
   return <div className="stack"><div className="metrics">
@@ -195,6 +309,9 @@ function App() {
     finally {setLoading(false);}
   },[]);
   useEffect(()=>{void refresh();},[refresh]);
+  useEffect(()=>{if(!auth) return; const timer=window.setInterval(()=>{
+    if(!document.hidden)void refresh();
+  },10000);return ()=>window.clearInterval(timer);},[auth,refresh]);
   async function logout(){
     try {await getJson("/console/api/logout",{method:"POST",headers:{"content-type":"application/json"}});}
     finally {setAuth(false);setData(null);}
@@ -222,6 +339,7 @@ function App() {
       {view==="tasks"&&<Tasks d={data}/>}
       {view==="nodes"&&<Nodes d={data}/>}
       {view==="diagnostics"&&<Diagnostics d={data}/>}
+      {view==="resources"&&<Resources d={data}/>}
       {view==="memory"&&<Memory d={data}/>}</>:<Blank>暂无系统数据</Blank>}
     <footer className="content-footer">Synrex Console · {data?.service.release??"离线"} <span>READ ONLY · GPT IS THE ORCHESTRATOR</span></footer>
   </div></main></div>;

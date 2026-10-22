@@ -5,6 +5,8 @@ import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
 import type { ServerConfig } from "./config.js";
 import { readConsoleSnapshot } from "./console-snapshot.js";
+import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { readOtelFileTail } from "./otel-file-reader.js";
 
 const COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -147,6 +149,26 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       res.json(readConsoleSnapshot(config.stateDir, actualRelease()));
     } catch {
       res.status(503).json({ error: "Status data temporarily unavailable" });
+    }
+  });
+  app.get("/console/api/trace", auth, (req, res) => {
+    const requestId = req.query.requestId;
+    if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{1,110}$/.test(requestId)) {
+      res.status(400).json({ error: "Invalid request ID" });
+      return;
+    }
+    try {
+      const recent = new DiagnosticTrace(config.stateDir).read({ minutes: 24 * 60, limit: 20_000, requestId });
+      const archived = readOtelFileTail(config.stateDir).logs.filter(e =>
+        e.requestId === requestId || e.traceId === requestId || e.nodeRequestId === requestId);
+      const found = new Map([...archived, ...recent].map(e => [
+        [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId].join("|"), e,
+      ]));
+      const all = [...found.values()].sort((a, b) => a.ts.localeCompare(b.ts));
+      res.json({ requestId, events: all.slice(-1000), truncated: all.length > 1000,
+        archiveCoverage: "bounded_tail", hostInternalStages: "not_observed" });
+    } catch {
+      res.status(503).json({ error: "Trace temporarily unavailable" });
     }
   });
 }

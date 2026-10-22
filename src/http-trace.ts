@@ -4,6 +4,7 @@ import type { ServerConfig } from "./config.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { currentRequestLogContext, logEvent, oauthPhaseForPath, requestPath, runWithRequestLogContext } from "./logger.js";
 import { traceEvent } from "./trace-stages.js";
+import { newOtelContext } from "./otel-context.js";
 
 /** Mount BEFORE the SDK JSON parser and host checks, so body upload/parse and
  * rejected requests are included. HTTP finish means local flush, not host receipt. */
@@ -11,12 +12,13 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
   requestFields: (req: Request, config: ServerConfig) => Record<string, unknown>): RequestHandler {
   return (req, res, next) => {
     const requestId = randomUUID();
+    const otel = newOtelContext(req.header("traceparent"));
     const started = performance.now();
     const path = requestPath(req);
     const oauthPhase = oauthPhaseForPath(path);
     const isMcp = path === "/mcp";
     let stage = "body";
-    const context = { requestId, traceId: requestId, path, oauthPhase, startedAt: started,
+    const context = { requestId, traceId: requestId, ...otel, path, oauthPhase, startedAt: started,
       emitDiagnostic: (event: import("./diagnostic-trace.js").DiagnosticEvent, fields: Record<string, unknown>) => {
         if (typeof fields.stage === "string") stage = fields.stage;
         diagnostics.record(event, fields);
@@ -24,8 +26,24 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     };
     res.locals.requestId = requestId;
     res.setHeader("x-synrex-request-id", requestId);
-    const base = { requestId, traceId: requestId, method: req.method };
+    const base = { requestId, traceId: requestId, ...otel, method: req.method };
     const elapsed = () => Math.round(performance.now() - started);
+    let responseBodyBytes = 0;
+    const countChunk = (chunk: unknown, encoding?: unknown) => {
+      if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) responseBodyBytes += chunk.byteLength;
+      else if (typeof chunk === "string") responseBodyBytes += Buffer.byteLength(chunk,
+        typeof encoding === "string" ? encoding as BufferEncoding : "utf8");
+    };
+    const originalWrite = res.write;
+    res.write = function(this: typeof res, ...args: any[]) {
+      countChunk(args[0], args[1]);
+      return (originalWrite as (...args: any[]) => boolean).apply(this, args);
+    } as typeof res.write;
+    const originalEnd = res.end;
+    res.end = function(this: typeof res, ...args: any[]) {
+      countChunk(args[0], args[1]);
+      return (originalEnd as (...args: any[]) => typeof res).apply(this, args);
+    } as typeof res.end;
     if (isMcp) diagnostics.record("mcp_received", {
       ...base, inputBytes: Number(req.header("content-length")), edgeRay: req.header("cf-ray"),
     });
@@ -51,7 +69,7 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
       if (timer) clearInterval(timer);
       if (isMcp) diagnostics.record("mcp_finished", {
         ...base, stage, responseMode: mode(), durationMs: elapsed(), status: res.statusCode,
-        outputBytes: res.hasHeader("content-length") ? Number(res.getHeader("content-length")) : undefined,
+        outputBytes: responseBodyBytes,
       });
       if (!config.logging.requests || (!config.logging.assets && path.startsWith("/mcp-app-assets"))) return;
       logEvent(config.logging, "info", "http_request", { ...base, path, status: res.statusCode, durationMs: elapsed(), ...requestFields(req, config) });

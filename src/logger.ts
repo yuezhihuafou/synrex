@@ -23,6 +23,9 @@ export interface RequestLogContext {
   path: string;
   oauthPhase?: OAuthHttpPhase;
   traceId?: string;
+  otelTraceId?: string;
+  otelSpanId?: string;
+  otelParentSpanId?: string;
   startedAt?: number;
   callId?: string;
   nodeRequestId?: string;

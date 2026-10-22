@@ -1,5 +1,7 @@
 import { currentRequestLogContext } from "./logger.js";
 import type { DiagnosticEvent } from "./diagnostic-trace.js";
+import { childOtelContext } from "./otel-context.js";
+import { runWithRequestLogContext } from "./logger.js";
 
 export function errorCategory(error: unknown): string {
   const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
@@ -19,20 +21,28 @@ export function traceEvent(event: DiagnosticEvent, fields: Record<string, unknow
   try {
     context?.emitDiagnostic?.(event, {
       requestId: context.requestId, traceId: context.traceId ?? context.requestId,
-      callId: context.callId, nodeRequestId: context.nodeRequestId, ...fields,
+      callId: context.callId, nodeRequestId: context.nodeRequestId,
+      otelTraceId: context.otelTraceId, otelSpanId: context.otelSpanId,
+      otelParentSpanId: context.otelParentSpanId, ...fields,
     });
   } catch { /* Observational only. */ }
 }
 
 export async function traceStage<T>(stage: string, operation: () => T | Promise<T>, fields: Record<string, unknown> = {}): Promise<T> {
-  const started = performance.now();
-  traceEvent("stage_started", { ...fields, stage });
-  try {
-    const result = await operation();
-    traceEvent("stage_finished", { ...fields, stage, outcome: "ok", durationMs: Math.round(performance.now() - started) });
-    return result;
-  } catch (error) {
-    traceEvent("stage_finished", { ...fields, stage, outcome: "error", errorCategory: errorCategory(error), durationMs: Math.round(performance.now() - started) });
-    throw error;
-  }
+  const parent = currentRequestLogContext();
+  const child = parent?.otelTraceId && parent.otelSpanId
+    ? childOtelContext({ otelTraceId: parent.otelTraceId, otelSpanId: parent.otelSpanId }) : undefined;
+  const execute = async () => {
+    const started = performance.now();
+    traceEvent("stage_started", { ...fields, stage });
+    try {
+      const result = await operation();
+      traceEvent("stage_finished", { ...fields, stage, outcome: "ok", durationMs: Math.round(performance.now() - started) });
+      return result;
+    } catch (error) {
+      traceEvent("stage_finished", { ...fields, stage, outcome: "error", errorCategory: errorCategory(error), durationMs: Math.round(performance.now() - started) });
+      throw error;
+    }
+  };
+  return parent && child ? runWithRequestLogContext({ ...parent, ...child }, execute) : execute();
 }

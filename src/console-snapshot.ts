@@ -2,6 +2,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
+import { readOtelFileTail, type HostMetricSample } from "./otel-file-reader.js";
+import { readPeerSnapshot } from "./peer-observability.js";
 import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
 
@@ -36,6 +38,26 @@ export interface ConsoleSnapshot {
     count: number;
     requests: ReturnType<typeof summarizeDiagnosticTrace>["requests"];
     events: ReturnType<DiagnosticTrace["read"]>;
+  };
+  observability: {
+    collector: "bounded_tail" | "not_collected";
+    peerSync: { gateway: "current" | "stale" | "unavailable"; at?: string };
+    metrics: HostMetricSample[];
+    runtime: {
+      rssBytes?: number; heapUsedBytes?: number; eventLoopLagMs?: number;
+      cpuUserMicros?: number; cpuSystemMicros?: number;
+      eventLoopP95Ms?: number; eventLoopUtilizationPermille?: number;
+      gcDurationMs?: number; gcCount?: number; activeToolCount?: number;
+      at?: string;
+    };
+    network: {
+      tcpConnections?: number; tcpRttP50Ms?: number; tcpRttP95Ms?: number;
+      tcpRetransSockets?: number; tcpRetransSegmentsTotal?: number;
+      at?: string;
+    };
+    collectorHealth: {
+      refusedLogs?: number; refusedMetrics?: number; exporterFailed?: number; at?: string;
+    };
   };
 }
 
@@ -118,12 +140,47 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         };
       }),
   );
-  const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 120 });
+  const archive = readOtelFileTail(stateDir);
+  const peer = readPeerSnapshot(stateDir);
+  const recent = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 2000 });
+  const combined = [...peer.events, ...archive.logs, ...recent].sort((a,b) => a.ts.localeCompare(b.ts));
+  const unique = new Map(combined.map((e) => [
+    [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId,e.taskId].join("|"), e,
+  ]));
+  const events = [...unique.values()].slice(-2000);
   const requests = summarizeDiagnosticTrace(events).requests.slice(-40).reverse();
+  const runtime = [...events].reverse().find(e => e.event === "runtime_sampled");
+  const network = [...events].reverse().find(e => e.event === "network_sampled");
+  const collector = [...events].reverse().find(e => e.event === "collector_sampled");
   return {
     generatedAt: new Date().toISOString(),
-    service: { status: "online", release, diagnosticsBoundBytes: 2 * 1024 * 1024 },
+    service: { status: "online", release, diagnosticsBoundBytes: 2 * 8 * 1024 * 1024 },
     nodes, workflows, tasks, memory,
-    diagnostics: { count: events.length, requests, events: events.slice(-40).reverse() },
+    diagnostics: { count: events.length, requests, events: events.slice(-200).reverse() },
+    observability: {
+      collector: archive.coverage,
+      peerSync: { gateway: peer.coverage, at: peer.updatedAt },
+      metrics: archive.metrics.slice(-120),
+      runtime: {
+        rssBytes: runtime?.rssBytes, heapUsedBytes: runtime?.heapUsedBytes,
+        eventLoopLagMs: runtime?.eventLoopLagMs,
+        cpuUserMicros: runtime?.cpuUserMicros, cpuSystemMicros: runtime?.cpuSystemMicros, at: runtime?.ts,
+        eventLoopP95Ms: runtime?.eventLoopP95Ms,
+        eventLoopUtilizationPermille: runtime?.eventLoopUtilizationPermille,
+        gcDurationMs: runtime?.gcDurationMs, gcCount: runtime?.gcCount,
+        activeToolCount: runtime?.activeToolCount,
+      },
+      network: {
+        tcpConnections: network?.tcpConnections, tcpRttP50Ms: network?.tcpRttP50Ms,
+        tcpRttP95Ms: network?.tcpRttP95Ms, tcpRetransSockets: network?.tcpRetransSockets,
+        tcpRetransSegmentsTotal: network?.tcpRetransSegmentsTotal, at: network?.ts,
+      },
+      collectorHealth: {
+        refusedLogs: collector?.collectorRefusedLogRecords,
+        refusedMetrics: collector?.collectorRefusedMetricPoints,
+        exporterFailed: collector?.collectorExporterFailed,
+        at: collector?.ts,
+      },
+    },
   };
 }
