@@ -1,0 +1,19 @@
+[Unit]
+Description=Synrex independent monitoring console
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@RELEASE@
+ExecStart=@NODE@ @RELEASE@/dist-console-server/console-monitor.js --state-dir @STATE_DIR@ --run-root @RUN_ROOT@ --monitor-dir @MONITOR_DIR@ --auth-file @AUTH_FILE@ --port @PORT@ --host @HOST@ @ORIGINS@ @WRITE_ROOTS@ --release @VERSION@
+Restart=on-failure
+RestartSec=10
+Nice=10
+CPUQuota=10%
+MemoryMax=256M
+TasksMax=32
+UMask=0077
+TimeoutStopSec=8
+
+[Install]
+WantedBy=default.target
