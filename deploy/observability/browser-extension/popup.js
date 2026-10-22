@@ -1,11 +1,16 @@
 async function allEvents(){
   const stored=await chrome.storage.local.get(null);
-  const events=[...(Array.isArray(stored.events)?stored.events:[])];
+  const events=[...(Array.isArray(stored.events)?stored.events:[]),
+    ...(Array.isArray(stored["synrex.incidents"])?stored["synrex.incidents"]:[])];
   for(const [key,value] of Object.entries(stored)){
     if(key.startsWith("synrex.events.") && Array.isArray(value))events.push(...value);
   }
-  return events.filter(e=>Number.isFinite(e.ts)&&Date.now()-e.ts<7*86400000)
-    .sort((a,b)=>a.ts-b.ts).slice(-5000);
+  const unique=new Map(events.filter(e=>Number.isFinite(e.ts)&&Date.now()-e.ts<7*86400000)
+    .map(e=>[[e.kind,e.reason,e.ts,e.tabId,e.flowId].join(":"),e]));
+  const values=[...unique.values()].sort((a,b)=>a.ts-b.ts);
+  const protectedIncidents=values.filter(e=>e.reason==="transport_timeout"||e.reason==="network_error");
+  const normal=values.filter(e=>e.reason!=="transport_timeout"&&e.reason!=="network_error");
+  return [...normal.slice(-4000),...protectedIncidents.slice(-1000)].sort((a,b)=>a.ts-b.ts);
 }
 async function update(){
   const events=await allEvents();
@@ -22,7 +27,7 @@ document.getElementById("export").onclick=async()=>{
 };
 document.getElementById("clear").onclick=async()=>{
   const stored=await chrome.storage.local.get(null);
-  await chrome.storage.local.remove(["events",...Object.keys(stored).filter(k=>k.startsWith("synrex.events."))]);
+  await chrome.storage.local.remove(["events","synrex.incidents",...Object.keys(stored).filter(k=>k.startsWith("synrex.events."))]);
   await update();
 };
 document.getElementById("test").onclick=async()=>{

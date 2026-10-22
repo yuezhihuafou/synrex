@@ -27,13 +27,20 @@ const nowIso = n => new Date(n).toISOString();
 function append(event) {
   eventWrites = eventWrites.then(async () => {
     const ts = Date.now();
+    const saved={...event,ts};
     const key=bucketPrefix+Math.floor(ts/bucketMs);
     const bucket=await chrome.storage.local.get(key);
     const current=Array.isArray(bucket[key])?bucket[key]:[];
-    current.push({ ...event, ts });
+    current.push(saved);
     // Write only a five-minute shard, not the entire seven-day history on
     // every request lifecycle event.
     await chrome.storage.local.set({[key]:current});
+    if ((event.kind==="ui" && ["transport_timeout","network_error"].includes(event.reason))
+      || event.reason==="network_error") {
+      const data=await chrome.storage.local.get("synrex.incidents");
+      const old=Array.isArray(data["synrex.incidents"])?data["synrex.incidents"]:[];
+      await chrome.storage.local.set({"synrex.incidents":[...old.filter(e=>ts-e.ts<7*dayMs),saved].slice(-1000)});
+    }
     if(++sincePrune>=500){sincePrune=0;await pruneStorage();}
   }).catch(() => {});
 }
@@ -110,7 +117,15 @@ function finish(d,reason) {
     event(record,record.endpointGroup==="websocket_handshake"&&reason==="completed"
       ?"handshake_completed":reason,d.timeStamp,{
       ...(Number.isInteger(d.statusCode)?{status:d.statusCode}:{}),
-      ...(reason==="network_error"?{errorCategory:
+      ...(reason==="network_error"?{
+        ...( /^net::ERR_[A-Z0-9_]{2,60}$/.test(d.error??"")?{netError:d.error}:{} ),
+        errorCategory:
+        /proxy|tunnel|socks/i.test(d.error??"")?"proxy":
+        /dns|name_not_resolved/i.test(d.error??"")?"dns":
+        /ssl|cert|tls/i.test(d.error??"")?"tls":
+        /http2|quic|protocol/i.test(d.error??"")?"protocol":
+        /blocked/i.test(d.error??"")?"blocked":
+        /network_changed|internet_disconnected/i.test(d.error??"")?"network_changed":
         /timeout|timed.out/i.test(d.error??"")?"timeout":
         /abort|cancel/i.test(d.error??"")?"aborted":
         /disconnect|connection|reset|closed/i.test(d.error??"")?"connection_lost":"network_error"}:{})

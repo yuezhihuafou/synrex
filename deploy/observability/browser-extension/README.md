@@ -49,3 +49,8 @@ completed ChatGPT message.
 Network metadata is kept in five-minute local shards, up to 5000 recent
 events or seven days (whichever is shorter). High-volume sessions may rotate
 well before seven calendar days. Export important incidents promptly.
+Visible UI timeouts and network failures are additionally retained in a
+separate bounded local incident buffer (1000 records for up to seven days).
+Known Chrome `net::ERR_*` error codes are retained as allowlisted metadata
+so a proxy tunnel, DNS, TLS, protocol, or network reset can be distinguished
+without reading response bodies or URLs.

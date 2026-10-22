@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Synrex Transport Metadata Observer",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Opt-in, bounded metadata-only ChatGPT connection timeline. Does not read prompts, replies, headers or payloads.",
   "permissions": ["webRequest", "storage", "tabs", "alarms"],
   "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],

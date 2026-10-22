@@ -8,7 +8,7 @@ type ObservedSpan = {ts:string;traceId:string;spanId:string;parentSpanId?:string
   name:string;durationMs:number;status:string;requestId?:string};
 type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"health";
   reason:string;tabId?:number;flowId?:string;endpointGroup?:string;requestType?:string;
-  durationMs?:number;status?:number;errorCategory?:string;startedAt?:string;
+  durationMs?:number;status?:number;errorCategory?:string;netError?:string;startedAt?:string;
   host?:string;conversationTitle?:string};
 type Snapshot = {
   generatedAt: string;
@@ -261,6 +261,7 @@ function Diagnostics({d}:{d:Snapshot}) {
             ?{endpointGroup:e.endpointGroup}:{}),
           ...(typeof e.requestType==="string"?{requestType:e.requestType}:{}),
           ...(typeof e.errorCategory==="string"?{errorCategory:e.errorCategory}:{}),
+          ...(typeof e.netError==="string"&&/^net::ERR_[A-Z0-9_]{2,60}$/.test(e.netError)?{netError:e.netError}:{}),
           ...(e.kind==="conversation_title" && typeof e.conversationTitle==="string" &&
             e.conversationTitle.length<=120?{conversationTitle:e.conversationTitle}:{}),
           ...(typeof e.durationMs==="number"?{durationMs:e.durationMs}:{}),
@@ -357,7 +358,7 @@ function Diagnostics({d}:{d:Snapshot}) {
         <tbody>{(relatedBrowser.length?relatedBrowser:browserEvents.slice(-100)).slice(-60).map((e,i)=><tr key={i}>
           <td>{time(new Date(e.ts).toISOString())}</td><td>{e.endpointGroup??e.kind}</td>
           <td>{e.reason}{e.status!==undefined?" / HTTP "+e.status:""}
-            {e.errorCategory?" / "+e.errorCategory:""}</td>
+            {e.errorCategory?" / "+e.errorCategory:""}{e.netError?" / "+e.netError:""}</td>
           <td title={e.flowId??""}>{e.flowId?.slice(0,8)??"—"}</td>
           <td>{e.durationMs===undefined?"未知":e.durationMs+" ms"}</td></tr>)}</tbody></table></div>
       {browserEvents.length>0&&!relatedBrowser.length&&<Blank>已导入 {browserEvents.length} 条；当前请求时间窗口无匹配。</Blank>}

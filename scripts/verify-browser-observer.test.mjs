@@ -65,6 +65,8 @@ test("service worker restart during a stream does not discard request linkage",a
   await h.flush();
   assert.ok(h.collected().some(e=>e.reason==="network_error" &&
     e.errorCategory==="connection_lost"&&e.durationMs===1200));
+  assert.equal(h.collected().at(-1)?.netError,"net::ERR_CONNECTION_RESET");
+  assert.equal(h.local["synrex.incidents"]?.length,1);
   assert.equal(Object.keys(h.session.inflight).length,0);
 });
 test("uncompleted streams keep a durable start rather than fabricating failure",async()=>{
@@ -104,4 +106,16 @@ test("storage pruning keeps at most 5000 recent metadata events",async()=>{
   await new Promise(resolve=>setTimeout(resolve,110));
   assert.equal(h.collected().length,5000);
   assert.equal(h.local["synrex.events."+(bucket-5000)],undefined);
+});
+test("browser proxy failures have diagnostic error codes without raw URLs",async()=>{
+  const h=harness(),now=Date.now();
+  h.handlers.onBeforeRequest(request("proxy",now));
+  h.handlers.onErrorOccurred(request("proxy",now+22,{
+    error:"net::ERR_TUNNEL_CONNECTION_FAILED",statusCode:undefined,
+  }));
+  await h.flush();
+  const row=h.local["synrex.incidents"]?.[0];
+  assert.equal(row?.errorCategory,"proxy");
+  assert.equal(row?.netError,"net::ERR_TUNNEL_CONNECTION_FAILED");
+  assert.ok(!JSON.stringify(row).includes("secret-token"));
 });
