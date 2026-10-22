@@ -24,6 +24,26 @@ Each model-host tool connection opened an isolated worktree under its own author
 
 The call times above are `Date.now()` **around host-to-MCP tool invocation**, not server handler latency; they include variable network, host execution and orchestration. This is *not* a repeated randomized statistical benchmark.
 
+### Same-input real code regression: red → green on all three
+
+Additional common task in all three isolated worktrees: introduce
+`threeway-total.mjs` and `threeway-total.test.mjs`, whose expected behavior
+applies an item discount and floors totals at zero. Initial implementation
+omitted discounts. Actual `node --test threeway-total.test.mjs` returned a
+failed assertion **20 != 16** on all three MCP execution paths. Then the
+same one-line `apply_patch` corrected each implementation. The identical
+test reran green: **1 pass, 0 fail, exit 0** on every version. Both final
+files had exactly matching SHA-256 in all three isolated worktrees:
+
+- code `118ef3a4dcf6608485c3458597a0b4c9ea9e64b612c3ec5650342f3e37943dfd`
+- test `afd522c18a30f6075bcc416cad640976db12207f9d121d2f1167cfa68e77a6c8`
+
+Intermediate completed test run `run_20261022073544_2d6b93bd`; current
+completed run `run_20261022073547_9d97fe42`. This proves live three-way
+edit/test **functional parity on a bounded real bugfix**, not independent
+blind GPT reasoning quality: one conversational model authored the same
+fix for the three execution layers, and the problem was intentionally small.
+
 ## 2. Controlled small-command transport pilot
 
 Six serial `/bin/true` real MCP calls per connection, alternating forward/reverse arm order, 18/18 exit 0. Direct host invocation timings (milliseconds):
