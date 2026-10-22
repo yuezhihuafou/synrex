@@ -91,6 +91,7 @@ function sampleCollector() {
   request.on("timeout", () => request.destroy());
 }
 function classify(message) {
+  if (message.includes("Unauthorized: Tunnel not found")) return "tunnel_auth_failed";
   if (message.includes("Registered tunnel connection")) return "tunnel_registered";
   if (message.includes("Retrying connection")) return "tunnel_retry";
   if (message.includes("Connection terminated") || message.includes("Serve tunnel error")) return "tunnel_disconnected";
@@ -101,7 +102,10 @@ function classify(message) {
 }
 function sampleJournal() {
   const previous = existsSync(cursorFile) ? readFileSync(cursorFile, "utf8").trim() : "";
-  const args = ["--user", "-u", "devspace.service", "-u", "cloudflared-devspace.service",
+  const units = ["devspace.service", "cloudflared-devspace.service",
+    "devspace-upstream-v108-tunnel.service", "synrex-network-ab-tunnel-v2-20261022.service",
+    "devspace-qwen-tunnel.service", "synrex-benchmark-old-dev-tunnel-http2-20261022.service"];
+  const args = ["--user", ...units.flatMap(unit => ["-u", unit]),
     "--no-pager", "-o", "json", ...(previous ? ["--after-cursor", previous] : ["--since", "60 seconds ago"])];
   const text = run("journalctl", args);
   let cursor = previous;
@@ -110,7 +114,10 @@ function sampleJournal() {
       const row = JSON.parse(line);
       if (typeof row.__CURSOR === "string" && row.__CURSOR.length < 2048) cursor = row.__CURSOR;
       const kind = typeof row.MESSAGE === "string" ? classify(row.MESSAGE) : undefined;
-      if (kind) record(kind);
+      if (kind) {
+        const unit = row._SYSTEMD_USER_UNIT;
+        record(kind, { tunnelUnit: typeof unit === "string" && units.includes(unit) ? unit : "unknown" });
+      }
     } catch { /* Ignore unmatched/partial messages. */ }
   }
   if (cursor !== previous) {

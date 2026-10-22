@@ -32,7 +32,8 @@ See `deploy/observability/README.md` for the configuration, pinned
 - gateway: `~/.local/share/devspace/observability`
 
 Each node runs `synrex-otelcol.service` and
-`synrex-network-observer.service`, independent of `devspace.service`.
+`synrex-network-observer.service` plus `synrex-archive-index.service`,
+independent of `devspace.service`.
 swy1 also runs `synrex-peer-snapshot.timer` as a non-authoritative mirror.
 Check with:
 
@@ -47,8 +48,35 @@ Each per-node `logs.otlp.json` and `metrics.otlp.json` is capped by 32 MiB
 rotations with twelve backups. Retention is **up to** seven days, not a
 guarantee of seven days. Diagnostic source JSONL itself has two 8 MiB files;
 the Collector is responsible for accumulating available history. The
-Web Console currently indexes only recent JSONL plus bounded OTLP tails,
-so older logs remain on disk but may require direct file inspection.
+The independent `archive-indexer.mjs` consumes log/trace files using
+persisted inode-and-byte offsets, keeps deduplicated allowlisted request events
+and native spans for seven days in `observability/history.sqlite`, and stores
+one metric sample per minute/dimension. Index retention does not depend on
+the raw Collector file rotation. The Console's authenticated indexed query
+supports recent/old owner events and an on-demand bounded SSH query to
+gateway. Source files remain bounded; the seven-day index is distinct.
+Monitor disk space, indexing lag and Collector dropped records. If the indexer
+stays down beyond the raw archive rotation, reconstruction is impossible.
+
+For browser client timing, download the opt-in Chrome extension from the
+authenticated Console. Unzip, enable Developer mode in
+`chrome://extensions`, choose **Load unpacked** and select that directory.
+Export its local metadata-only JSON from the toolbar popup and import it in
+the Console. It never collects prompts/replies, cannot see OpenAI internals,
+and does not guarantee an exact tool ID correlation. Browser installation is
+not remotely forced.
+
+The producer emits standards-shaped OTLP spans over loopback HTTP
+`127.0.0.1:14318/v1/traces`, buffered and bounded. A rejected exporter
+increments `otelSpanDropped`; the JSONL phase events remain a separate
+fallback. The arbitrary local port 4318 was already in use on swy1 and is
+intentionally not overridden.
+
+For actual independent service overhead experiments, run
+`node scripts/benchmark-observability.mjs OLD_RELEASE NEW_RELEASE`.
+The script compares matched loopback HTTP middleware, not model/host latency
+or full MCP task completion. Collect real-node CPU/RSS, exporter drops,
+application p50/p95/p99 and full-task outcomes separately.
 
 The Collector emits process PID/name and metrics, **not command line**, owner,
 executable path or process arguments. It does not collect MCP input content,

@@ -48,6 +48,7 @@ export interface ConsoleSnapshot {
       cpuUserMicros?: number; cpuSystemMicros?: number;
       eventLoopP95Ms?: number; eventLoopUtilizationPermille?: number;
       gcDurationMs?: number; gcCount?: number; activeToolCount?: number;
+      otelSpanPending?: number; otelSpanDropped?: number;
       at?: string;
     };
     network: {
@@ -169,6 +170,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         eventLoopUtilizationPermille: runtime?.eventLoopUtilizationPermille,
         gcDurationMs: runtime?.gcDurationMs, gcCount: runtime?.gcCount,
         activeToolCount: runtime?.activeToolCount,
+        otelSpanPending: runtime?.otelSpanPending, otelSpanDropped: runtime?.otelSpanDropped,
       },
       network: {
         tcpConnections: network?.tcpConnections, tcpRttP50Ms: network?.tcpRttP50Ms,

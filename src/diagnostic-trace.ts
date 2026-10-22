@@ -28,7 +28,7 @@ export type DiagnosticEvent =
   | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent"
   | "request_stalled" | "runtime_started" | "runtime_stopping"
   | "runtime_sampled"
-  | "network_sampled" | "tunnel_registered" | "tunnel_disconnected" | "tunnel_retry"
+  | "network_sampled" | "tunnel_registered" | "tunnel_disconnected" | "tunnel_retry" | "tunnel_auth_failed"
   | "collector_sampled"
   | "origin_unavailable" | "service_started" | "service_stopped"
   | "node_queued" | "node_delivered" | "node_completed" | "node_peer_received" | "node_peer_started" | "node_peer_finished" | "node_peer_acknowledged" | "node_transport"
@@ -67,6 +67,8 @@ export interface DiagnosticEntry {
   gcDurationMs?: number;
   gcCount?: number;
   activeToolCount?: number;
+  otelSpanPending?: number;
+  otelSpanDropped?: number;
   tcpConnections?: number;
   tcpRttP50Ms?: number;
   tcpRttP95Ms?: number;
@@ -75,6 +77,7 @@ export interface DiagnosticEntry {
   collectorRefusedLogRecords?: number;
   collectorRefusedMetricPoints?: number;
   collectorExporterFailed?: number;
+  tunnelUnit?: string;
   stage?: string;
   rpcMethod?: string;
   rpcIdHash?: string;
@@ -112,7 +115,7 @@ const EVENT_NAMES: readonly string[] = [
   "stage_started", "stage_finished", "mcp_body_ready", "mcp_headers_sent",
   "request_stalled", "runtime_started", "runtime_stopping",
   "runtime_sampled",
-  "network_sampled", "tunnel_registered", "tunnel_disconnected", "tunnel_retry",
+  "network_sampled", "tunnel_registered", "tunnel_disconnected", "tunnel_retry", "tunnel_auth_failed",
   "collector_sampled",
   "origin_unavailable", "service_started", "service_stopped",
   "node_queued", "node_delivered", "node_completed", "node_peer_received", "node_peer_started", "node_peer_finished", "node_peer_acknowledged", "node_transport",
@@ -149,6 +152,7 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     errorCategory: /^(not_found|permission|timeout|invalid_input|indeterminate|transport|internal|tool_error|command_exit|cancelled|auth|protocol)$/,
     errorCode: /^(ENOENT|EACCES|EPERM|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ABORT_ERR|EPIPE|ERR_STREAM_PREMATURE_CLOSE)$/,
     signal: /^SIG(?:TERM|KILL|INT|ABRT|SEGV|HUP|PIPE)$/,
+    tunnelUnit: /^(?:devspace|cloudflared|synrex)[a-zA-Z0-9_.-]{0,100}\.service$|^unknown$/,
   };
   for (const [key, pattern] of Object.entries(patterns)) {
     const value = boundedString(fields[key], pattern!);
@@ -156,7 +160,8 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   }
   for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs",
     "rssBytes", "heapUsedBytes", "cpuUserMicros", "cpuSystemMicros", "eventLoopLagMs",
-    "eventLoopP95Ms", "eventLoopUtilizationPermille", "gcDurationMs", "gcCount", "activeToolCount"] as const) {
+    "eventLoopP95Ms", "eventLoopUtilizationPermille", "gcDurationMs", "gcCount", "activeToolCount",
+    "otelSpanPending", "otelSpanDropped"] as const) {
     const value = boundedNumber(fields[key], Number.MAX_SAFE_INTEGER);
     if (value !== undefined) item[key] = value;
   }

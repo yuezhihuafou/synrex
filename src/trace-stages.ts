@@ -2,6 +2,7 @@ import { currentRequestLogContext } from "./logger.js";
 import type { DiagnosticEvent } from "./diagnostic-trace.js";
 import { childOtelContext } from "./otel-context.js";
 import { runWithRequestLogContext } from "./logger.js";
+import { emitNativeSpan } from "./native-otel.js";
 
 export function errorCategory(error: unknown): string {
   const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
@@ -34,13 +35,20 @@ export async function traceStage<T>(stage: string, operation: () => T | Promise<
     ? childOtelContext({ otelTraceId: parent.otelTraceId, otelSpanId: parent.otelSpanId }) : undefined;
   const execute = async () => {
     const started = performance.now();
+    const wallStart = Date.now();
     traceEvent("stage_started", { ...fields, stage });
     try {
       const result = await operation();
       traceEvent("stage_finished", { ...fields, stage, outcome: "ok", durationMs: Math.round(performance.now() - started) });
+      if (child) emitNativeSpan({ name: stage, context: child,
+        startMs: wallStart, endMs: Date.now(), status: "ok",
+        fields: { "synrex.request_id": parent?.requestId, "synrex.stage": stage } });
       return result;
     } catch (error) {
       traceEvent("stage_finished", { ...fields, stage, outcome: "error", errorCategory: errorCategory(error), durationMs: Math.round(performance.now() - started) });
+      if (child) emitNativeSpan({ name: stage, context: child,
+        startMs: wallStart, endMs: Date.now(), status: "error",
+        fields: { "synrex.request_id": parent?.requestId, "synrex.stage": stage } });
       throw error;
     }
   };

@@ -3,6 +3,10 @@ import { createRoot } from "react-dom/client";
 import "./console-app.css";
 
 type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
+type ObservedSpan = {ts:string;traceId:string;spanId:string;parentSpanId?:string;
+  name:string;durationMs:number;status:string;requestId?:string};
+type BrowserEvent = {ts:number;kind:"network"|"ui";reason:string;tabId?:number;
+  requestType?:string;durationMs?:number;status?:number;startedAt?:string;host?:string};
 type Snapshot = {
   generatedAt: string;
   service: { status: string; release: string };
@@ -19,12 +23,13 @@ type Snapshot = {
     rssBytes?:number; heapUsedBytes?:number; cpuUserMicros?:number; cpuSystemMicros?:number; eventLoopLagMs?:number; bootId?:string;
     eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number; gcDurationMs?:number; gcCount?:number;
     activeToolCount?:number; tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
-    tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number }> };
+    tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number; tunnelUnit?:string }> };
   observability: { collector:"bounded_tail"|"not_collected"; peerSync: {
     gateway:"current"|"stale"|"unavailable"; at?:string }; runtime: {
     rssBytes?:number; heapUsedBytes?:number; eventLoopLagMs?:number;
     eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number;
     gcDurationMs?:number; gcCount?:number; activeToolCount?:number;
+    otelSpanPending?:number; otelSpanDropped?:number;
     cpuUserMicros?:number; cpuSystemMicros?:number; at?:string };
     network: { tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
       tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number; at?:string };
@@ -172,14 +177,23 @@ function Nodes({d}:{d:Snapshot}) {
 function Diagnostics({d}:{d:Snapshot}) {
   const [query,setQuery]=useState("");
   const [selected,setSelected]=useState<string|null>(null);
-  const [detail,setDetail]=useState<{events:Snapshot["diagnostics"]["events"];truncated:boolean;archiveCoverage:string}|null>(null);
+  const [detail,setDetail]=useState<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];
+    truncated:boolean;archiveCoverage:string;remoteState?:string}|null>(null);
+  const [history,setHistory]=useState<Snapshot["diagnostics"]["events"]>([]);
+  const [filter,setFilter]=useState("");
+  const [historyStart,setHistoryStart]=useState("");
+  const [historyEnd,setHistoryEnd]=useState("");
+  const [historyStats,setHistoryStats]=useState<{events:number;spans:number;metrics:number;first?:string;last?:string}|null>(null);
+  const [historyPeer,setHistoryPeer]=useState("unknown");
+  const [browserEvents,setBrowserEvents]=useState<BrowserEvent[]>([]);
+  const [browserError,setBrowserError]=useState("");
   const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??""))
     .toLowerCase().includes(query.toLowerCase())),[d,query]);
   const chosen=selected??matched[0]?.requestId;
   useEffect(()=>{
     let cancelled=false;
     setDetail(null);
-    if(chosen)void getJson<{events:Snapshot["diagnostics"]["events"];truncated:boolean;archiveCoverage:string}>(
+    if(chosen)void getJson<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];truncated:boolean;archiveCoverage:string}>(
       "/console/api/trace?requestId="+encodeURIComponent(chosen)).then(result=>{
         if(!cancelled)setDetail(result);
       }).catch(()=>{if(!cancelled)setDetail(null);});
@@ -187,6 +201,41 @@ function Diagnostics({d}:{d:Snapshot}) {
   },[chosen]);
   const trace=(detail?.events??d.diagnostics.events.filter(e=>chosen && [e.requestId,e.traceId,e.nodeRequestId].includes(chosen)))
     .slice().reverse();
+  const spans=detail?.spans??[];
+  const origin=spans.length ? Math.min(...spans.map(s=>Date.parse(s.ts))) : 0;
+  const endpoint=spans.length ? Math.max(...spans.map(s=>Date.parse(s.ts)+s.durationMs)) : 0;
+  const total=Math.max(1,endpoint-origin);
+  const relatedBrowser=browserEvents.filter(e=>{
+    if(!trace.length)return false;
+    const times=trace.map(x=>Date.parse(x.ts)).filter(Number.isFinite);
+    if(!times.length)return false;
+    return e.ts>=Math.min(...times)-120000&&e.ts<=Math.max(...times)+120000;
+  }).slice(-100);
+  async function loadHistory(){
+    const params=new URLSearchParams();
+    if(filter)params.set("event",filter);
+    if(historyStart)params.set("start",new Date(historyStart).toISOString());
+    if(historyEnd)params.set("end",new Date(historyEnd).toISOString());
+    const payload=await getJson<{events:Snapshot["diagnostics"]["events"];stats:{events:number;spans:number;metrics:number;first?:string;last?:string};gatewayHistory:string}>(
+      "/console/api/history?"+params);
+    setHistory(payload.events);
+    setHistoryStats(payload.stats);setHistoryPeer(payload.gatewayHistory);
+  }
+  async function loadBrowserMetadata(file:File){
+    setBrowserError("");
+    if(file.size>1024*1024){setBrowserError("文件超过 1 MiB 上限");return;}
+    try{
+      const data=JSON.parse(await file.text()) as {schema?:string;events?:BrowserEvent[]};
+      if(data.schema!=="synrex.browser.v1"||!Array.isArray(data.events))throw Error("Invalid schema");
+      const accepted=data.events.filter(e=>e && (e.kind==="network"||e.kind==="ui") &&
+        typeof e.ts==="number"&&Number.isFinite(e.ts)&&
+        ["completed","network_error","transport_timeout","retry_requested"].includes(e.reason))
+        .map(e=>({ts:e.ts,kind:e.kind,reason:e.reason,tabId:e.tabId,
+          ...(typeof e.durationMs==="number"?{durationMs:e.durationMs}:{}),
+          ...(typeof e.status==="number"?{status:e.status}:{})})).slice(-5000);
+      setBrowserEvents(accepted);
+    }catch{setBrowserError("无法读取指定格式的浏览器元数据");}
+  }
   const durations=d.diagnostics.events.filter(e=>e.event==="mcp_finished" && typeof e.durationMs==="number").map(e=>e.durationMs!);
   const percentile=(p:number)=>durations.length ? [...durations].sort((a,b)=>a-b)[Math.floor((durations.length-1)*p)]!+" ms" : "—";
   return <div className="stack"><div className="notice"><strong>把卡顿定位到正确层级</strong>
@@ -196,16 +245,59 @@ function Diagnostics({d}:{d:Snapshot}) {
       <Metric label="HTTP p95" value={percentile(.95)} info="近期请求" symbol="◷"/>
       <Metric label="HTTP p99" value={percentile(.99)} info="样本量有限" symbol="◷"/></div>
     <Panel title="MCP 请求时间线" hint="点击请求查看已记录阶段"
-      extra={<input className="filter" placeholder="按请求或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>}>
+      extra={<div><input className="filter" placeholder="按请求 ID 或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>
+        <button disabled={!/^[a-zA-Z0-9_-]{1,110}$/.test(query)} onClick={()=>setSelected(query)}>按 ID 查 7 天 Trace</button></div>}>
       {matched.map(r=><button className={`pick ${chosen===r.requestId?"picked":""}`} key={r.requestId} onClick={()=>setSelected(r.requestId)}><span className="round-symbol">⌁</span>
         <div className="grow"><strong>{r.tool??"MCP 请求"}</strong><small>{r.requestId}</small>
           {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></button>)}
       {!matched.length&&<Blank>没有匹配的请求记录</Blank>}
     </Panel><Panel title="关联事件" hint={detail?.truncated?"记录超过每次查询上限，显示最近 1000 条":"归档检索有窗口限制，缺失阶段保持未知"}>
+      {spans.length>0&&<div style={{marginBottom:16}}>
+        <strong>原生 OTel Span 瀑布图</strong>
+        <p className="footnote">时间轴基于实际 Span 时间戳；并行阶段会重叠，不能直接相加。</p>
+        {spans.slice(0,80).map(s=><div key={s.traceId+s.spanId} className="list-row">
+          <span style={{width:112,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={s.name}>{s.name}</span>
+          <div style={{height:14,position:"relative",background:"var(--surface,#edf1f4)",flex:1}}>
+            <div title={s.durationMs+" ms · "+s.status} style={{position:"absolute",top:1,bottom:1,
+              left:((Date.parse(s.ts)-origin)/total*100)+"%",
+              width:Math.max(.5,s.durationMs/total*100)+"%",
+              background:s.status==="error"?"#cf644e":"#6c8fac",borderRadius:3}}/>
+          </div><small style={{width:65,textAlign:"right"}}>{Math.round(s.durationMs)} ms</small>
+        </div>)}
+      </div>}
       {trace.length?<div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>阶段</th><th>耗时</th><th>状态</th></tr></thead><tbody>
         {trace.map((e,i)=><tr key={`${e.ts}-${i}`}><td>{time(e.ts)}</td><td>{e.event}</td><td>{e.stage??e.tool??"—"}</td>
           <td>{e.durationMs===undefined?"未知":`${e.durationMs} ms`}</td><td>{e.outcome??e.status??"—"}</td></tr>)}
       </tbody></table></div>:<Blank>当前窗口没有关联事件，不能据此认定请求未发生。</Blank>}
+      {detail?.remoteState==="unavailable"&&<p className="footnote">gateway 历史查询不可用；已显示本地可用记录。</p>}
+    </Panel>
+    <Panel title="7 天历史检索" hint="SQLite 索引查询 · 500 条分页上限 · 默认近期">
+      <div className="list-row"><input className="filter" placeholder="事件名，例如 mcp_failed" value={filter} onChange={e=>setFilter(e.target.value)}/>
+        <label>起始 <input type="datetime-local" value={historyStart} onChange={e=>setHistoryStart(e.target.value)}/></label>
+        <label>结束 <input type="datetime-local" value={historyEnd} onChange={e=>setHistoryEnd(e.target.value)}/></label>
+        <button onClick={()=>void loadHistory()}>检索</button></div>
+      {historyStats&&<p className="footnote">本机索引：{historyStats.events} 事件，{historyStats.spans} 原生 Span，
+        {historyStats.metrics} 分钟级指标；gateway 历史查询：{historyPeer==="available"?"可用":"不可用"}。
+        当前保留范围：{time(historyStats.first)} 至 {time(historyStats.last)}。</p>}
+      <div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>请求 ID</th></tr></thead>
+        <tbody>{history.slice(0,100).map((e,i)=><tr key={i}><td>{time(e.ts)}</td><td>{e.event}</td>
+          <td>{e.nodeId??"swy1"}</td><td>{e.requestId??e.nodeRequestId??"—"}</td></tr>)}</tbody></table></div>
+      {!history.length&&<Blank>点击“检索”可查询历史事件；未执行检索不代表没有日志。</Blank>}
+    </Panel>
+    <Panel title="浏览器消息流元数据" hint="手动导入扩展 JSON，不上传提示词和消息内容">
+      <a href="/console/api/browser-extension" download="synrex-browser-observer.zip">
+        下载浏览器观测扩展（安装需要用户自行确认）
+      </a>
+      <input type="file" accept=".json,application/json" onChange={e=>{
+        const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
+      }}/>
+      {browserError&&<p className="form-error">{browserError}</p>}
+      <p className="footnote">浏览器扩展需由用户自行在 Chrome 启用。无共享请求 ID 的事件仅按时间推测关联。</p>
+      <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>结果</th><th>耗时</th></tr></thead>
+        <tbody>{relatedBrowser.slice(-40).map((e,i)=><tr key={i}>
+          <td>{time(new Date(e.ts).toISOString())}</td><td>{e.kind}</td><td>{e.reason}</td>
+          <td>{e.durationMs===undefined?"未知":e.durationMs+" ms"}</td></tr>)}</tbody></table></div>
+      {browserEvents.length>0&&!relatedBrowser.length&&<Blank>已导入 {browserEvents.length} 条；当前请求时间窗口无匹配。</Blank>}
     </Panel></div>;
 }
 function Resources({d}:{d:Snapshot}) {
@@ -230,6 +322,7 @@ function Resources({d}:{d:Snapshot}) {
     .sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,30);
   const network=[...latest.values()].filter(e=>e.name.startsWith("system.network"))
     .sort((a,b)=>a.name.localeCompare(b.name)).slice(0,18);
+  const tunnelFailures=d.diagnostics.events.filter(e=>e.event==="tunnel_auth_failed"||e.event==="tunnel_disconnected");
   return <div className="stack">
     <div className="notice"><strong>采集范围：可控主机与进程</strong><p>
       Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取（仅尾部窗口）":"尚无本地归档数据"}。
@@ -262,7 +355,14 @@ function Resources({d}:{d:Snapshot}) {
         <Metric symbol="⌁" label="拒收日志" value={d.observability.collectorHealth.refusedLogs??"未知"} info="Collector 累计计数"/>
         <Metric symbol="⌁" label="拒收指标" value={d.observability.collectorHealth.refusedMetrics??"未知"} info="Collector 累计计数"/>
         <Metric symbol="⌁" label="导出失败" value={d.observability.collectorHealth.exporterFailed??"未知"} info={time(d.observability.collectorHealth.at)}/>
+        <Metric symbol="⌁" label="原生 Span 丢弃" value={runtime.otelSpanDropped??"未知"} info="Synrex 运行实例累计"/>
       </div>
+    </Panel>
+    <Panel title="Cloudflare 隧道异常" hint="区别正式入口与辅助测试隧道；仅本次快照中可见的最近事件">
+      {tunnelFailures.length?<div className="table-scroll"><table><thead><tr><th>时间</th><th>服务</th><th>事件</th></tr></thead>
+        <tbody>{tunnelFailures.slice(0,25).map((e,i)=><tr key={i}><td>{time(e.ts)}</td>
+          <td>{e.tunnelUnit??"未知"}</td><td>{e.event}</td></tr>)}</tbody></table></div>
+        :<Blank>当前采样窗口没有隧道异常记录，不代表完整历史没有故障。</Blank>}
     </Panel>
     <div className="columns">
       <Panel title="活动进程指标" hint="来自 Collector 的 PID 采样；不等于任务存活证明">

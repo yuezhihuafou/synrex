@@ -1,0 +1,16 @@
+[Unit]
+Description=Synrex compact 7-day searchable telemetry index
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/synrex-observability/collector.env
+ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node --disable-warning=ExperimentalWarning %h/.local/share/synrex-observability/archive-indexer.mjs serve
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+MemoryMax=256M
+CPUQuota=25%
+UMask=0077
+
+[Install]
+WantedBy=default.target

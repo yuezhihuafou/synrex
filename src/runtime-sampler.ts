@@ -1,5 +1,6 @@
 import type { DiagnosticTrace } from "./diagnostic-trace.js";
 import { monitorEventLoopDelay, PerformanceObserver, performance } from "node:perf_hooks";
+import { nativeSpanHealth } from "./native-otel.js";
 
 /** Per-process metadata only; an unavailable diagnostics disk cannot stop MCP. */
 export function startRuntimeSampler(
@@ -24,6 +25,7 @@ export function startRuntimeSampler(
     try {
       const memory = process.memoryUsage();
       const cpu = process.cpuUsage();
+      const native = nativeSpanHealth();
       const currentUtilization = performance.eventLoopUtilization();
       const loopLoad = performance.eventLoopUtilization(currentUtilization, utilization);
       utilization = currentUtilization;
@@ -37,6 +39,8 @@ export function startRuntimeSampler(
         eventLoopUtilizationPermille: Math.round(loopLoad.utilization * 1000),
         gcCount, gcDurationMs: Math.round(gcDurationMs),
         activeToolCount: activeToolCount(),
+        otelSpanPending: native.pending,
+        otelSpanDropped: native.dropped,
       });
     } catch { /* Never propagate observability failures. */ }
     next = now + intervalMs;

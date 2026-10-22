@@ -7,6 +7,7 @@ import type { ServerConfig } from "./config.js";
 import { readConsoleSnapshot } from "./console-snapshot.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { readOtelFileTail } from "./otel-file-reader.js";
+import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
 
 const COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -139,6 +140,11 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   app.get("/console/api/session", auth, (_req, res) => {
     res.json({ authenticated: true });
   });
+  app.get("/console/api/browser-extension", auth, (_req, res) => {
+    const archive = fileURLToPath(new URL("../deploy/observability/browser-extension.zip",import.meta.url));
+    if(!existsSync(archive)){res.status(404).json({error:"Extension package unavailable"});return;}
+    res.download(archive,"synrex-browser-observer.zip");
+  });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
     res.clearCookie(COOKIE_NAME, sessionCookieOptions);
@@ -151,7 +157,19 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       res.status(503).json({ error: "Status data temporarily unavailable" });
     }
   });
-  app.get("/console/api/trace", auth, (req, res) => {
+  app.get("/console/api/history", auth, async (req, res) => {
+    try {
+      const start=typeof req.query.start==="string"?req.query.start:undefined;
+      const end=typeof req.query.end==="string"?req.query.end:undefined;
+      const event=typeof req.query.event==="string"?req.query.event:undefined;
+      const local=searchArchive(config.stateDir,{start,end,event});
+      const remote=await searchGatewayArchive({start,end,event});
+      const events=[...local,...remote.events].sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,500);
+      res.json({events,stats:historyStats(config.stateDir),retentionDays:7,
+        gatewayHistory:remote.available?"available":"unavailable"});
+    } catch {res.status(503).json({error:"Archive temporarily unavailable"});}
+  });
+  app.get("/console/api/trace", auth, async (req, res) => {
     const requestId = req.query.requestId;
     if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{1,110}$/.test(requestId)) {
       res.status(400).json({ error: "Invalid request ID" });
@@ -159,14 +177,21 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     }
     try {
       const recent = new DiagnosticTrace(config.stateDir).read({ minutes: 24 * 60, limit: 20_000, requestId });
-      const archived = readOtelFileTail(config.stateDir).logs.filter(e =>
+      const localHistory=readArchivedTrace(config.stateDir,requestId);
+      const peerKey=localHistory.events.find(e=>e.otelTraceId)?.otelTraceId ?? requestId;
+      const peerHistory=await readGatewayArchivedTrace(peerKey);
+      const archived = [...localHistory.events,...peerHistory.events,...readOtelFileTail(config.stateDir).logs].filter(e =>
         e.requestId === requestId || e.traceId === requestId || e.nodeRequestId === requestId);
       const found = new Map([...archived, ...recent].map(e => [
         [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId].join("|"), e,
       ]));
       const all = [...found.values()].sort((a, b) => a.ts.localeCompare(b.ts));
-      res.json({ requestId, events: all.slice(-1000), truncated: all.length > 1000,
-        archiveCoverage: "bounded_tail", hostInternalStages: "not_observed" });
+      const allSpans=[...localHistory.spans,...peerHistory.spans];
+      const uniqueSpans=[...new Map(allSpans.map(s=>[s.traceId+":"+s.spanId,s])).values()];
+      res.json({ requestId, events: all.slice(-1000), spans:uniqueSpans.slice(-1000),
+        truncated: all.length > 1000 || uniqueSpans.length>1000,
+        archiveCoverage: historyStats(config.stateDir).events ? "indexed_7d" : "bounded_tail",
+        remoteState:peerHistory.remoteState, hostInternalStages: "not_observed" });
     } catch {
       res.status(503).json({ error: "Trace temporarily unavailable" });
     }

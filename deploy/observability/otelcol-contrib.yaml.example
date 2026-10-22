@@ -9,6 +9,10 @@ extensions:
     endpoint: 127.0.0.1:13133
 
 receivers:
+  otlp/synrex:
+    protocols:
+      http:
+        endpoint: 127.0.0.1:14318
   filelog/synrex:
     include:
       - ${env:SYNREX_STATE_DIR}/diagnostics/recent.jsonl*
@@ -99,6 +103,12 @@ exporters:
       max_megabytes: 32
       max_days: 7
       max_backups: 12
+  file/synrex_traces:
+    path: ${env:SYNREX_OTEL_ROOT}/data/traces.otlp.json
+    rotation:
+      max_megabytes: 32
+      max_days: 7
+      max_backups: 12
 
 service:
   extensions: [file_storage/offsets, health_check]
@@ -111,3 +121,7 @@ service:
       receivers: [hostmetrics]
       processors: [memory_limiter, resource/synrex, batch]
       exporters: [file/synrex_metrics]
+    traces:
+      receivers: [otlp/synrex]
+      processors: [memory_limiter, resource/synrex, batch]
+      exporters: [file/synrex_traces]

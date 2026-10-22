@@ -5,6 +5,7 @@ import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { currentRequestLogContext, logEvent, oauthPhaseForPath, requestPath, runWithRequestLogContext } from "./logger.js";
 import { traceEvent } from "./trace-stages.js";
 import { newOtelContext } from "./otel-context.js";
+import { emitNativeSpan } from "./native-otel.js";
 
 /** Mount BEFORE the SDK JSON parser and host checks, so body upload/parse and
  * rejected requests are included. HTTP finish means local flush, not host receipt. */
@@ -14,6 +15,7 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     const requestId = randomUUID();
     const otel = newOtelContext(req.header("traceparent"));
     const started = performance.now();
+    const wallStart = Date.now();
     const path = requestPath(req);
     const oauthPhase = oauthPhaseForPath(path);
     const isMcp = path === "/mcp";
@@ -71,6 +73,11 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
         ...base, stage, responseMode: mode(), durationMs: elapsed(), status: res.statusCode,
         outputBytes: responseBodyBytes,
       });
+      if (isMcp) emitNativeSpan({ name: "mcp.http", context: otel,
+        startMs: wallStart, endMs: Date.now(),
+        status: res.statusCode < 400 ? "ok" : "error",
+        fields: { "synrex.request_id": requestId,
+          "http.response.status_code": res.statusCode, "http.response.body.size": responseBodyBytes } });
       if (!config.logging.requests || (!config.logging.assets && path.startsWith("/mcp-app-assets"))) return;
       logEvent(config.logging, "info", "http_request", { ...base, path, status: res.statusCode, durationMs: elapsed(), ...requestFields(req, config) });
       if (oauthPhase) logEvent(config.logging, "info", "oauth_http", {
