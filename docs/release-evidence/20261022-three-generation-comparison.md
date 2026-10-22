@@ -62,6 +62,22 @@ The upstream `v1.0.8` Git tree did not contain `src/multinode/router.ts`, `src/w
 | Fault uncertainty on non-idempotent remote writes | Not in original source | Later-generation tests | Deterministic failure simulation covered; **real WAN ambiguous write remains open** |
 | Long-run GPT token/time effectiveness | Unknown | Unknown | Unknown |
 
+### Connected learning and architecture probes, not just source existence
+
+Using the **actual connected intermediate and current MCP `project` tool**:
+
+| Probe | October 20 intermediate | Current Synrex |
+| --- | --- | --- |
+| `learn_stats` | 6 episodes, 6 marked successful, 0 candidates, 0 promoted | 2,000 episodes, 1,752 marked successful, 1 candidate, 0 promoted |
+| `arch_validate` | 0 errors, 0 warnings | 0 errors, 0 warnings |
+
+The two learning stores have profoundly different accumulated history. The
+counts show persistence/accessibility, **not** relative model quality,
+effectiveness, correctness of all success labels, or justified growth rate.
+The intermediate and current checks both succeed, so this small probe does
+not establish a current-versus-intermediate governance quality difference.
+Pristine upstream v1.0.8 does not expose a corresponding `project` action.
+
 ## 5. Source and regression reproducibility
 
 - Original original-version exact-lock `npm ci` and `npm run build`: passed. Original 41 of 41 non-sandbox test scripts passed; one additional network-namespace `bwrap` sandbox case could not run due host permission denial. Do not call that a product regression.
