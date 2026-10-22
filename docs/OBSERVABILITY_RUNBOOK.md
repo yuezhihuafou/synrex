@@ -102,6 +102,32 @@ to local retention needs.
 
 ## Remaining limitations (must not be hidden by Console)
 
+### Conversation title registration and provenance
+
+ChatGPT MCP does not reliably provide `openai/conversation_title` or
+`openai/session` to each tool call. The server now records a host-provided
+title when available even without a session ID; it records a pseudonymous
+`conversation_seen` event when a session ID is available independently.
+The seven-day index retains both fields when emitted. The authenticated
+P012 Console can also explicitly assign a title to **one verified request
+ID**. This mapping is held in private `observability/conversation-labels.sqlite`
+and annotated as `source=owner`; it never auto-binds nearby conversations.
+The optional browser extension records tab titles locally and exports them
+with timestamps. Time-only suggestions are never treated as exact.
+
+### 2026-10-22 21:51 client transport timeout incident
+
+For 21:49–21:52:30 Asia/Kuala_Lumpur, the owner history had 10 completed
+HTTP MCP requests, all status 200; slowest was 2635 ms; latest completion
+at 21:50:33.729. No `mcp_failed`, `mcp_closed_early` or
+`request_stalled` was observed for that window, and the primary
+`cloudflared-devspace.service` journal contained zero matching errors.
+Auxiliary test tunnel authentication failures are separate. The browser
+displayed a completed ChatGPT response and then a transport-timeout warning.
+The root cause **cannot be uniquely attributed** without a browser-side
+request lifecycle record: browser/proxy connection, platform stream timeout,
+and completion/ack behavior are outside the Synrex server's telemetry.
+
 - An OTLP file exporter persists log records and metrics, but does not by itself
   synthesize native OTel spans from existing phase events.
 - Host TCP RTT statistics are not request-specific network latency.

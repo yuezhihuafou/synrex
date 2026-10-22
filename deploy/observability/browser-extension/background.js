@@ -44,6 +44,14 @@ chrome.webRequest.onCompleted.addListener(d=>finish(d,"completed"),
 chrome.webRequest.onErrorOccurred.addListener(d=>finish(d,"network_error"),
   {urls:["https://chatgpt.com/*","https://chat.openai.com/*"]});
 chrome.runtime.onMessage.addListener((msg,sender,reply)=>{
+  if(msg?.kind==="synrex_conversation_title" && sender.tab?.id &&
+    typeof msg.title==="string" && msg.title.length<=120 &&
+    !/[\x00-\x1f\x7f]/.test(msg.title) && msg.title.trim()){
+    append({kind:"conversation_title",reason:"observed",tabId:sender.tab.id,
+      host:"chatgpt.com",conversationTitle:msg.title.trim()});
+    reply({recorded:true});
+    return;
+  }
   if(msg?.kind!=="synrex_visible_error" || !sender.tab?.id ||
     !["transport_timeout","network_error","retry_requested"].includes(msg.code))return;
   append({kind:"ui",reason:msg.code,tabId:sender.tab.id,host:"chatgpt.com"});

@@ -6,6 +6,7 @@ import { readOtelFileTail, type HostMetricSample } from "./otel-file-reader.js";
 import { readPeerSnapshot } from "./peer-observability.js";
 import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
+import { readConversationLabels } from "./conversation-labels.js";
 
 interface NodeRow {
   id: string; kind: string; alias: string | null; health: string;
@@ -150,6 +151,8 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   ]));
   const events = [...unique.values()].slice(-2000);
   const requests = summarizeDiagnosticTrace(events).requests.slice(-40).reverse();
+  const ownerLabels = new Map(readConversationLabels(stateDir,requests.map(r=>r.requestId))
+    .map(label=>[label.requestId,label.conversationTitle]));
   const runtime = [...events].reverse().find(e => e.event === "runtime_sampled");
   const network = [...events].reverse().find(e => e.event === "network_sampled");
   const collector = [...events].reverse().find(e => e.event === "collector_sampled");
@@ -157,7 +160,11 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
     generatedAt: new Date().toISOString(),
     service: { status: "online", release, diagnosticsBoundBytes: 2 * 8 * 1024 * 1024 },
     nodes, workflows, tasks, memory,
-    diagnostics: { count: events.length, requests, events: events.slice(-200).reverse() },
+    diagnostics: { count: events.length,
+      requests: requests.map(r=>({...r,
+        ...(ownerLabels.has(r.requestId)?{conversationTitle:ownerLabels.get(r.requestId)}:{}),
+      })),
+      events: events.slice(-200).reverse() },
     observability: {
       collector: archive.coverage,
       peerSync: { gateway: peer.coverage, at: peer.updatedAt },

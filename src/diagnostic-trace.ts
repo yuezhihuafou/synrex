@@ -35,6 +35,7 @@ export type DiagnosticEvent =
   | "task_created" | "task_runner_started" | "task_spawned" | "task_first_output" | "task_finished" | "task_notification"
   | "mailbox_registered" | "mailbox_delivered" | "mailbox_acknowledged" | "mailbox_error" | "learning_error"
   | "conversation_labeled"
+  | "conversation_seen"
   | "node_request_timeout"
   | "node_late_completion"
   | "mcp_received"
@@ -121,7 +122,7 @@ const EVENT_NAMES: readonly string[] = [
   "node_queued", "node_delivered", "node_completed", "node_peer_received", "node_peer_started", "node_peer_finished", "node_peer_acknowledged", "node_transport",
   "task_created", "task_runner_started", "task_spawned", "task_first_output", "task_finished", "task_notification",
   "mailbox_registered", "mailbox_delivered", "mailbox_acknowledged", "mailbox_error", "learning_error",
-  "conversation_labeled", "node_request_timeout", "node_late_completion",
+  "conversation_labeled", "conversation_seen", "node_request_timeout", "node_late_completion",
   "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
@@ -187,7 +188,7 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   if (callId) item.callId = callId;
   if (workspaceId) item.workspaceId = workspaceId;
   if (conversationId) item.conversationId = conversationId;
-  if (event === "conversation_labeled" && conversationId && conversationTitle) {
+  if (event === "conversation_labeled" && (conversationId || requestId) && conversationTitle) {
     item.conversationTitle = conversationTitle;
   }
   if (tool) item.tool = tool;
@@ -265,10 +266,16 @@ export class DiagnosticTrace {
       entries.filter((entry) => entry.conversationTitle === input.title && entry.conversationId)
         .map((entry) => entry.conversationId!),
     );
+    const matchedRequests = input.title === undefined ? undefined : new Set(
+      entries.filter((entry) => entry.event==="conversation_labeled"
+        && entry.conversationTitle===input.title && entry.requestId)
+        .map((entry)=>entry.requestId!),
+    );
     return entries.filter((entry) => (
       (!input.requestId || entry.requestId === input.requestId || entry.traceId === input.requestId || entry.nodeRequestId === input.requestId)
       && (!input.conversationId || entry.conversationId === input.conversationId)
-      && (!matchedIds || (entry.conversationId !== undefined && matchedIds.has(entry.conversationId)))
+      && (!matchedIds || (entry.conversationId !== undefined && matchedIds.has(entry.conversationId))
+        || (entry.requestId!==undefined && matchedRequests?.has(entry.requestId)))
     )).slice(-limit);
   }
 }
@@ -277,9 +284,13 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
   const observed = new Map<string, Set<DiagnosticEvent>>();
   const requests = new Map<string, { requestId: string; lastEvent: DiagnosticEvent; conversationId?: string; tool?: string; callId?: string; status?: number; taskId?: string; runId?: string; lastAt: string }>();
   const conversationTitles = new Map<string, string>();
+  const requestTitles = new Map<string, string>();
   for (const entry of entries) {
     if (entry.conversationId && entry.conversationTitle) {
       conversationTitles.set(entry.conversationId, entry.conversationTitle);
+    }
+    if (entry.event === "conversation_labeled" && entry.requestId && entry.conversationTitle) {
+      requestTitles.set(entry.requestId, entry.conversationTitle);
     }
     const id = entry.traceId ?? entry.requestId;
     if (!id) continue;
@@ -305,8 +316,10 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
     conversations: [...conversationTitles].map(([conversationId, conversationTitle]) => ({ conversationId, conversationTitle })),
     requests: [...requests.values()].map((request) => ({
       ...request,
-      ...(request.conversationId && conversationTitles.has(request.conversationId)
-        ? { conversationTitle: conversationTitles.get(request.conversationId) } : {}),
+      ...(requestTitles.has(request.requestId)
+        ? { conversationTitle: requestTitles.get(request.requestId) }
+        : request.conversationId && conversationTitles.has(request.conversationId)
+          ? { conversationTitle: conversationTitles.get(request.conversationId) } : {}),
       classification: observed.get(request.requestId)?.has("mcp_finished")
         ? "rev_http_completed"
         : observed.get(request.requestId)?.has("mcp_closed_early")

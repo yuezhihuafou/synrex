@@ -951,7 +951,12 @@ function withTrackedToolHandlers(
             ? safeConversationTitle((suppliedInput as { conversationTitle?: unknown } | undefined)?.conversationTitle)
             : undefined;
           const conversationTitle = explicitTitle ?? conversationTitleFromRequestMeta(extra?._meta);
-          if (conversationId && conversationTitle) {
+          if (conversationId) {
+            diagnostics.record("conversation_seen", {
+              requestId: currentRequestLogContext()?.requestId, conversationId,
+            });
+          }
+          if (conversationTitle) {
             diagnostics.record("conversation_labeled", {
               conversationId, conversationTitle,
               requestId: currentRequestLogContext()?.requestId,

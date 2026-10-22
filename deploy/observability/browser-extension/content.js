@@ -2,12 +2,20 @@
 // categories; never copy/serialize the text, messages, model output or DOM.
 (() => {
   let last = "", lastAt = 0;
+  let lastTitle = "";
+  function inspectTitle() {
+    const title=(document.title??"").replace(/\s*[-|]\s*ChatGPT\s*$/i,"").trim().slice(0,120);
+    if(!title || /^ChatGPT$/i.test(title) || title===lastTitle || /[\x00-\x1f\x7f]/.test(title)) return;
+    lastTitle=title;
+    chrome.runtime.sendMessage({kind:"synrex_conversation_title",title}).catch(()=>{});
+  }
   const classify = value => {
     if (/消息传输超时|message transmission timed out|message transport timed out/i.test(value))return "transport_timeout";
     if (/network error|网络错误|network connection lost/i.test(value))return "network_error";
     return null;
   };
   function inspect() {
+    inspectTitle();
     for(const element of document.querySelectorAll('[role="alert"],[aria-live="assertive"]')){
       const content=element.textContent?.slice(0,300)??"";
       const code=classify(content);
@@ -21,4 +29,6 @@
   const observer=new MutationObserver(inspect);
   observer.observe(document.documentElement,{childList:true,subtree:true,characterData:true});
   inspect();
+  new MutationObserver(inspectTitle).observe(document.querySelector("title")??document.head,
+    {childList:true,characterData:true,subtree:true});
 })();

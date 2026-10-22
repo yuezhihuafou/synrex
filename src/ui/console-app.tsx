@@ -5,8 +5,8 @@ import "./console-app.css";
 type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
 type ObservedSpan = {ts:string;traceId:string;spanId:string;parentSpanId?:string;
   name:string;durationMs:number;status:string;requestId?:string};
-type BrowserEvent = {ts:number;kind:"network"|"ui";reason:string;tabId?:number;
-  requestType?:string;durationMs?:number;status?:number;startedAt?:string;host?:string};
+type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title";reason:string;tabId?:number;
+  requestType?:string;durationMs?:number;status?:number;startedAt?:string;host?:string;conversationTitle?:string};
 type Snapshot = {
   generatedAt: string;
   service: { status: string; release: string };
@@ -17,8 +17,10 @@ type Snapshot = {
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string }>;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
   diagnostics: { count: number; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
+    conversationTitle?:string; conversationId?:string;
     classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
     traceId?:string; nodeRequestId?:string; callId?:string; taskId?:string; nodeId?:string;
+    conversationTitle?:string; conversationId?:string;
     stage?:string; durationMs?:number; elapsedMs?:number; status?:number; outcome?:string; tool?:string;
     rssBytes?:number; heapUsedBytes?:number; cpuUserMicros?:number; cpuSystemMicros?:number; eventLoopLagMs?:number; bootId?:string;
     eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number; gcDurationMs?:number; gcCount?:number;
@@ -178,7 +180,10 @@ function Diagnostics({d}:{d:Snapshot}) {
   const [query,setQuery]=useState("");
   const [selected,setSelected]=useState<string|null>(null);
   const [detail,setDetail]=useState<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];
+    conversationTitle?:string|null;titleSource?:string;
     truncated:boolean;archiveCoverage:string;remoteState?:string}|null>(null);
+  const [titleDraft,setTitleDraft]=useState("");
+  const [labelMessage,setLabelMessage]=useState("");
   const [history,setHistory]=useState<Snapshot["diagnostics"]["events"]>([]);
   const [filter,setFilter]=useState("");
   const [historyStart,setHistoryStart]=useState("");
@@ -187,20 +192,33 @@ function Diagnostics({d}:{d:Snapshot}) {
   const [historyPeer,setHistoryPeer]=useState("unknown");
   const [browserEvents,setBrowserEvents]=useState<BrowserEvent[]>([]);
   const [browserError,setBrowserError]=useState("");
-  const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??""))
+  const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??"")+" "+(r.conversationTitle??""))
     .toLowerCase().includes(query.toLowerCase())),[d,query]);
   const chosen=selected??matched[0]?.requestId;
   useEffect(()=>{
     let cancelled=false;
     setDetail(null);
-    if(chosen)void getJson<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];truncated:boolean;archiveCoverage:string}>(
+    if(chosen)void getJson<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];
+      conversationTitle?:string|null;titleSource?:string;truncated:boolean;archiveCoverage:string}>(
       "/console/api/trace?requestId="+encodeURIComponent(chosen)).then(result=>{
-        if(!cancelled)setDetail(result);
+        if(!cancelled){setDetail(result);setTitleDraft(result.conversationTitle??"");}
       }).catch(()=>{if(!cancelled)setDetail(null);});
     return()=>{cancelled=true;};
   },[chosen]);
   const trace=(detail?.events??d.diagnostics.events.filter(e=>chosen && [e.requestId,e.traceId,e.nodeRequestId].includes(chosen)))
     .slice().reverse();
+  async function labelSelected(){
+    if(!chosen || !titleDraft.trim())return;
+    setLabelMessage("");
+    try{
+      const result=await getJson<{label:{conversationTitle:string}}>("/console/api/conversation-label",{
+        method:"POST",headers:{"content-type":"application/json"},
+        body:JSON.stringify({requestId:chosen,conversationTitle:titleDraft.trim()}),
+      });
+      setDetail(prev=>prev?{...prev,conversationTitle:result.label.conversationTitle,titleSource:"owner"}:prev);
+      setLabelMessage("已登记：手动关联该请求。");
+    }catch{setLabelMessage("标题登记失败，请确认请求仍在归档中。");}
+  }
   const spans=detail?.spans??[];
   const origin=spans.length ? Math.min(...spans.map(s=>Date.parse(s.ts))) : 0;
   const endpoint=spans.length ? Math.max(...spans.map(s=>Date.parse(s.ts)+s.durationMs)) : 0;
@@ -227,10 +245,12 @@ function Diagnostics({d}:{d:Snapshot}) {
     try{
       const data=JSON.parse(await file.text()) as {schema?:string;events?:BrowserEvent[]};
       if(data.schema!=="synrex.browser.v1"||!Array.isArray(data.events))throw Error("Invalid schema");
-      const accepted=data.events.filter(e=>e && (e.kind==="network"||e.kind==="ui") &&
+      const accepted=data.events.filter(e=>e && (e.kind==="network"||e.kind==="ui"||e.kind==="conversation_title") &&
         typeof e.ts==="number"&&Number.isFinite(e.ts)&&
-        ["completed","network_error","transport_timeout","retry_requested"].includes(e.reason))
+        ["completed","network_error","transport_timeout","retry_requested","observed"].includes(e.reason))
         .map(e=>({ts:e.ts,kind:e.kind,reason:e.reason,tabId:e.tabId,
+          ...(e.kind==="conversation_title" && typeof e.conversationTitle==="string" &&
+            e.conversationTitle.length<=120?{conversationTitle:e.conversationTitle}:{}),
           ...(typeof e.durationMs==="number"?{durationMs:e.durationMs}:{}),
           ...(typeof e.status==="number"?{status:e.status}:{})})).slice(-5000);
       setBrowserEvents(accepted);
@@ -248,10 +268,24 @@ function Diagnostics({d}:{d:Snapshot}) {
       extra={<div><input className="filter" placeholder="按请求 ID 或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>
         <button disabled={!/^[a-zA-Z0-9_-]{1,110}$/.test(query)} onClick={()=>setSelected(query)}>按 ID 查 7 天 Trace</button></div>}>
       {matched.map(r=><button className={`pick ${chosen===r.requestId?"picked":""}`} key={r.requestId} onClick={()=>setSelected(r.requestId)}><span className="round-symbol">⌁</span>
-        <div className="grow"><strong>{r.tool??"MCP 请求"}</strong><small>{r.requestId}</small>
+        <div className="grow"><strong>{r.tool??"MCP 请求"}</strong>
+          <small>对话：{r.conversationTitle??"未关联（宿主未提供标题）"}</small>
+          <small>{r.requestId}</small>
           {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></button>)}
       {!matched.length&&<Blank>没有匹配的请求记录</Blank>}
-    </Panel><Panel title="关联事件" hint={detail?.truncated?"记录超过每次查询上限，显示最近 1000 条":"归档检索有窗口限制，缺失阶段保持未知"}>
+    </Panel>
+    <Panel title="对话标题关联" hint="宿主标题优先；没有宿主元数据时可手动登记准确标题，不根据任务内容推测">
+      <p>当前请求：<code>{chosen??"未选择"}</code>。已知标题：<strong>{detail?.conversationTitle??"未知"}</strong>
+        {detail?.titleSource&&<small>（{detail.titleSource==="owner"?"手动登记":detail.titleSource==="host"?"宿主提供":"尚未关联"}）</small>}</p>
+      <div className="list-row">
+        <input className="filter" style={{flex:1}} maxLength={120} placeholder="输入此对话在 ChatGPT 中的实际标题"
+          value={titleDraft} onChange={e=>setTitleDraft(e.target.value)}/>
+        <button disabled={!chosen||!titleDraft.trim()} onClick={()=>void labelSelected()}>保存标题关联</button>
+      </div>
+      {labelMessage&&<p className="footnote">{labelMessage}</p>}
+      <p className="footnote">本操作仅绑定选中的请求 ID，不会自动把相邻时间的其他对话当作同一会话。</p>
+    </Panel>
+    <Panel title="关联事件" hint={detail?.truncated?"记录超过每次查询上限，显示最近 1000 条":"归档检索有窗口限制，缺失阶段保持未知"}>
       {spans.length>0&&<div style={{marginBottom:16}}>
         <strong>原生 OTel Span 瀑布图</strong>
         <p className="footnote">时间轴基于实际 Span 时间戳；并行阶段会重叠，不能直接相加。</p>
@@ -279,9 +313,9 @@ function Diagnostics({d}:{d:Snapshot}) {
       {historyStats&&<p className="footnote">本机索引：{historyStats.events} 事件，{historyStats.spans} 原生 Span，
         {historyStats.metrics} 分钟级指标；gateway 历史查询：{historyPeer==="available"?"可用":"不可用"}。
         当前保留范围：{time(historyStats.first)} 至 {time(historyStats.last)}。</p>}
-      <div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>请求 ID</th></tr></thead>
+      <div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>对话标题</th><th>请求 ID</th></tr></thead>
         <tbody>{history.slice(0,100).map((e,i)=><tr key={i}><td>{time(e.ts)}</td><td>{e.event}</td>
-          <td>{e.nodeId??"swy1"}</td><td>{e.requestId??e.nodeRequestId??"—"}</td></tr>)}</tbody></table></div>
+          <td>{e.nodeId??"swy1"}</td><td>{e.conversationTitle??"未知"}</td><td>{e.requestId??e.nodeRequestId??"—"}</td></tr>)}</tbody></table></div>
       {!history.length&&<Blank>点击“检索”可查询历史事件；未执行检索不代表没有日志。</Blank>}
     </Panel>
     <Panel title="浏览器消息流元数据" hint="手动导入扩展 JSON，不上传提示词和消息内容">
@@ -293,6 +327,11 @@ function Diagnostics({d}:{d:Snapshot}) {
       }}/>
       {browserError&&<p className="form-error">{browserError}</p>}
       <p className="footnote">浏览器扩展需由用户自行在 Chrome 启用。无共享请求 ID 的事件仅按时间推测关联。</p>
+      {relatedBrowser.some(e=>e.conversationTitle)&&<p className="footnote">
+        观测到的浏览器对话标题：
+        {[...new Set(relatedBrowser.map(e=>e.conversationTitle).filter(Boolean))].slice(0,5).join("、")}。
+        这些仅是时间上接近的候选标题，不代表已关联到当前请求。
+      </p>}
       <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>结果</th><th>耗时</th></tr></thead>
         <tbody>{relatedBrowser.slice(-40).map((e,i)=><tr key={i}>
           <td>{time(new Date(e.ts).toISOString())}</td><td>{e.kind}</td><td>{e.reason}</td>

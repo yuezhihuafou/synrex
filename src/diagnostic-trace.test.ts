@@ -105,7 +105,20 @@ test("explicit chat titles are correlated but never synthesized or accepted from
   assert.equal(report.requests[0]?.conversationTitle, "Synrex问题分析");
   assert.equal(d.read({ conversationId: "conv_" + "b".repeat(32) }).length, 0);
   assert.equal(d.read({ conversationId: id }).length, 3);
-  assert.equal(d.read({ title: "Synrex问题分析" }).length, 3);
+  assert.equal(d.read({ title: "Synrex问题分析" }).length, 4);
   assert.equal(d.read({ title: "unrelated" }).length, 0);
   assert.equal(sanitizeDiagnostic("conversation_labeled", { conversationId: id, conversationTitle: "bad\ntitle" }).conversationTitle, undefined);
+});
+
+test("explicit request-only conversation title remains queryable without a host session",async t=>{
+  const root=await mkdtemp(join(tmpdir(),"synrex-label-no-session-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const d=new DiagnosticTrace(root);
+  d.record("conversation_labeled",{requestId:"owner-request",conversationTitle:"评估全链路日志"});
+  d.record("mcp_finished",{requestId:"owner-request",status:200});
+  d.record("mcp_finished",{requestId:"neighbor-request",status:200});
+  assert.equal(d.read({title:"评估全链路日志"}).length,2);
+  assert.equal(d.read({title:"unrelated"}).length,0);
+  assert.equal(summarizeDiagnosticTrace(d.read()).requests.find(e=>e.requestId==="owner-request")
+    ?.conversationTitle,"评估全链路日志");
 });

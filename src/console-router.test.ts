@@ -50,3 +50,31 @@ test("browser trace query stays owner-authenticated, bounded and read-only", asy
   assert.ok(payload.events.every(x=>x.requestId==="request-1"));
   assert.equal(payload.truncated, false);
 });
+
+test("explicit title binding requires authenticated, same-origin request and known ID", async t => {
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-title-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  new DiagnosticTrace(dir).record("mcp_finished",{requestId:"req-0001",status:200});
+  const app=express(),ownerToken="owner-test-secret";
+  registerSynrexConsole(app,{stateDir:dir,publicBaseUrl:"https://console.example.test",
+    oauth:{ownerToken}} as ServerConfig);
+  const server=await new Promise<Server>(resolve=>{
+    const s=app.listen(0,"127.0.0.1",()=>resolve(s));
+  });
+  t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
+  const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/console/api`;
+  const cookie="rev_console="+createConsoleSession(ownerToken);
+  const body=JSON.stringify({requestId:"req-0001",conversationTitle:"评估全链路日志"});
+  const send=(id:string,headers:Record<string,string>,json=body)=>fetch(base+id,{
+    method:"POST",headers:{"content-type":"application/json",...headers},body:json,
+  });
+  assert.equal((await send("/conversation-label",{"origin":"https://console.example.test"})).status,401);
+  assert.equal((await send("/conversation-label",{cookie,origin:"https://evil.example.test"})).status,403);
+  assert.equal((await send("/conversation-label",{cookie,origin:"https://console.example.test"},
+    JSON.stringify({requestId:"not-present",conversationTitle:"Title"}))).status,404);
+  assert.equal((await send("/conversation-label",{cookie,origin:"https://console.example.test"})).status,200);
+  const trace=await fetch(base+"/trace?requestId=req-0001",{headers:{cookie}});
+  const detail=await trace.json() as {conversationTitle:string;titleSource:string};
+  assert.equal(detail.conversationTitle,"评估全链路日志");
+  assert.equal(detail.titleSource,"owner");
+});
