@@ -6,6 +6,24 @@ take precedence over this document.
 
 ## 2026-10-22 continued-work evidence (new conversation)
 
+- 14:19 CST direct validation: `benchmark:governance-engine` run
+  `run_20261022061915_47fa4496` passed 6/6, four expected blocks,
+  two expected allows, zero false-positive blocks. Component fixture only.
+- `benchmark:capabilities` task `task_47543100dded4543` run
+  `run_20261022061911_cb0626ad` exited 0: governance 2/2,
+  semantic 1/1, evidence-learning 2/2. In its small fixture, grep
+  2.49 ms, Serena definition 2030.16 ms and references 5121.9 ms.
+  These are mechanism timings, not GPT end-to-end speed claims.
+- Real remote gateway durable command task
+  `task_f6ce4a3e5fb21730b40039fe5ccff946`, run
+  `run_20261022061929_fc3dd035` exited 0 and saved both start and
+  finish lines. A subsequent `task_get` recovered the same terminal
+  task identity. No network fault was induced in this sample.
+- Production remains pinned to recovery source `3367d6a`; checkout
+  remained clean at `5cd009b` before evidence-only edits. Strictly
+  paired old-Dev vs Synrex GPT performance remains unavailable without
+  genuine identical model/effort/start-state trials.
+
 - Follow-up found that paired benchmarks with both model and environment
   controls missing were incorrectly accepted as comparable. Revision
   `7f4961d` requires matching, nonempty provider, model, effort, source
