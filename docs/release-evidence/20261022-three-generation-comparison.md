@@ -44,6 +44,24 @@ edit/test **functional parity on a bounded real bugfix**, not independent
 blind GPT reasoning quality: one conversational model authored the same
 fix for the three execution layers, and the problem was intentionally small.
 
+### Three-way multi-file refactor, same target behavior
+
+Expanded that same fixture into a cross-file change: extracted
+`discountAmount()` to new `threeway-discount.mjs`, imported it into the
+total function, and updated the tests to verify the adapter default and
+the preserved total. All three genuine MCP servers accepted the same
+**three-file patch**. Each executed `node --test` with **2 pass, 0 fail,
+exit 0**, and verified identical hashes for the three final files:
+
+- total `83df73bf0ce4eb6e7c423fac40013e73f2da0e29c57696ccdc8f3f51aa902929`
+- adapter `0d167e5eae5919e5d82c29af924f068d62f446d7691ab3b41d30785137975ab5`
+- tests `b3eb54d54914a46f6c924509859354a063911cf3bbcabc7afbfca8e4fd49051d`
+
+Intermediate run `run_20261022073701_db9a232d`, current Synrex run
+`run_20261022073703_1884ebe4`; original printed the same terminal
+passing Node test result. This supports cross-file code-editing parity,
+**not** a Synrex coding-speed gain.
+
 ## 2. Controlled small-command transport pilot
 
 Six serial `/bin/true` real MCP calls per connection, alternating forward/reverse arm order, 18/18 exit 0. Direct host invocation timings (milliseconds):
