@@ -5,7 +5,7 @@ Description=Synrex isolated usage statistics rollup
 Type=oneshot
 Environment=SYNREX_STATE_DIR=%h/.local/share/devspace-cutover-20261018
 Environment=SYNREX_REPO_ROOT=%h/.devspace/worktrees/DevSpace-6fab5e86
-ExecStart=/usr/bin/node %h/.local/share/synrex-observability/usage-rollup.mjs
+ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node %h/.local/share/synrex-observability/usage-rollup.mjs
 Nice=15
 IOSchedulingClass=idle
 MemoryMax=128M
