@@ -50,6 +50,24 @@ try {
     if(label==="统计分析")await waitFor("!!document.querySelector('.bar-chart')");
     checks.push(`navigation: ${label}`);
   }
+  await evaluate("Array.from(document.querySelectorAll('nav button')).find(b=>b.textContent.includes('日志与链路')).click()");
+  await waitFor("document.body.innerText.includes('Trace 瀑布图')");
+  const request=await evaluate("fetch('/console/api/diagnostics').then(r=>r.json()).then(v=>v.events.find(e=>e.event==='stage_finished'&&e.requestId)?.requestId ?? '')");
+  if(request){
+    await waitFor(`Array.from(document.querySelectorAll('.text-button')).some(x=>x.textContent?.trim()===${JSON.stringify(request)})`);
+    await evaluate(`Array.from(document.querySelectorAll('.text-button')).find(x=>x.textContent?.trim()===${JSON.stringify(request)}).click()`);
+    await waitFor("!!document.querySelector('.trace-layout .trace-row')");
+    checks.push("S2: request ID selects non-empty trace waterfall");
+  }
+  await evaluate("Array.from(document.querySelectorAll('nav button')).find(b=>b.textContent.includes('统计分析')).click()");
+  await waitFor("!!document.querySelector('[aria-label=\"节点对比时间窗\"]')");
+  checks.push("S3: persisted statistics and node-stage breakdown surface");
+  const peers=await evaluate("fetch('/console/api/snapshot').then(r=>r.json()).then(v=>Object.keys(v.remote??{}))");
+  if(peers.includes("gateway")){
+    await evaluate("Array.from(document.querySelectorAll('nav button')).find(b=>b.textContent.includes('主机节点')).click()");
+    await waitFor("!!document.querySelector('.peer-metrics')");
+    checks.push("S1: gateway live SSH resources shown without remote daemon");
+  }
   await evaluate("Array.from(document.querySelectorAll('nav button')).find(b=>b.textContent.includes('活动执行')).click()");
   await waitFor("!!document.querySelector('.segments')");
   await evaluate("Array.from(document.querySelectorAll('.segments button')).find(b=>b.textContent==='全部').click()");

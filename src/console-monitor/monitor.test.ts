@@ -13,6 +13,8 @@ import { DurableTaskManager } from "../durable-tasks.js";
 import type { DiagnosticEntry } from "../diagnostic-trace.js";
 import { parseProcStat } from "./resources.js";
 import { normalizeEvent } from "./events.js";
+import { buildTrace } from "./trace-view.js";
+import { PeerSampler, validatePeerConfig } from "./peers.js";
 
 async function fixture(t: { after: (fn:()=>unknown)=>void }) {
   const dir = await mkdtemp(path.join(tmpdir(), "synrex-monitor-"));
@@ -108,4 +110,48 @@ test("full-chain trace adapter retains stage/node/task identity and excludes una
   assert.equal(store.query({minutes:60}).stages[0].p50,125);
   assert.equal(store.query({minutes:60}).requests.count,1);
   assert.equal(store.events("peer_execute").length,1);
+});
+
+test("S2 trace uses existing sanitized stage events and states missing coverage",async t=>{
+  const f=await fixture(t), store=new StatisticsStore(path.join(f.dir,"stats.sqlite"));t.after(()=>store.close());
+  const start=new Date(Date.now()-800).toISOString(), end=new Date().toISOString();
+  store.ingest([{ts:start,event:"mcp_received",requestId:"req_trace",traceId:"trace_1"},
+    {ts:end,event:"stage_finished",requestId:"req_trace",stage:"tool_handler",nodeId:"node_1",durationMs:125,secret:"do not expose"},
+    {ts:end,event:"mcp_finished",requestId:"req_trace",status:200,durationMs:800}]);
+  const result=store.trace("req_trace");assert.equal(result.status,"completed");assert.equal(result.spans[0].name,"tool_handler");
+  assert.equal(result.spans[0].durationMs,125);assert.ok(!JSON.stringify(result).includes("do not expose"));
+  assert.equal(store.trace("not_recorded").status,"incomplete");
+  const toolError=buildTrace("req_tool_error",[normalizeEvent({ts:start,event:"tool_execution_finished",requestId:"req_tool_error",outcome:"error"})!,
+    normalizeEvent({ts:end,event:"mcp_finished",requestId:"req_tool_error",status:200,durationMs:3})!]);
+  assert.equal(toolError.status,"error");
+  assert.throws(()=>store.trace("../secret"),/Invalid request/);
+  assert.equal(buildTrace("req_x",[]).spans.length,0);
+});
+
+test("S3 minute buckets survive raw request eviction, restart and event replay",async t=>{
+  const f=await fixture(t), file=path.join(f.dir,"stats.sqlite");
+  let store=new StatisticsStore(file);
+  const raw=[event("mcp_received","roll_a"),event("mcp_finished","roll_a",{status:200,durationMs:77}),
+    event("mcp_received","roll_b",{tool:"read"}),event("mcp_failed","roll_b",{tool:"read",status:500})];
+  store.ingest(raw);store.ingest(raw);
+  assert.equal(store.query({minutes:60}).requests.count,2);
+  assert.equal(store.query({minutes:60}).requests.errors,1);
+  store.db.exec("delete from requests");
+  assert.equal(store.query({minutes:60}).requests.count,2);
+  assert.equal(store.query({minutes:60}).requests.latencyCount,0);
+  store.close();store=new StatisticsStore(file);t.after(()=>store.close());
+  assert.equal(store.query({minutes:60,tool:"read"}).requests.errors,1);
+  assert.equal(store.query({minutes:60}).series.reduce((n,b)=>n+b.count,0),2);
+});
+
+test("S1 optional SSH peer is bounded, read-only and marks failed sampling unavailable",async()=>{
+  assert.deepEqual(validatePeerConfig("gateway=gateway"),["gateway","gateway"]);
+  assert.throws(()=>validatePeerConfig("x=host;rm"));
+  const sample={hostname:"gateway",sampledAt:new Date().toISOString(),cpuPercent:20,cores:8,totalMemory:8192,usedMemory:4096,
+    load:[1,1,1],processes:[],processLimitReached:false,gpu:null,gpuSampledAt:null,gpuError:null};
+  const sampler=new PeerSampler({gateway:"gateway"},async (_cmd,_args,_opts)=>({stdout:JSON.stringify(sample),stderr:""}));
+  await sampler.poll();assert.equal(sampler.readings.gateway.resources?.cpuPercent,20);
+  await sampler.poll();assert.equal(sampler.readings.gateway.resources?.hostname,"gateway");
+  const failed=new PeerSampler({offline:"offline"},async()=>{throw new Error("disconnected")});
+  await failed.poll();assert.equal(failed.readings.offline.resources,null);assert.match(failed.readings.offline.error??"",/不可用/);
 });

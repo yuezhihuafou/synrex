@@ -4,6 +4,7 @@ import { readConsoleSnapshot } from "../console-snapshot.js";
 import { ExecutionReader, RUN_LIMIT, LOG_LIMIT } from "./executions.js";
 import { ResourceSampler, PROCESS_LIMIT } from "./resources.js";
 import { StatisticsStore, HISTORY_LIMIT, RETENTION_DAYS } from "./statistics.js";
+import { PeerSampler } from "./peers.js";
 import type { MonitorSnapshot } from "./types.js";
 
 export interface CollectorOptions {
@@ -13,12 +14,14 @@ export interface CollectorOptions {
   writableRoots?: string[];
   release?: string;
   intervalMs?: number;
+  peerSsh?: Record<string, string>;
 }
 
 export class MonitorCollector extends EventEmitter {
   readonly runs: ExecutionReader;
   readonly stats: StatisticsStore;
   private readonly resources = new ResourceSampler();
+  private readonly peers: PeerSampler;
   private timer?: NodeJS.Timeout;
   private busy = false;
   private stopped = false;
@@ -29,10 +32,11 @@ export class MonitorCollector extends EventEmitter {
   constructor(readonly options: CollectorOptions) {
     super();
     this.runs = new ExecutionReader(options.runRoot, options.writableRoots);
+    this.peers = new PeerSampler(options.peerSsh ?? {});
     this.stats = new StatisticsStore(options.database);
     this.snapshot = { generatedAt: new Date().toISOString(), sampledAt: "", sampleMs: 0,
-      source: { node: hostname(), release: options.release ?? "independent-monitor", scope: "本机进程与运行记录；远端节点仅显示目录状态", management: options.writableRoots?.length ? "指定工作区可取消任务" : "只读监控" },
-      resources: null, executions: [], base: null, warnings: [],
+      source: { node: hostname(), release: options.release ?? "independent-monitor", scope: options.peerSsh && Object.keys(options.peerSsh).length ? "本机任务与资源；指定远端经 SSH 只读采样" : "本机进程与运行记录；远端节点仅显示目录状态", management: options.writableRoots?.length ? "指定工作区可取消任务" : "只读监控" },
+      resources: null, remote: {}, executions: [], base: null, warnings: [],
       limits: { runs: RUN_LIMIT, processes: PROCESS_LIMIT, logBytes: LOG_LIMIT, events: HISTORY_LIMIT, retentionDays: RETENTION_DAYS } };
   }
   start() { this.stopped = false; this.schedule(0); }
@@ -66,6 +70,9 @@ export class MonitorCollector extends EventEmitter {
       } catch { warnings.push("运行记录采集失败，保留上次结果"); }
       try { this.snapshot.resources = await this.resources.sample(this.snapshot.executions); }
       catch { warnings.push("本机资源暂不可用"); }
+      // Do not block the local Console snapshot on a slow or offline peer.
+      void this.peers.poll().catch(() => undefined);
+      this.snapshot.remote = { ...this.peers.readings };
       if (Date.now() - this.baseAt > 30_000) {
         try {
           const base = readConsoleSnapshot(this.options.stateDir, this.options.release ?? "independent-monitor");

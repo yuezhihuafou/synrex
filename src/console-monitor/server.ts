@@ -104,6 +104,10 @@ export function createMonitorApp(options: MonitorServerOptions) {
   app.get("/console/api/diagnostics", (req, res) => {
     res.json({ events: collector.stats.events(String(req.query.q ?? "").slice(0, 120), String(req.query.request ?? "").slice(0, 120)), receipts: collector.stats.receipts() });
   });
+  app.get("/console/api/trace/:request", (req, res) => {
+    try { res.json(collector.stats.trace(String(req.params.request))); }
+    catch { res.status(400).json({ error: "Invalid request ID" }); }
+  });
   app.get("/console/api/export", (_req, res) => {
     res.attachment("synrex-diagnostics.json").json({ exportedAt: new Date().toISOString(), node: collector.snapshot.source, events: collector.stats.events(), receipts: collector.stats.receipts(), warnings: collector.snapshot.warnings });
   });

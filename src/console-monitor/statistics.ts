@@ -4,11 +4,13 @@ import { mkdirSync } from "node:fs";
 import { open } from "node:fs/promises";
 import path from "node:path";
 import { normalizeEvent, type MonitorEvent } from "./events.js";
+import { buildTrace } from "./trace-view.js";
 import type { Execution, MetricSummary, Statistics, StatsFilter } from "./types.js";
 
 export const HISTORY_LIMIT = 20_000;
 export const RETENTION_DAYS = 7;
 type RequestMetric = { id: string; at: string; tool: string; workspace: string; status: string; duration: number | null };
+type MinuteRow = { minute: string; tool: string; workspace: string; count: number; ok: number; errors: number; incomplete: number };
 export function percentile(values: number[], fraction: number): number | null {
   if (!values.length) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -44,13 +46,34 @@ export class StatisticsStore {
       create index if not exists runs_at on runs(at);
       create table if not exists receipts (id text primary key, at text not null, action text, target text, status text);
       create table if not exists cursors (file text primary key, inode text not null, offset integer not null);
+      create table if not exists request_minutes (
+        minute text not null, tool text not null, workspace text not null,
+        count integer not null default 0, ok integer not null default 0,
+        errors integer not null default 0, incomplete integer not null default 0,
+        primary key(minute,tool,workspace));
+      create index if not exists request_minutes_at on request_minutes(minute);
     `);
     this.db.prepare("insert or ignore into meta values ('started', ?)").run(new Date().toISOString());
     const normalizer = this.db.prepare("select value from meta where key='normalizer'").get() as {value:string}|undefined;
     if(normalizer?.value!=="2") { this.db.exec("delete from cursors"); this.db.prepare("insert or replace into meta values ('normalizer','2')").run(); }
     this.observationStartedAt = (this.db.prepare("select value from meta where key='started'").get() as { value: string }).value;
+    // Upgrade legacy monitor databases without scanning or modifying production stores.
+    if (!this.db.prepare("select value from meta where key='request_minutes_v1'").get()) {
+      this.db.transaction(() => {
+        for (const row of this.db.prepare("select id,at,tool,workspace,status,duration from requests").iterate() as Iterable<RequestMetric>) this.adjustMinute(row, 1);
+        this.db.prepare("insert into meta values ('request_minutes_v1','1')").run();
+      })();
+    }
   }
   close() { this.db.close(); }
+
+  private adjustMinute(row: RequestMetric, delta: 1 | -1) {
+    const minute = row.at.slice(0, 16) + ":00.000Z";
+    const outcome = { ok: Number(row.status === "ok"), errors: Number(row.status === "error"), incomplete: Number(row.status === "incomplete") };
+    this.db.prepare(`insert into request_minutes(minute,tool,workspace,count,ok,errors,incomplete) values (?,?,?,?,?,?,?)
+      on conflict(minute,tool,workspace) do update set count=count+excluded.count,ok=ok+excluded.ok,errors=errors+excluded.errors,incomplete=incomplete+excluded.incomplete`)
+      .run(minute, row.tool, row.workspace, delta, delta * outcome.ok, delta * outcome.errors, delta * outcome.incomplete);
+  }
 
   ingest(entries: unknown[]) {
     const insert = this.db.prepare("insert or ignore into events values (?,?,?,?,?,?,?)");
@@ -75,7 +98,9 @@ export class StatisticsStore {
           r.duration = entry.durationMs ?? (r.started ? Math.max(0, Date.parse(entry.ts) - Date.parse(r.started)) : null);
         }
         if (r.tool_error) r.status = "error";
+        if (old) this.adjustMinute(old, -1);
         save.run(r);
+        this.adjustMinute(r, 1);
       }
     })();
     this.prune();
@@ -114,36 +139,51 @@ export class StatisticsStore {
   }
 
   query(filter: StatsFilter): Statistics {
-    const until = new Date(), since = new Date(until.getTime() - Math.min(7 * 1440, Math.max(1, filter.minutes)) * 60_000).toISOString();
+    const until = new Date(), since = new Date(Math.floor((until.getTime() - Math.min(7 * 1440, Math.max(1, filter.minutes)) * 60_000) / 60_000) * 60_000).toISOString();
     const clauses = ["at >= ?"], args: string[] = [since];
     if (filter.tool) { clauses.push("tool = ?"); args.push(filter.tool); }
     if (filter.workspace) { clauses.push("workspace = ?"); args.push(filter.workspace); }
     const rows = this.db.prepare(`select id,at,tool,workspace,status,duration from requests where ${clauses.join(" and ")} order by at desc limit ${HISTORY_LIMIT}`).all(...args) as RequestMetric[];
-    const names = [...new Set(rows.map(r => r.tool || "HTTP/MCP"))];
-    const tools = names.map(name => ({ name, ...summarize(rows.filter(r => (r.tool || "HTTP/MCP") === name)) }));
+    const minuteClauses = ["minute >= ?"], minuteArgs = [since];
+    if (filter.tool) { minuteClauses.push("tool = ?"); minuteArgs.push(filter.tool); }
+    if (filter.workspace) { minuteClauses.push("workspace = ?"); minuteArgs.push(filter.workspace); }
+    const minuteRows = this.db.prepare(`select minute,tool,workspace,count,ok,errors,incomplete from request_minutes where ${minuteClauses.join(" and ")} and count > 0`).all(...minuteArgs) as MinuteRow[];
+    const totals = (items: MinuteRow[]) => ({ count: items.reduce((n,r)=>n+r.count,0),ok:items.reduce((n,r)=>n+r.ok,0),
+      errors:items.reduce((n,r)=>n+r.errors,0),incomplete:items.reduce((n,r)=>n+r.incomplete,0) });
+    const merge = (items: MinuteRow[], samples: RequestMetric[]): MetricSummary => ({ ...totals(items), latencyCount:summarize(samples).latencyCount,
+      p50:percentile(samples.flatMap(r=>r.duration === null?[]:[r.duration]),.5), p95:percentile(samples.flatMap(r=>r.duration === null?[]:[r.duration]),.95) });
+    const names = [...new Set(minuteRows.map(r => r.tool || "HTTP/MCP"))];
+    const tools = names.map(name => ({ name, ...merge(minuteRows.filter(r => (r.tool || "HTTP/MCP") === name),rows.filter(r=>(r.tool || "HTTP/MCP")===name)) }));
     const start = Date.parse(since), width = (until.getTime() - start) / 24;
     const series = Array.from({ length: 24 }, (_, i) => ({ at: new Date(start + i * width).toISOString(), count: 0, errors: 0 }));
-    for (const row of rows) { const bucket = series[Math.min(23, Math.max(0, Math.floor((Date.parse(row.at) - start) / width)))]; bucket.count++; if (row.status === "error") bucket.errors++; }
+    for (const row of minuteRows) { const bucket = series[Math.min(23, Math.max(0, Math.floor((Date.parse(row.minute) - start) / width)))]; bucket.count += row.count; bucket.errors += row.errors; }
     const runs = this.db.prepare(`select status,duration from runs where at >= ? ${filter.workspace ? "and workspace = ?" : ""} limit ${HISTORY_LIMIT}`).all(...(filter.workspace ? [since, filter.workspace] : [since])) as { status: string; duration: number | null }[];
     const durations = runs.filter(r => r.duration !== null).map(r => r.duration!);
     const stageRows = this.db.prepare(`select id,at,coalesce(tool,'') as tool,coalesce(workspace,'') as workspace,
       coalesce(json_extract(body,'$.stage'),'unknown') as name,
+      coalesce(json_extract(body,'$.nodeId'),'未标注节点') as node,
       case when json_extract(body,'$.outcome')='error' then 'error' else 'ok' end as status,
-      json_extract(body,'$.durationMs') as duration from events where event='stage_finished' and ${clauses.join(" and ")} limit ${HISTORY_LIMIT}`).all(...args) as Array<RequestMetric&{name:string}>;
+      json_extract(body,'$.durationMs') as duration from events where event='stage_finished' and ${clauses.join(" and ")} limit ${HISTORY_LIMIT}`).all(...args) as Array<RequestMetric&{name:string;node:string}>;
     const stages = [...new Set(stageRows.map(x=>x.name))].map(name=>({name,...summarize(stageRows.filter(x=>x.name===name))}));
+    const nodes = [...new Set(stageRows.map(x=>x.node))].map(name=>({name,...summarize(stageRows.filter(x=>x.node===name))}));
     return { since, until: until.toISOString(), observationStartedAt: this.observationStartedAt,
-      coverage: "保留窗口内已观测数据；历史日志可能已轮转，最多 7 天 / 每类 20,000 条。调用成功与任务验收分别统计。",
-      requests: summarize(rows), tools, stages, series,
+      coverage: "请求量与错误量按分钟持久汇总（最多 7 天）；P50/P95 仅来自尚保留的明细样本。节点、阶段仅统计已观测事件，原始日志可能已轮转。工具成功不等于任务验收。",
+      requests: merge(minuteRows, rows), tools, stages, nodes, series, detailSamples:rows.length,
       tasks: { count: runs.length, completed: runs.filter(r => r.status === "completed").length, failed: runs.filter(r => r.status === "failed").length,
         cancelled: runs.filter(r => r.status === "cancelled").length, active: runs.filter(r => ["working", "input_required"].includes(r.status)).length,
         p50: percentile(durations, .5), p95: percentile(durations, .95) },
-      options: { tools: (this.db.prepare("select distinct tool from requests where tool != '' order by tool").all() as { tool: string }[]).map(x => x.tool),
-        workspaces: (this.db.prepare("select distinct workspace from requests where workspace != '' order by workspace").all() as { workspace: string }[]).map(x => x.workspace) } };
+      options: { tools: (this.db.prepare("select distinct tool from request_minutes where tool != '' order by tool").all() as { tool: string }[]).map(x => x.tool),
+        workspaces: (this.db.prepare("select distinct workspace from request_minutes where workspace != '' order by workspace").all() as { workspace: string }[]).map(x => x.workspace) } };
   }
 
   events(query = "", request = "") {
     const rows = this.db.prepare(`select body from events ${request ? "where request_id = ?" : ""} order by at desc limit 400`).all(...(request ? [request] : [])) as { body: string }[];
     return rows.map(x => JSON.parse(x.body) as MonitorEvent).filter(x => JSON.stringify(x).toLowerCase().includes(query.toLowerCase())).slice(0, 200);
+  }
+  trace(request: string) {
+    if (!/^[a-zA-Z0-9_-]{1,110}$/.test(request)) throw new Error("Invalid request identity");
+    const rows = this.db.prepare("select body from events where request_id = ? order by at asc limit 300").all(request) as { body: string }[];
+    return buildTrace(request, rows.map(row => JSON.parse(row.body) as MonitorEvent));
   }
   receipt(id: string, action: string, target: string, status: string) {
     this.db.prepare("insert or ignore into receipts values (?,?,?,?,?)").run(id, new Date().toISOString(), action, target, status);
@@ -157,5 +197,6 @@ export class StatisticsStore {
       this.db.prepare(`delete from ${table} where at < ?`).run(cutoff);
       this.db.exec(`delete from ${table} where rowid in (select rowid from ${table} order by at desc limit -1 offset ${table === "receipts" ? 1000 : HISTORY_LIMIT})`);
     }
+    this.db.prepare("delete from request_minutes where minute < ?").run(cutoff.slice(0,16) + ":00.000Z");
   }
 }

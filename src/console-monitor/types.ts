@@ -1,4 +1,5 @@
 import type { ConsoleSnapshot } from "../console-snapshot.js";
+import type { PeerReadings } from "./peers.js";
 
 export interface Execution {
   runId: string;
@@ -65,9 +66,11 @@ export interface Statistics {
   requests: MetricSummary;
   tools: Array<MetricSummary & { name: string }>;
   stages: Array<MetricSummary & { name: string }>;
+  nodes: Array<MetricSummary & { name: string }>;
   series: Array<{ at: string; count: number; errors: number }>;
   tasks: { count: number; completed: number; failed: number; cancelled: number; active: number; p50: number | null; p95: number | null };
   options: { tools: string[]; workspaces: string[] };
+  detailSamples: number;
 }
 
 export interface MonitorSnapshot {
@@ -76,6 +79,7 @@ export interface MonitorSnapshot {
   sampleMs: number;
   source: { node: string; release: string; scope: string; management: string };
   resources: Resources | null;
+  remote: PeerReadings;
   executions: Execution[];
   base: ConsoleSnapshot | null;
   warnings: string[];
