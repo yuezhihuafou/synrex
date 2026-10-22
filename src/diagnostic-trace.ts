@@ -82,7 +82,7 @@ export interface DiagnosticEntry {
 
 const SAFE_ID = /^[a-zA-Z0-9_-]{1,110}$/;
 const SAFE_OUTCOME = /^(ok|error)$/;
-const SAFE_NODE_OUTCOME = /^(indeterminate_after_dispatch|not_dispatched|completed_after_host_timeout)$/;
+const SAFE_NODE_OUTCOME = /^(ok|error|indeterminate_after_dispatch|not_dispatched|completed_after_host_timeout)$/;
 const EVENT_NAMES: readonly string[] = [
   "stage_started", "stage_finished", "mcp_body_ready", "mcp_headers_sent",
   "request_stalled", "runtime_started", "runtime_stopping",

@@ -35,6 +35,8 @@ test("concurrent phase traces preserve request identity and redact arbitrary err
 });
 
 test("node queue, delivery and completion join the ingress trace", async () => {
+  assert.equal(sanitizeDiagnostic("node_peer_finished", { outcome: "error" }).outcome, "error");
+  assert.equal(sanitizeDiagnostic("node_peer_finished", { outcome: "ok" }).outcome, "ok");
   const events: DiagnosticEntry[] = [];
   const hub = new NodeLinkHub(2000, 1000, (event, fields) => events.push(sanitizeDiagnostic(event, fields)));
   try {
