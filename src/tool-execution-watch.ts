@@ -18,7 +18,7 @@ export function watchToolExecution(input: {
   emit: ToolExecutionLog;
   warnAfterMs?: number;
   repeatAfterMs?: number;
-}): { finish(outcome: "ok" | "error", receipt?: { taskId?: string; runId?: string }): void } {
+}): { callId: string; finish(outcome: "ok" | "error", receipt?: { taskId?: string; runId?: string; errorCategory?: string; exitCode?: number }): void } {
   const startedAt = performance.now();
   const callId = randomUUID();
   let done = false;
@@ -49,6 +49,7 @@ export function watchToolExecution(input: {
   arm(input.warnAfterMs ?? 20_000);
 
   return {
+    callId,
     finish(outcome, receipt) {
       if (done) return;
       done = true;
@@ -60,6 +61,8 @@ export function watchToolExecution(input: {
         stalled: phase > 0,
         ...(receipt?.taskId ? { taskId: receipt.taskId } : {}),
         ...(receipt?.runId ? { runId: receipt.runId } : {}),
+        ...(receipt?.errorCategory ? { errorCategory: receipt.errorCategory } : {}),
+        ...(receipt?.exitCode !== undefined ? { exitCode: receipt.exitCode } : {}),
       });
     },
   };

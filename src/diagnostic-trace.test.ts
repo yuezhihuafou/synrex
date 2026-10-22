@@ -53,10 +53,10 @@ test("small persistent diagnostic log keeps only safe metadata and correlates re
   assert.equal(sanitizeDiagnostic("mcp_stream_closed", { responseMode: "sse" }).responseMode, "sse");
 });
 
-test("diagnostic trace rotates at 1 MiB and caps retained data to two files", async (t) => {
+test("diagnostic trace rotates at its configured bound and caps retained data to two files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "rev-diag-rotation-"));
   t.after(() => rm(root, { recursive: true, force: true }));
-  const diagnostics = new DiagnosticTrace(root);
+  const diagnostics = new DiagnosticTrace(root, 64 * 1024);
   // Only a small number of bytes are stored per event. Exercise rotation
   // without needing to write any sensitive payload.
   for (let i = 0; i < 14_000; i++) {
@@ -69,6 +69,8 @@ test("diagnostic trace rotates at 1 MiB and caps retained data to two files", as
   const second = await stat(diagnostics.previousFile);
   assert.ok(first.size <= DIAGNOSTIC_FILE_LIMIT);
   assert.ok(second.size <= DIAGNOSTIC_FILE_LIMIT);
+  assert.ok(first.size <= 64 * 1024);
+  assert.ok(second.size <= 64 * 1024);
   const recent = diagnostics.read({ minutes: 5, limit: 3 });
   assert.equal(recent.length, 3);
   assert.equal(recent.at(-1)?.requestId, "req_13999");

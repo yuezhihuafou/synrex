@@ -56,6 +56,7 @@ import { readReviewRef } from "./review-checkpoints.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { logEvent } from "./logger.js";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
+import { diagnosticTimings, readRunTrace, systemDiagnosticEvents } from "./diagnostic-report.js";
 import { inspectOAuthState } from "./oauth-diagnostics.js";
 import { getOAuthEnrollmentStatus, lockOAuthEnrollment, openOAuthEnrollmentWindow, usePasswordOnlyEnrollment } from "./oauth-enrollment.js";
 import { pruneStaleManagedWorktrees } from "./worktree-prune.js";
@@ -123,13 +124,16 @@ async function main(argv: string[]): Promise<void> {
       await runWorkflowCommand(args, loadConfig());
       return;
     case "diagnose": {
+      const summaryOnly = args.includes("--summary");
+      const withSystem = args.includes("--system");
+      const diagnoseArgs = args.filter((arg) => arg !== "--summary" && arg !== "--system");
       const options = new Map<string, string>();
-      for (let i = 0; i < args.length; i += 2) {
-        if (i + 1 >= args.length || !["--minutes", "--conversation", "--title"].includes(args[i]!)
-          || options.has(args[i]!) || !args[i + 1]) {
-          throw new Error("Usage: synrex diagnose [--minutes 1-1440] [--conversation conv_<id>] [--title <exact title>]");
+      for (let i = 0; i < diagnoseArgs.length; i += 2) {
+        if (i + 1 >= diagnoseArgs.length || !["--minutes", "--conversation", "--title", "--request", "--run"].includes(diagnoseArgs[i]!)
+          || options.has(diagnoseArgs[i]!) || !diagnoseArgs[i + 1]) {
+          throw new Error("Usage: synrex diagnose [--minutes 1-1440] [--conversation conv_<id>] [--title <exact title>] [--request <id>] [--run <run_id>] [--summary]");
         }
-        options.set(args[i]!, args[i + 1]!);
+        options.set(diagnoseArgs[i]!, diagnoseArgs[i + 1]!);
       }
       const rawMinutes = options.get("--minutes");
       const minutes = rawMinutes === undefined ? 30 : Number(rawMinutes);
@@ -140,10 +144,24 @@ async function main(argv: string[]): Promise<void> {
       if (conversationId && !/^conv_[0-9a-f]{32}$/.test(conversationId)) {
         throw new Error("Invalid conversation diagnostic identifier");
       }
-      const traces = new DiagnosticTrace(loadConfig().stateDir).read({
-        minutes, limit: 120, conversationId, title: options.get("--title"),
+      const requestId = options.get("--request");
+      if (requestId && !/^[a-zA-Z0-9_-]{1,110}$/.test(requestId)) throw new Error("Invalid request identifier");
+      let traces = new DiagnosticTrace(loadConfig().stateDir).read({
+        minutes, limit: requestId || summaryOnly ? 20_000 : 120, conversationId, title: options.get("--title"), requestId,
       });
-      console.log(JSON.stringify({ minutes, count: traces.length, ...summarizeDiagnosticTrace(traces), events: traces }, null, 2));
+      const runs = new Set(traces.flatMap((entry) => entry.runId ? [entry.runId] : []));
+      if (options.has("--run")) runs.add(options.get("--run")!);
+      for (const runId of [...runs].slice(-50)) traces.push(...readRunTrace(runId));
+      traces = traces.sort((a, b) => a.ts.localeCompare(b.ts));
+      const report = summarizeDiagnosticTrace(traces);
+      console.log(JSON.stringify({ minutes, count: traces.length, ...report,
+        window: { firstEventAt: traces[0]?.ts ?? null, lastEventAt: traces.at(-1)?.ts ?? null, queriedMinutes: minutes },
+        requestCount: report.requests.length, requests: summaryOnly ? report.requests.slice(-20) : report.requests,
+        timings: diagnosticTimings(traces),
+        ...(summaryOnly ? {} : { events: traces }),
+        ...(withSystem ? { system: systemDiagnosticEvents(minutes) } : {}),
+        limits: ["HTTP finish is local flush, not client receipt", "ChatGPT scheduling, reasoning and UI are not observable", "Cloudflare edge timing requires separate edge logs", "Rotated windows can omit earlier stages; remote run traces are on their owner node"],
+      }, null, 2));
       return;
     }
     case "show-changes":

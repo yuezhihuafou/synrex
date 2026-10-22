@@ -4,6 +4,9 @@ import { setTimeout as wait } from "node:timers/promises";
 import type { ExecutionNode } from "./protocol.js";
 import type { NodeLinkRequest } from "./link-hub.js";
 import type { ToolInvoker } from "../tool-invoker.js";
+import { runWithRequestLogContext } from "../logger.js";
+import { traceEvent, traceStage, errorCategory } from "../trace-stages.js";
+import type { DiagnosticEvent } from "../diagnostic-trace.js";
 
 export interface NodeWorkerClientOptions {
   gatewayUrl: string;
@@ -17,6 +20,7 @@ export interface NodeWorkerClientOptions {
   stateDir?: string;
   maxConcurrentCalls?: number;
   onMetric?: (event: string, fields: Record<string, string | number | boolean>) => void;
+  onDiagnostic?: (event: DiagnosticEvent, fields: Record<string, unknown>) => void;
 }
 
 interface NodeRequestReceipt {
@@ -98,8 +102,9 @@ export class NodeWorkerClient {
         const results = await Promise.allSettled(pollers);
         const failed = results.find((result) => result.status === "rejected");
         if (failed && failed.status === "rejected") throw failed.reason;
-      } catch {
+      } catch (error) {
         if (this.stopped) return;
+        try { this.options.onDiagnostic?.("node_transport", { nodeId: this.options.node.id, outcome: "error", errorCategory: errorCategory(error), queuedMs: backoffMs }); } catch { /* Observational. */ }
         await wait(backoffMs, undefined, { signal: this.stopController.signal }).catch(() => undefined);
         backoffMs = Math.min(10_000, backoffMs * 2);
       }
@@ -128,6 +133,13 @@ export class NodeWorkerClient {
   // Reads may overlap, while all non-read operations execute exclusively for
   // their workspace. Preserve delivery order without serializing other projects.
   private schedule(request: NodeLinkRequest): Promise<void> {
+    const receivedAt = performance.now();
+    const fields = { requestId: request.id, nodeRequestId: request.id, traceId: request.call.meta?.["devspace/traceId"], nodeId: this.options.node.id, tool: request.call.name };
+    try { this.options.onDiagnostic?.("node_peer_received", fields); } catch { /* Observational. */ }
+    const execute = () => {
+      try { this.options.onDiagnostic?.("node_peer_started", { ...fields, queuedMs: Math.round(performance.now() - receivedAt) }); } catch { /* Observational. */ }
+      return this.execute(request);
+    };
     const workspaceId = request.call.arguments.workspaceId;
     const key = typeof workspaceId === "string" ? workspaceId : "__global__";
     let gate = this.workspaceGates.get(key);
@@ -138,14 +150,14 @@ export class NodeWorkerClient {
     gate.pending += 1;
     let execution: Promise<void>;
     if (isParallelRead(request.call.name)) {
-      execution = gate.tail.then(() => this.execute(request));
+      execution = gate.tail.then(execute);
       const settled = execution.then(() => undefined, () => undefined);
       gate.reads.add(settled);
       void settled.then(() => gate!.reads.delete(settled));
     } else {
       const previous = Promise.all([gate.tail, ...gate.reads]);
       gate.reads.clear();
-      execution = previous.then(() => this.execute(request));
+      execution = previous.then(execute);
       gate.tail = execution.then(() => undefined, () => undefined);
     }
     return execution.finally(() => {
@@ -159,7 +171,12 @@ export class NodeWorkerClient {
   private async execute(request: NodeLinkRequest): Promise<void> {
     const startedAt = performance.now();
     try {
-      await this.executeWithReceipt(request);
+      const parent = request.call.meta?.["devspace/parentRequestId"];
+      const trace = request.call.meta?.["devspace/traceId"];
+      await runWithRequestLogContext({ requestId: typeof parent === "string" ? parent : request.id,
+        traceId: typeof trace === "string" ? trace : request.id, nodeRequestId: request.id, path: "peer",
+        emitDiagnostic: this.options.onDiagnostic,
+      }, () => traceStage("peer_execute", () => this.executeWithReceipt(request), { nodeId: this.options.node.id, tool: request.call.name }));
     } finally {
       this.options.onMetric?.("node_execution", {
         tool: request.call.name,
@@ -237,11 +254,13 @@ export class NodeWorkerClient {
       await this.writeReceipt(receipt);
     }
 
-    await this.request("complete", {
+    traceEvent("node_peer_finished", { tool: request.call.name, outcome: receipt.error || receipt.result?.isError === true ? "error" : "ok" });
+    await traceStage("peer_ack", () => this.request("complete", {
       nodeId: this.options.node.id,
       requestId: request.id,
       ...(receipt.error ? { error: receipt.error } : { result: receipt.result }),
-    }, 30_000);
+    }, 30_000));
+    traceEvent("node_peer_acknowledged", { tool: request.call.name });
     await this.deleteReceipt(request.id);
   }
 

@@ -1,0 +1,38 @@
+import { currentRequestLogContext } from "./logger.js";
+import type { DiagnosticEvent } from "./diagnostic-trace.js";
+
+export function errorCategory(error: unknown): string {
+  const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+  if (value?.code === "ENOENT") return "not_found";
+  if (value?.code === "EACCES" || value?.code === "EPERM") return "permission";
+  if (value?.name === "AbortError" || value?.name === "TimeoutError") return "timeout";
+  const message = typeof value?.message === "string" ? value.message : "";
+  if (/^Invalid patch:/.test(message)) return "invalid_input";
+  if (/indeterminate|interrupted after/i.test(message)) return "indeterminate";
+  if (/offline|unavailable|did not complete request/i.test(message)) return "transport";
+  return "internal";
+}
+
+/** Metadata only. Diagnostics must not change the outcome of primary work. */
+export function traceEvent(event: DiagnosticEvent, fields: Record<string, unknown> = {}): void {
+  const context = currentRequestLogContext();
+  try {
+    context?.emitDiagnostic?.(event, {
+      requestId: context.requestId, traceId: context.traceId ?? context.requestId,
+      callId: context.callId, nodeRequestId: context.nodeRequestId, ...fields,
+    });
+  } catch { /* Observational only. */ }
+}
+
+export async function traceStage<T>(stage: string, operation: () => T | Promise<T>, fields: Record<string, unknown> = {}): Promise<T> {
+  const started = performance.now();
+  traceEvent("stage_started", { ...fields, stage });
+  try {
+    const result = await operation();
+    traceEvent("stage_finished", { ...fields, stage, outcome: "ok", durationMs: Math.round(performance.now() - started) });
+    return result;
+  } catch (error) {
+    traceEvent("stage_finished", { ...fields, stage, outcome: "error", errorCategory: errorCategory(error), durationMs: Math.round(performance.now() - started) });
+    throw error;
+  }
+}

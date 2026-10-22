@@ -22,6 +22,11 @@ export interface RequestLogContext {
   requestId: string;
   path: string;
   oauthPhase?: OAuthHttpPhase;
+  traceId?: string;
+  startedAt?: number;
+  callId?: string;
+  nodeRequestId?: string;
+  emitDiagnostic?: (event: import("./diagnostic-trace.js").DiagnosticEvent, fields: Record<string, unknown>) => void;
 }
 
 const requestLogContext = new AsyncLocalStorage<RequestLogContext>();

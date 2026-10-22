@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ControlPlaneStore, WorkspaceRoute } from "./store.js";
 import { assertNodeProtocolCompatible } from "./protocol.js";
+import { traceStage } from "../trace-stages.js";
 
 export interface NodeToolCall {
   name: string;
@@ -38,7 +39,7 @@ export class MultiNodeRouter {
     const startedAt = performance.now();
     let success = false;
     try {
-      const result = await this.transport.call(nodeId, call);
+      const result = await traceStage("routing", () => this.transport.call(nodeId, call), { nodeId, tool: call.name });
       success = true;
       return result;
     } finally {

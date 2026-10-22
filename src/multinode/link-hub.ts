@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { NodeToolCall, NodeToolResult, NodeTransport } from "./router.js";
+import { currentRequestLogContext } from "../logger.js";
+import type { DiagnosticEvent } from "../diagnostic-trace.js";
 
 export interface NodeLinkRequest {
   id: string;
@@ -30,23 +32,29 @@ export class NodeLinkHub implements NodeTransport {
   private readonly pollWaiters = new Map<string, Set<PollWaiter>>();
   private closed = false;
   private readonly acknowledgements = new Map<string, { nodeId: string; expiresAt: number }>();
-  private readonly timedOut = new Map<string, { nodeId: string; expiresAt: number }>();
+  private readonly timedOut = new Map<string, { nodeId: string; expiresAt: number; fields?: Record<string, unknown> }>();
 
   constructor(
     private readonly requestTimeoutMs: number,
     private readonly deliveryLeaseMs = Math.min(30_000, Math.max(1_000, Math.floor(requestTimeoutMs / 3))),
-    private readonly onEvent?: (event: "node_request_timeout" | "node_late_completion", fields: {
-      requestId: string; nodeId: string; tool?: string; outcome: string;
-    }) => void,
+    private readonly onEvent?: (event: DiagnosticEvent, fields: Record<string, unknown>) => void,
   ) {}
 
   call(nodeId: string, input: NodeToolCall): Promise<NodeToolResult> {
     if (this.closed) return Promise.reject(new Error("Node link hub is closed."));
+    const context = currentRequestLogContext();
     const request: NodeLinkRequest = {
       id: "nrq_" + randomUUID(),
-      call: input,
+      call: { ...input, meta: { ...input.meta,
+        "devspace/traceId": context?.traceId ?? context?.requestId,
+        "devspace/parentRequestId": context?.requestId,
+        "devspace/callId": context?.callId,
+      } },
       createdAt: new Date().toISOString(),
     };
+    const fields = { requestId: request.id, nodeRequestId: request.id, traceId: context?.traceId ?? context?.requestId,
+      callId: context?.callId, nodeId, tool: input.name };
+    this.emitEvent("node_queued", fields);
     return new Promise<NodeToolResult>((resolve, reject) => {
       const pending: PendingDispatch = {
         nodeId,
@@ -56,8 +64,8 @@ export class NodeLinkHub implements NodeTransport {
         timeout: setTimeout(() => {
           this.removePending(nodeId, request.id);
           const outcome = pending.delivered ? "indeterminate_after_dispatch" : "not_dispatched";
-          if (pending.delivered) this.rememberTimeout(nodeId, request.id);
-          this.emitEvent("node_request_timeout", { requestId: request.id, nodeId, tool: input.name, outcome });
+          if (pending.delivered) this.rememberTimeout(nodeId, request.id, fields);
+          this.emitEvent("node_request_timeout", { ...fields, outcome });
           const error = new Error(`Node ${nodeId} did not complete request ${request.id} within ${this.requestTimeoutMs}ms (${outcome}).`
             + (pending.delivered ? " The remote operation may still be running or completed. Inspect its owner before retrying; do not replay a mutating operation." : " The request was never delivered."));
           for (const waiter of pending.waiters) waiter.reject(error);
@@ -72,6 +80,7 @@ export class NodeLinkHub implements NodeTransport {
         clearTimeout(waiter.timeout);
         pending.delivered = true;
         pending.deliveredAt = Date.now();
+        this.emitEvent("node_delivered", { ...fields, queuedMs: Date.now() - Date.parse(request.createdAt) });
         waiter.resolve(request);
         return;
       }
@@ -112,6 +121,7 @@ export class NodeLinkHub implements NodeTransport {
     }
     this.removePending(nodeId, requestId);
     this.rememberAcknowledgement(nodeId, requestId);
+    this.emitEvent("node_completed", { ...this.requestFields(pending), outcome: result.isError === true ? "error" : "ok", durationMs: Date.now() - Date.parse(pending.request.createdAt) });
     for (const waiter of pending.waiters) waiter.resolve(result);
     return true;
   }
@@ -126,6 +136,7 @@ export class NodeLinkHub implements NodeTransport {
     }
     this.removePending(nodeId, requestId);
     this.rememberAcknowledgement(nodeId, requestId);
+    this.emitEvent("node_completed", { ...this.requestFields(pending), outcome: "error", errorCategory: "transport", durationMs: Date.now() - Date.parse(pending.request.createdAt) });
     const error = new Error(message);
     for (const waiter of pending.waiters) waiter.reject(error);
     return true;
@@ -152,18 +163,18 @@ export class NodeLinkHub implements NodeTransport {
     this.timedOut.clear();
   }
 
-  private rememberTimeout(nodeId: string, requestId: string): void {
+  private rememberTimeout(nodeId: string, requestId: string, fields?: Record<string, unknown>): void {
     const now = Date.now();
     for (const [id, entry] of this.timedOut) if (entry.expiresAt <= now) this.timedOut.delete(id);
     while (this.timedOut.size >= 4096) this.timedOut.delete(this.timedOut.keys().next().value!);
-    this.timedOut.set(requestId, { nodeId, expiresAt: now + 300_000 });
+    this.timedOut.set(requestId, { nodeId, expiresAt: now + 300_000, fields });
   }
 
   private recordLateCompletion(nodeId: string, requestId: string): boolean {
     const entry = this.timedOut.get(requestId);
     if (!entry || entry.expiresAt <= Date.now()) return false;
     if (entry.nodeId !== nodeId) throw new Error(`Request ${requestId} does not belong to node ${nodeId}.`);
-    this.emitEvent("node_late_completion", { requestId, nodeId, outcome: "completed_after_host_timeout" });
+    this.emitEvent("node_late_completion", { ...entry.fields, requestId, nodeRequestId: requestId, nodeId, outcome: "completed_after_host_timeout" });
     this.timedOut.delete(requestId);
     this.rememberAcknowledgement(nodeId, requestId);
     // Acknowledge receipt so the peer can drop its durable completion record.
@@ -171,9 +182,12 @@ export class NodeLinkHub implements NodeTransport {
     return true;
   }
 
-  private emitEvent(event: "node_request_timeout" | "node_late_completion", fields: {
-    requestId: string; nodeId: string; tool?: string; outcome: string;
-  }): void {
+  private requestFields(pending: PendingDispatch): Record<string, unknown> {
+    return { requestId: pending.request.id, nodeRequestId: pending.request.id, nodeId: pending.nodeId, tool: pending.request.call.name,
+      traceId: pending.request.call.meta?.["devspace/traceId"], callId: pending.request.call.meta?.["devspace/callId"] };
+  }
+
+  private emitEvent(event: DiagnosticEvent, fields: Record<string, unknown>): void {
     try { this.onEvent?.(event, fields); }
     catch { /* Diagnostic emitters must never strand the pending RPC. */ }
   }
@@ -218,6 +232,7 @@ export class NodeLinkHub implements NodeTransport {
       if (!this.pendingById.has(pending.request.id)) continue;
       pending.delivered = true;
       pending.deliveredAt = Date.now();
+      this.emitEvent("node_delivered", { ...this.requestFields(pending), queuedMs: Date.now() - Date.parse(pending.request.createdAt) });
       if (queue.length === 0) this.queues.delete(nodeId);
       return pending;
     }
@@ -235,6 +250,7 @@ export class NodeLinkHub implements NodeTransport {
         || pending.deliveredAt > cutoff
       ) continue;
       pending.deliveredAt = Date.now();
+      this.emitEvent("node_delivered", { ...this.requestFields(pending), queuedMs: Date.now() - Date.parse(pending.request.createdAt), phase: 1 });
       return pending;
     }
     return undefined;

@@ -7,15 +7,29 @@ import {
   renameSync,
   statSync,
 } from "node:fs";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 
-// Two small fixed-size files. These are *diagnostics*, not command output logs.
+// Two bounded files (16 MiB total). These are diagnostics, not command output logs.
 // Never record MCP arguments, shell command text, OAuth headers or error messages.
-export const DIAGNOSTIC_FILE_LIMIT = 1024 * 1024;
+export const DIAGNOSTIC_FILE_LIMIT = 8 * 1024 * 1024;
+const BOOT_ID = randomUUID();
+export const diagnosticRuntime = {
+  bootId: BOOT_ID, pid: process.pid,
+  revision: (() => { try {
+    const value = JSON.parse(readFileSync(new URL("./build-info.json", import.meta.url), "utf8")) as { revision?: unknown };
+    return typeof value.revision === "string" && /^[a-f0-9]{40}$/.test(value.revision) ? value.revision : undefined;
+  } catch { return undefined; } })(),
+};
 const DIAGNOSTIC_DIR = "diagnostics";
 const DIAGNOSTIC_FILE = "recent.jsonl";
 
 export type DiagnosticEvent =
+  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent"
+  | "request_stalled" | "runtime_started" | "runtime_stopping"
+  | "node_queued" | "node_delivered" | "node_completed" | "node_peer_received" | "node_peer_started" | "node_peer_finished" | "node_peer_acknowledged" | "node_transport"
+  | "task_created" | "task_runner_started" | "task_spawned" | "task_first_output" | "task_finished" | "task_notification"
+  | "mailbox_registered" | "mailbox_delivered" | "mailbox_acknowledged" | "mailbox_error" | "learning_error"
   | "conversation_labeled"
   | "node_request_timeout"
   | "node_late_completion"
@@ -30,6 +44,23 @@ export type DiagnosticEvent =
   | "tool_execution_finished";
 
 export interface DiagnosticEntry {
+  traceId?: string;
+  nodeRequestId?: string;
+  nodeId?: string;
+  bootId?: string;
+  revision?: string;
+  pid?: number;
+  stage?: string;
+  rpcMethod?: string;
+  rpcIdHash?: string;
+  edgeRay?: string;
+  errorCategory?: string;
+  errorCode?: string;
+  inputBytes?: number;
+  outputBytes?: number;
+  queuedMs?: number;
+  exitCode?: number;
+  signal?: string;
   ts: string;
   event: DiagnosticEvent;
   requestId?: string;
@@ -53,6 +84,11 @@ const SAFE_ID = /^[a-zA-Z0-9_-]{1,110}$/;
 const SAFE_OUTCOME = /^(ok|error)$/;
 const SAFE_NODE_OUTCOME = /^(indeterminate_after_dispatch|not_dispatched|completed_after_host_timeout)$/;
 const EVENT_NAMES: readonly string[] = [
+  "stage_started", "stage_finished", "mcp_body_ready", "mcp_headers_sent",
+  "request_stalled", "runtime_started", "runtime_stopping",
+  "node_queued", "node_delivered", "node_completed", "node_peer_received", "node_peer_started", "node_peer_finished", "node_peer_acknowledged", "node_transport",
+  "task_created", "task_runner_started", "task_spawned", "task_first_output", "task_finished", "task_notification",
+  "mailbox_registered", "mailbox_delivered", "mailbox_acknowledged", "mailbox_error", "learning_error",
   "conversation_labeled", "node_request_timeout", "node_late_completion",
   "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
@@ -72,6 +108,25 @@ function boundedNumber(value: unknown, max: number): number | undefined {
 export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string, unknown> = {}): DiagnosticEntry {
   if (!EVENT_NAMES.includes(event)) throw new Error("Unsupported diagnostic event");
   const item: DiagnosticEntry = { ts: new Date().toISOString(), event };
+  const patterns: Partial<Record<keyof DiagnosticEntry, RegExp>> = {
+    traceId: SAFE_ID, nodeRequestId: SAFE_ID, nodeId: SAFE_ID, bootId: SAFE_ID,
+    revision: /^[a-f0-9]{40}$/,
+    stage: /^(body|auth|mcp_dispatch|routing|tool_handler|learning|mailbox|result_packaging|task_launch|task_initial_wait|peer_execute|peer_ack)$/,
+    rpcMethod: /^(initialize|notifications\/initialized|notifications\/cancelled|tools\/call|tools\/list|resources\/list|resources\/read|resources\/templates\/list|prompts\/list|prompts\/get|ping|unknown|batch)$/,
+    rpcIdHash: /^[a-f0-9]{24}$/, edgeRay: /^[a-fA-F0-9]{8,32}(?:-[A-Za-z]{3})?$/,
+    errorCategory: /^(not_found|permission|timeout|invalid_input|indeterminate|transport|internal|tool_error|command_exit|cancelled|auth|protocol)$/,
+    errorCode: /^(ENOENT|EACCES|EPERM|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ABORT_ERR|EPIPE|ERR_STREAM_PREMATURE_CLOSE)$/,
+    signal: /^SIG(?:TERM|KILL|INT|ABRT|SEGV|HUP|PIPE)$/,
+  };
+  for (const [key, pattern] of Object.entries(patterns)) {
+    const value = boundedString(fields[key], pattern!);
+    if (value) (item as unknown as Record<string, unknown>)[key] = value;
+  }
+  for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs"] as const) {
+    const value = boundedNumber(fields[key], Number.MAX_SAFE_INTEGER);
+    if (value !== undefined) item[key] = value;
+  }
+  if (typeof fields.exitCode === "number" && Number.isInteger(fields.exitCode) && fields.exitCode >= -1 && fields.exitCode <= 65535) item.exitCode = fields.exitCode;
   const requestId = boundedString(fields.requestId, SAFE_ID);
   const callId = boundedString(fields.callId, SAFE_ID);
   const workspaceId = boundedString(fields.workspaceId, SAFE_ID);
@@ -114,19 +169,19 @@ export class DiagnosticTrace {
   readonly previousFile: string;
   private warned = false;
 
-  constructor(stateDir: string) {
+  constructor(stateDir: string, private readonly fileLimit = DIAGNOSTIC_FILE_LIMIT) {
     this.file = path.join(stateDir, DIAGNOSTIC_DIR, DIAGNOSTIC_FILE);
     this.previousFile = this.file + ".1";
   }
 
   record(event: DiagnosticEvent, fields: Record<string, unknown> = {}): void {
     try {
-      const entry = sanitizeDiagnostic(event, fields);
+      const entry = sanitizeDiagnostic(event, { ...diagnosticRuntime, ...fields });
       const line = JSON.stringify(entry) + "\n";
       const dir = path.dirname(this.file);
       mkdirSync(dir, { recursive: true, mode: 0o700 });
       chmodSync(dir, 0o700);
-      if (existsSync(this.file) && statSync(this.file).size + Buffer.byteLength(line) > DIAGNOSTIC_FILE_LIMIT) {
+      if (existsSync(this.file) && statSync(this.file).size + Buffer.byteLength(line) > this.fileLimit) {
         renameSync(this.file, this.previousFile);
       }
       appendFileSync(this.file, line, { encoding: "utf8", mode: 0o600 });
@@ -143,7 +198,7 @@ export class DiagnosticTrace {
 
   read(input: { minutes?: number; limit?: number; requestId?: string; conversationId?: string; title?: string } = {}): DiagnosticEntry[] {
     const minutes = Math.min(Math.max(input.minutes ?? 30, 1), 24 * 60);
-    const limit = Math.min(Math.max(input.limit ?? 70, 1), 200);
+    const limit = Math.min(Math.max(input.limit ?? 70, 1), 20_000);
     const cutoff = Date.now() - minutes * 60_000;
     const entries: DiagnosticEntry[] = [];
     for (const file of [this.previousFile, this.file]) {
@@ -166,7 +221,7 @@ export class DiagnosticTrace {
         .map((entry) => entry.conversationId!),
     );
     return entries.filter((entry) => (
-      (!input.requestId || entry.requestId === input.requestId)
+      (!input.requestId || entry.requestId === input.requestId || entry.traceId === input.requestId || entry.nodeRequestId === input.requestId)
       && (!input.conversationId || entry.conversationId === input.conversationId)
       && (!matchedIds || (entry.conversationId !== undefined && matchedIds.has(entry.conversationId)))
     )).slice(-limit);
@@ -174,16 +229,21 @@ export class DiagnosticTrace {
 }
 
 export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
+  const observed = new Map<string, Set<DiagnosticEvent>>();
   const requests = new Map<string, { requestId: string; lastEvent: DiagnosticEvent; conversationId?: string; tool?: string; callId?: string; status?: number; taskId?: string; runId?: string; lastAt: string }>();
   const conversationTitles = new Map<string, string>();
   for (const entry of entries) {
     if (entry.conversationId && entry.conversationTitle) {
       conversationTitles.set(entry.conversationId, entry.conversationTitle);
     }
-    if (!entry.requestId) continue;
-    const previous = requests.get(entry.requestId);
-    requests.set(entry.requestId, {
-      requestId: entry.requestId,
+    const id = entry.traceId ?? entry.requestId;
+    if (!id) continue;
+    const seen = observed.get(id) ?? new Set<DiagnosticEvent>();
+    seen.add(entry.event);
+    observed.set(id, seen);
+    const previous = requests.get(id);
+    requests.set(id, {
+      requestId: id,
       lastEvent: entry.event,
       ...(entry.conversationId ?? previous?.conversationId
         ? { conversationId: entry.conversationId ?? previous?.conversationId } : {}),
@@ -202,13 +262,13 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
       ...request,
       ...(request.conversationId && conversationTitles.has(request.conversationId)
         ? { conversationTitle: conversationTitles.get(request.conversationId) } : {}),
-      classification: request.lastEvent === "mcp_finished"
+      classification: observed.get(request.requestId)?.has("mcp_finished")
         ? "rev_http_completed"
-        : request.lastEvent === "mcp_closed_early"
+        : observed.get(request.requestId)?.has("mcp_closed_early")
           ? "connection_closed_early"
-          : request.lastEvent === "mcp_failed"
+          : observed.get(request.requestId)?.has("mcp_failed")
             ? "rev_handler_error"
-            : request.lastEvent === "tool_execution_finished"
+            : observed.get(request.requestId)?.has("tool_execution_finished")
               ? "tool_finished_http_not_observed"
               : "rev_incomplete_or_log_window_truncated",
     })),

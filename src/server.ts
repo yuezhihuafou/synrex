@@ -1,6 +1,7 @@
 import { registerOAuthRecovery } from "./oauth-recovery.js";
-import { randomUUID } from "node:crypto";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
+import { traceEvent, traceStage, errorCategory } from "./trace-stages.js";
 import { registerSynrexConsole } from "./console-router.js";
 import { watchToolExecution } from "./tool-execution-watch.js";
 import { hostsDirectory, joinsDirectory } from "./multinode/topology.js";
@@ -34,7 +35,6 @@ import {
 import {
   currentRequestLogContext,
   logEvent,
-  oauthPhaseForPath,
   requestIp,
   requestPath,
   runWithRequestLogContext,
@@ -960,36 +960,45 @@ function withTrackedToolHandlers(
             workspaceId: typeof suppliedInput?.workspaceId === "string" ? suppliedInput.workspaceId : undefined,
             requestId: currentRequestLogContext()?.requestId,
             emit: (level, event, fields) => {
-              const taggedFields = { ...fields, conversationId };
+              const context = currentRequestLogContext();
+              const taggedFields = { ...fields, conversationId, traceId: context?.traceId ?? context?.requestId, nodeRequestId: context?.nodeRequestId };
               diagnostics.record(event, taggedFields);
               if (config.logging.toolCalls || level === "warn") {
                 logEvent(config.logging, level, event, taggedFields);
               }
             },
           });
-          const operation = () => Promise.resolve(handler(...handlerArgs));
+          const parent = currentRequestLogContext();
+          return runWithRequestLogContext({
+            ...parent, requestId: parent?.requestId ?? watch.callId, path: parent?.path ?? "local",
+            traceId: parent?.traceId ?? parent?.requestId ?? watch.callId, callId: watch.callId,
+            emitDiagnostic: parent?.emitDiagnostic ?? ((event, fields) => diagnostics.record(event, fields)),
+          }, async () => {
+          const operation = () => traceStage("tool_handler", () => Promise.resolve(handler(...handlerArgs)), { tool: toolName });
           try {
             const result = trackToolActivity
               ? await trackToolActivity(operation)
               : await operation();
-            await recordLearningToolCall(
+            await traceStage("learning", () => recordLearningToolCall(
               learning,
               workspaces,
               toolName,
               handlerArgs,
               result,
-            );
-            const delivered = await appendCompletionMailbox(
+            ));
+            const delivered = await traceStage("mailbox", () => appendCompletionMailbox(
               mailbox, durableTasks, workspaces, toolName, handlerArgs, result,
-            );
+            ));
             const content = delivered && typeof delivered === "object"
-              ? (delivered as { structuredContent?: { taskId?: unknown; runId?: unknown } }).structuredContent
+              ? (delivered as { structuredContent?: { taskId?: unknown; runId?: unknown; exitCode?: unknown; error_code?: unknown } }).structuredContent
               : undefined;
             const isToolError = delivered && typeof delivered === "object"
               && (delivered as { isError?: unknown }).isError === true;
             watch.finish(isToolError ? "error" : "ok", {
               taskId: typeof content?.taskId === "string" ? content.taskId : undefined,
               runId: typeof content?.runId === "string" ? content.runId : undefined,
+              exitCode: typeof content?.exitCode === "number" ? content.exitCode : undefined,
+              errorCategory: isToolError ? (typeof content?.exitCode === "number" ? "command_exit" : content?.error_code === "INVALID_ARGUMENT" ? "invalid_input" : "tool_error") : undefined,
             });
             return delivered;
           } catch (error) {
@@ -1001,9 +1010,10 @@ function withTrackedToolHandlers(
               undefined,
               error,
             );
-            watch.finish("error");
+            watch.finish("error", { errorCategory: errorCategory(error) });
             throw error;
           }
+          });
         },
       );
     }) as McpRegistrationTarget["registerTool"],
@@ -1040,6 +1050,7 @@ async function appendCompletionMailbox(
     if (toolName === "exec_command"
       && fields?.running === true && typeof fields.taskId === "string") {
       mailbox.register(workspaceId, scope, fields.taskId);
+      traceEvent("mailbox_registered", { workspaceId, taskId: fields.taskId, runId: fields.runId });
     }
     const compat = toolName === "exec_command"
       ? String((input as { cmd?: unknown }).cmd ?? "").trim()
@@ -1050,6 +1061,7 @@ async function appendCompletionMailbox(
       && typeof inspectedTaskId === "string"
       && ["completed", "cancelled", "failed"].includes(String(fields?.status))) {
       mailbox.acknowledge(workspaceId, scope, inspectedTaskId);
+      traceEvent("mailbox_acknowledged", { workspaceId, taskId: inspectedTaskId, runId: fields?.runId });
       return result;
     }
     if (response.isError === true) return result;
@@ -1060,8 +1072,10 @@ async function appendCompletionMailbox(
     const events = await mailbox.collect(workspaceId, scope, (taskId) =>
       durableTasks.get(workspace.root, taskId, { acknowledge: false }),
     );
+    for (const event of events) traceEvent("mailbox_delivered", { workspaceId, taskId: event.taskId, runId: event.runId });
     return appendMailboxEvents(response, events);
-  } catch {
+  } catch (error) {
+    traceEvent("mailbox_error", { workspaceId, errorCategory: errorCategory(error) });
     // A notification must never change, block, or fail the original tool.
     return result;
   }
@@ -1106,8 +1120,9 @@ async function recordLearningToolCall(
       toolOutput: output,
       error,
     });
-  } catch {
+  } catch (error) {
     // Learning is observational and must never change primary tool behavior.
+    traceEvent("learning_error", { stage: "learning", errorCategory: errorCategory(error), tool: toolName });
   }
 }
 
@@ -1124,11 +1139,15 @@ export function createServer(
   const allowedHosts = config.allowedHosts.includes("*")
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
-  const app = createMcpExpressApp({
+  const app = express();
+  const diagnostics = new DiagnosticTrace(config.stateDir);
+  app.use(requestTraceMiddleware(config, diagnostics, requestLogFields));
+  app.use(createMcpExpressApp({
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
-  });
-  const diagnostics = new DiagnosticTrace(config.stateDir);
+  }));
+  app.use(bodyReadyTrace);
+  diagnostics.record("runtime_started");
   registerOAuthRecovery(app, config);
   const mcpUrl = new URL("/mcp", config.publicBaseUrl);
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
@@ -1167,7 +1186,7 @@ export function createServer(
   const linkHub = hostsDirectory(config.cluster.role)
     ? new NodeLinkHub(config.cluster.requestTimeoutMs, undefined, (event, fields) => {
         diagnostics.record(event, fields);
-        logEvent(config.logging, "warn", event, fields);
+        logEvent(config.logging, event === "node_request_timeout" || event === "node_late_completion" ? "warn" : "info", event, fields);
       })
     : undefined;
   if (hostsDirectory(config.cluster.role) && !config.cluster.joinToken) {
@@ -1239,6 +1258,7 @@ export function createServer(
       invoker: toolInvoker,
       stateDir: config.stateDir,
       maxConcurrentCalls: 4,
+      onDiagnostic: (event, fields) => diagnostics.record(event, fields),
       onMetric: (event, fields) => logEvent(config.logging, "info", event, fields),
     });
     nodeWorker.start();
@@ -1274,78 +1294,6 @@ export function createServer(
     app.set("trust proxy", "loopback");
   }
 
-  app.use((req, res, next) => {
-    const requestId = randomUUID();
-    const startedAt = performance.now();
-    const pathAtStart = requestPath(req);
-    const oauthPhase = oauthPhaseForPath(pathAtStart);
-    res.locals.requestId = requestId;
-    if (pathAtStart === "/mcp") diagnostics.record("mcp_received", { requestId, method: req.method });
-
-    const responseMode = () => {
-      const contentType = String(res.getHeader("content-type") ?? "").toLowerCase();
-      return contentType.includes("text/event-stream") ? "sse"
-        : contentType.includes("json") ? "json" : "unknown";
-    };
-
-    res.on("close", () => {
-      if (pathAtStart !== "/mcp" || res.writableFinished) return;
-      const mode = responseMode();
-      const event = mode === "sse" ? "mcp_stream_closed" : "mcp_closed_early";
-      diagnostics.record(event, {
-        requestId,
-        method: req.method,
-        responseMode: mode,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        status: res.statusCode,
-      });
-      logEvent(config.logging, mode === "sse" ? "info" : "warn", event, {
-        requestId,
-        path: pathAtStart,
-        method: req.method,
-        responseMode: mode,
-        elapsedMs: Math.round(performance.now() - startedAt),
-        status: res.statusCode,
-      });
-    });
-
-    res.on("finish", () => {
-      const path = pathAtStart;
-      if (path === "/mcp") diagnostics.record("mcp_finished", {
-        requestId,
-        method: req.method,
-        responseMode: responseMode(),
-        durationMs: Math.round(performance.now() - startedAt),
-        status: res.statusCode,
-      });
-      if (!config.logging.requests) return;
-      if (!config.logging.assets && path.startsWith("/mcp-app-assets")) return;
-
-      logEvent(config.logging, "info", "http_request", {
-        requestId,
-        method: req.method,
-        path,
-        status: res.statusCode,
-        durationMs: Math.round(performance.now() - startedAt),
-        ...requestLogFields(req, config),
-      });
-      if (oauthPhase) {
-        const grantType = oauthPhase === "token" && typeof req.body?.grant_type === "string"
-          ? req.body.grant_type
-          : undefined;
-        logEvent(config.logging, "info", "oauth_http", {
-          requestId,
-          phase: oauthPhase,
-          outcome: res.statusCode < 400 ? "success" : "failure",
-          status: res.statusCode,
-          grantType,
-          path,
-        });
-      }
-    });
-
-    runWithRequestLogContext({ requestId, path: pathAtStart, oauthPhase }, next);
-  });
 
     registerSynrexConsole(app, config);
 
@@ -1382,12 +1330,19 @@ export function createServer(
   app.all("/mcp", async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
     try {
+      const authStarted = performance.now();
+      traceEvent("stage_started", { stage: "auth" });
       await new Promise<void>((resolve, reject) => {
+        const finished = () => resolve();
+        res.once("finish", finished);
         bearerAuth(req, res, (error?: unknown) => {
+          res.off("finish", finished);
           if (error) reject(error);
           else resolve();
         });
       });
+      traceEvent("stage_finished", { stage: "auth", outcome: res.statusCode >= 400 ? "error" : "ok", status: res.statusCode,
+        durationMs: Math.round(performance.now() - authStarted), errorCategory: res.statusCode >= 400 ? "auth" : undefined });
       if (res.headersSent) return;
 
       if (!req.auth?.resource || !oauthProvider.isResourceAllowed(req.auth.resource)) {
@@ -1406,10 +1361,10 @@ export function createServer(
         requestId,
         method: req.method,
       });
-      await mcpNodeHandler(req, res, req.body);
+      await traceStage("mcp_dispatch", () => mcpNodeHandler(req, res, req.body));
       diagnostics.record("mcp_handler_returned", { requestId, method: req.method });
     } catch (error) {
-      diagnostics.record("mcp_failed", { requestId });
+      diagnostics.record("mcp_failed", { requestId, traceId: requestId, errorCategory: errorCategory(error) });
       logEvent(config.logging, "error", "mcp_request_error", {
         requestId,
         error: error instanceof Error ? error.message : String(error),
@@ -1425,6 +1380,16 @@ export function createServer(
     }
   });
 
+  // The SDK parser runs before /mcp. Record parser/size failures without
+  // Express' default error page/log echoing pieces of the request body.
+  app.use((error: unknown, req: Request, res: Response, next: express.NextFunction) => {
+    if (requestPath(req) !== "/mcp") return next(error);
+    const status = (error as { status?: number })?.status === 413 ? 413 : 400;
+    traceEvent("mcp_failed", { errorCategory: "protocol", status });
+    if (!res.headersSent) sendJsonRpcError(res, status, -32700, "Invalid MCP request");
+    else res.destroy();
+  });
+
   let closePromise: Promise<void> | undefined;
   return {
     app,
@@ -1434,6 +1399,7 @@ export function createServer(
     controlPlaneStore,
     close: () => {
       closePromise ??= (async () => {
+        diagnostics.record("runtime_stopping");
         try {
           await mcpHandler.close();
         } catch (error) {

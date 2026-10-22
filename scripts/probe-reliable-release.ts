@@ -136,7 +136,7 @@ try {
     ownerToken: randomBytes(32).toString("base64url"),
     nodeJoinToken: randomBytes(32).toString("base64url"),
   }), { mode: 0o600 });
-  const env = { ...process.env, DEVSPACE_CONFIG_DIR: configDir };
+  const env = { ...process.env, DEVSPACE_CONFIG_DIR: configDir, DEVSPACE_COMPACT_RUN_ROOT: join(scratch, "runs") };
   server = spawn(process.execPath, [join(release, "dist/cli.js"), "serve"], {
     env, stdio: "ignore", detached: process.platform !== "win32",
   });
@@ -207,11 +207,20 @@ try {
   // The private timeline is intentionally bounded and independent of journald.
   const traceFile = join(stateDir, "diagnostics", "recent.jsonl");
   const trace = (await readFile(traceFile, "utf8")).split("\n").filter(Boolean)
-    .map((line) => JSON.parse(line) as { event?: string; requestId?: string });
+    .map((line) => JSON.parse(line) as { event?: string; requestId?: string; stage?: string; runId?: string });
   const completedRequests = new Set(trace.filter((entry) => entry.event === "mcp_finished")
     .map((entry) => entry.requestId));
   assert.ok(trace.some((entry) => entry.event === "tool_execution_finished"
     && completedRequests.has(entry.requestId)), "tool and HTTP request must share a request ID");
+  for (const stage of ["auth", "mcp_dispatch", "tool_handler", "learning", "mailbox", "task_launch", "task_initial_wait"]) {
+    assert.ok(trace.some((entry) => entry.event === "stage_finished" && entry.stage === stage), `missing real HTTP stage ${stage}`);
+  }
+  assert.ok(trace.some((entry) => entry.event === "mcp_body_ready"));
+  assert.ok(trace.some((entry) => entry.event === "mcp_headers_sent"));
+  const runId = trace.find((entry) => entry.event === "task_created" && entry.runId)?.runId;
+  assert.ok(runId);
+  const runTrace = await readFile(join(scratch, "runs", `${runId.slice(4, 8)}-${runId.slice(8, 10)}-${runId.slice(10, 12)}`, runId, "trace.jsonl"), "utf8");
+  for (const event of ["task_created", "task_runner_started", "task_spawned", "task_finished"]) assert.ok(runTrace.includes(event));
   assert.ok((await stat(traceFile)).size < 1024 * 1024);
   const diagnosticOutput = spawnSync(process.execPath, [join(release, "dist/cli.js"), "diagnose", "--minutes", "30"], {
     env, encoding: "utf8", timeout: 5000,
@@ -228,6 +237,7 @@ try {
     persistedThroughRestart: true, durableTaskThroughRestart: true,
     duplicateCreateSafe: true, checkpointReplaySafe: true,
     boundedDiagnosticLog: true, correlatedDiagnosticCli: true,
+    fullServerPhaseTrace: true, perRunLifecycleTrace: true,
     console: { served: true, unauthorizedDenied: true, loginProtected: true, snapshotAuthenticated: true,
       browserRendered },
   }));

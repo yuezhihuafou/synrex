@@ -1162,6 +1162,51 @@ test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) =
   assert.ok(finished.every((entry) => ["json", "sse", "unknown"].includes(entry.responseMode ?? "unknown")));
 });
 
+test("HTTP tracing starts before body upload, covers auth and parser failures", async (t) => {
+  const { root, localBaseUrl, accessToken } = await httpServerFixture(t, "synrex-http-chain-");
+  const { request } = await import("node:http");
+  const d = new DiagnosticTrace(join(root, ".state"));
+  const body = JSON.stringify({ jsonrpc: "2.0", id: "private-rpc-label", method: "tools/list", params: {} });
+  let finishBody: () => void = () => {};
+  const result = new Promise<{ requestId: string; status: number }>((resolve, reject) => {
+    const req = request(`${localBaseUrl}/mcp`, { method: "POST", headers: {
+      authorization: `Bearer ${accessToken}`, "content-type": "application/json", accept: "application/json, text/event-stream", "content-length": Buffer.byteLength(body),
+    } }, (res) => {
+      res.resume();
+      res.once("end", () => resolve({ requestId: String(res.headers["x-synrex-request-id"]), status: res.statusCode! }));
+    });
+    req.once("error", reject);
+    req.write(body.slice(0, 10));
+    finishBody = () => req.end(body.slice(10));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const beforeBody = d.read({ limit: 200 });
+  assert.ok(beforeBody.some((x) => x.event === "mcp_received"));
+  assert.ok(!beforeBody.some((x) => x.event === "mcp_body_ready"));
+  finishBody();
+  const response = await result;
+  assert.equal(response.status, 200);
+  const chain = d.read({ requestId: response.requestId, limit: 200 });
+  assert.ok((chain.find((x) => x.event === "mcp_body_ready")?.durationMs ?? 0) >= 50);
+  assert.ok(chain.some((x) => x.event === "stage_finished" && x.stage === "auth"));
+  assert.ok(chain.some((x) => x.event === "mcp_finished"));
+  assert.ok(!JSON.stringify(chain).includes("private-rpc-label"));
+  const malformed = await fetch(`${localBaseUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json" }, body: '{"secret": broken' });
+  assert.equal(malformed.status, 400);
+  const failed = d.read({ requestId: malformed.headers.get("x-synrex-request-id")!, limit: 200 });
+  assert.ok(failed.some((x) => x.event === "mcp_failed" && x.errorCategory === "protocol"));
+  assert.ok(failed.some((x) => x.event === "mcp_finished" && x.status === 400));
+  const aborted = request(`${localBaseUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json", "content-length": 300 } });
+  aborted.on("error", () => {});
+  aborted.write('{"jsonrpc":');
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const abortId = d.read({ limit: 200 }).filter((x) => x.event === "mcp_received").at(-1)?.requestId;
+  assert.ok(abortId);
+  aborted.destroy();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.ok(d.read({ requestId: abortId, limit: 200 }).some((x) => x.event === "mcp_closed_early" && x.stage === "body"));
+});
+
 test("server shutdown waits for an active MCP tool call", async (t) => {
   const { root, localBaseUrl, accessToken, running } = await httpServerFixture(
     t,

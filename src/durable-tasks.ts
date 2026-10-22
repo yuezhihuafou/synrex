@@ -6,6 +6,9 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { runStoreRoot } from "./compact-runtime/run-store.js";
+import { currentRequestLogContext } from "./logger.js";
+import { traceEvent, traceStage } from "./trace-stages.js";
+import { recordTaskTrace } from "./task-trace.js";
 import type { DurableTaskRequest } from "./durable-task-runner.js";
 import {
   durableTaskView,
@@ -248,7 +251,14 @@ export class DurableTaskManager {
       startedAt,
       ttlMs: taskTtlMs(),
       env: taskEnvironment(input),
+      trace: (() => {
+        const context = currentRequestLogContext();
+        return { requestId: context?.requestId, traceId: context?.traceId ?? context?.requestId,
+          callId: context?.callId, nodeRequestId: context?.nodeRequestId, workspaceId: input.workspaceId };
+      })(),
     };
+    traceEvent("task_created", { workspaceId: input.workspaceId, taskId, runId });
+    recordTaskTrace(runDir, "task_created", { ...request.trace, taskId, runId });
     await writeJsonAtomic(requestPath, request);
     await writeJsonAtomic(indexPath, {
       schemaVersion: 1,
@@ -278,10 +288,11 @@ export class DurableTaskManager {
     } satisfies DurableTaskActiveMarker);
 
     try {
-      await this.launch({ requestPath, unitName, runnerPath: this.runnerPath });
+      await traceStage("task_launch", () => this.launch({ requestPath, unitName, runnerPath: this.runnerPath }), { taskId, runId });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const finishedAt = new Date().toISOString();
+      recordTaskTrace(runDir, "task_finished", { ...request.trace, taskId, runId, outcome: "error", errorCategory: "internal", exitCode: 1 });
       const output = `Task launch failed: ${message}\n`;
       await writeFile(outputPath, output, { flag: "a", mode: 0o600 }).catch(() => undefined);
       const failed = {
@@ -313,6 +324,7 @@ export class DurableTaskManager {
       await unlink(activePath).catch(() => undefined);
       return this.snapshot(failed);
     }
+    return traceStage("task_initial_wait", async () => {
     const deadline = Date.now() + Math.max(0, waitMs);
     let state = await readState(taskPath);
     while (state.status === "working" && Date.now() < deadline) {
@@ -320,6 +332,7 @@ export class DurableTaskManager {
       state = await readState(taskPath);
     }
     return this.snapshot(state);
+    }, { taskId, runId });
   }
 
   async get(

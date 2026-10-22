@@ -6,6 +6,8 @@ import path from "node:path";
 import { resolveShellCommand } from "./process-platform.js";
 import { pruneRunStore } from "./compact-runtime/retention.js";
 import type { DurableTaskState, DurableTaskStatus } from "./durable-task-model.js";
+import { recordTaskTrace, type TaskTraceContext } from "./task-trace.js";
+import { errorCategory } from "./trace-stages.js";
 
 const TASK_HEARTBEAT_MS = 5_000;
 
@@ -28,6 +30,7 @@ export interface DurableTaskRequest {
   startedAt: string;
   ttlMs: number | null;
   env: Record<string, string>;
+  trace?: TaskTraceContext;
 }
 
 export interface DurableTaskRunnerOptions {
@@ -69,6 +72,9 @@ export async function runDurableTask(
   options: DurableTaskRunnerOptions = {},
 ): Promise<number> {
   const request = JSON.parse(await readFile(requestPath, "utf8")) as DurableTaskRequest;
+  const trace = (event: import("./diagnostic-trace.js").DiagnosticEvent, fields: Record<string, unknown> = {}) =>
+    recordTaskTrace(path.dirname(request.taskPath), event, { ...request.trace, taskId: request.taskId, runId: request.runId, ...fields });
+  trace("task_runner_started", { queuedMs: Math.max(0, Date.now() - Date.parse(request.startedAt)) });
   await unlink(requestPath).catch(() => undefined);
 
   const startedAtMs = Date.parse(request.startedAt);
@@ -125,6 +131,7 @@ export async function runDurableTask(
 
   const append = (chunk: Buffer): void => {
     if (chunk.length === 0 || outputEnded) return;
+    if (bytes === 0) trace("task_first_output", { elapsedMs: Math.max(0, Date.now() - startedAtMs) });
     const accepted = output.write(chunk);
     hash.update(chunk);
     bytes += chunk.length;
@@ -189,7 +196,9 @@ export async function runDurableTask(
         outputBytes: 0,
         outputLines: 0,
       });
-      await writeCompletionNotification(request, "cancelled", message).catch(() => undefined);
+      await writeCompletionNotification(request, "cancelled", message)
+        .then(() => trace("task_notification", { outcome: "ok" }), (error) => trace("task_notification", { outcome: "error", errorCategory: errorCategory(error) }));
+      trace("task_finished", { outcome: "error", errorCategory: "cancelled", signal: "SIGTERM", outputBytes: 0 });
       await unlink(request.activePath).catch(() => undefined);
       return 143;
     }
@@ -203,6 +212,7 @@ export async function runDurableTask(
       windowsHide: true,
     });
     childPid = child.pid;
+    trace("task_spawned", { elapsedMs: Math.max(0, Date.now() - startedAtMs) });
     if (child.stdout) outputSources.push(child.stdout);
     if (child.stderr) outputSources.push(child.stderr);
     child.stdout?.on("data", (chunk: Buffer) => append(chunk));
@@ -288,7 +298,10 @@ export async function runDurableTask(
             outputLines,
           },
     });
-    await writeCompletionNotification(request, finalStatus, terminalMessage).catch(() => undefined);
+    trace("task_finished", { durationMs: meta.durationMs, outcome: meta.isError ? "error" : "ok", exitCode,
+      signal, outputBytes: bytes, errorCategory: signal ? "cancelled" : exitCode !== 0 ? "command_exit" : undefined });
+    await writeCompletionNotification(request, finalStatus, terminalMessage)
+      .then(() => trace("task_notification", { outcome: "ok" }), (error) => trace("task_notification", { outcome: "error", errorCategory: errorCategory(error) }));
     await unlink(request.activePath).catch(() => undefined);
     await pruneRunStore({
       root: request.runRoot,
@@ -298,6 +311,7 @@ export async function runDurableTask(
     return exitCode ?? (signal ? 128 : 1);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    trace("task_finished", { outcome: "error", errorCategory: errorCategory(error), durationMs: Math.max(0, Date.now() - startedAtMs) });
     append(Buffer.from(`${message}\n`, "utf8"));
     await endOutput().catch(() => undefined);
     const finishedAtMs = Date.now();
@@ -335,7 +349,8 @@ export async function runDurableTask(
         data: { runId: request.runId },
       },
     }).catch(() => undefined);
-    await writeCompletionNotification(request, "failed", message).catch(() => undefined);
+    await writeCompletionNotification(request, "failed", message)
+      .then(() => trace("task_notification", { outcome: "ok" }), (error) => trace("task_notification", { outcome: "error", errorCategory: errorCategory(error) }));
     await unlink(request.activePath).catch(() => undefined);
     return 1;
   }

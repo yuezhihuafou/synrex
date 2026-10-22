@@ -137,7 +137,7 @@ test("separate identical invocations receive distinct request ids", async () => 
 
 test("delivered request timeout is explicitly indeterminate, and late completion is logged", async () => {
   const events: Array<{ event: string; outcome: string }> = [];
-  const hub = new NodeLinkHub(20, 10, (event, fields) => events.push({ event, outcome: fields.outcome }));
+  const hub = new NodeLinkHub(20, 10, (event, fields) => { if (typeof fields.outcome === "string") events.push({ event, outcome: fields.outcome }); });
   try {
     const call = hub.call("node_a", { name: "apply_patch", arguments: {} });
     const sent = await hub.poll("node_a", 1);
@@ -156,7 +156,7 @@ test("delivered request timeout is explicitly indeterminate, and late completion
 
 test("timeout before dispatch is never classified as an executed mutation", async () => {
   const events: string[] = [];
-  const hub = new NodeLinkHub(20, 10, (_event, fields) => events.push(fields.outcome));
+  const hub = new NodeLinkHub(20, 10, (_event, fields) => { if (typeof fields.outcome === "string") events.push(fields.outcome); });
   try {
     const call = hub.call("node_absent", { name: "apply_patch", arguments: {} });
     const rejection = assert.rejects(call, /not_dispatched/);
