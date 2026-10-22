@@ -113,10 +113,13 @@ export function summarizePairedAgentBenchmark(records: AgentBenchmarkRecord[]): 
   const candidates = [...byTask.values()].flatMap((pair) => (
     pair.baseline && pair.governed ? [{ baseline: pair.baseline, governed: pair.governed }] : []
   ));
-  // Incompatible model/run controls cannot be presented as paired evidence.
+  // Missing controls do not establish equality: two unknown models or
+  // starting commits cannot support a controlled GPT performance claim.
   const pairs = candidates.filter(({ baseline, governed }) =>
     (["provider", "model", "effort", "startingCommit", "environmentId"] as const)
-      .every((key) => baseline[key] === governed[key]));
+      .every((key) => typeof baseline[key] === "string"
+        && baseline[key]!.trim().length > 0
+        && baseline[key] === governed[key]));
   return {
     pairs: pairs.length,
     incomparablePairs: candidates.length - pairs.length,

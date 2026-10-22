@@ -93,6 +93,11 @@ test("paired summaries compare the same task run rather than unrelated means", (
     retries: 0,
     falsePositiveBlocks: 0,
     humanInterventions: 0,
+    provider: "chatgpt",
+    model: "same-model",
+    effort: "high",
+    startingCommit: "aabbcc",
+    environmentId: "fixture-1",
   };
   const records: AgentBenchmarkRecord[] = [
     { ...base, taskId: "a#1", variant: "baseline", success: false, inputTokens: 100, outputTokens: 20, toolCalls: 4, wallTimeMs: 1000, architectureViolations: 1 },
@@ -136,6 +141,25 @@ test("paired summaries reject duplicate samples and flag explicitly mismatched c
   assert.equal(summary.pairs, 0);
   assert.equal(summary.incomparablePairs, 1);
   assert.throws(() => summarizePairedAgentBenchmark([baseline, baseline]), /Duplicate benchmark run/);
+});
+
+test("unrecorded model or source controls cannot establish a paired comparison", () => {
+  const row = { taskId: "same#1", success: true, toolCalls: 1, retries: 0,
+    wallTimeMs: 100, architectureViolations: 0, falsePositiveBlocks: 0,
+    humanInterventions: 0 };
+  const unknown = summarizePairedAgentBenchmark([
+    { ...row, variant: "baseline" },
+    { ...row, variant: "governed" },
+  ]);
+  assert.equal(unknown.pairs, 0);
+  assert.equal(unknown.incomparablePairs, 1);
+  assert.equal(unknown.meanWallTimeDeltaMs, null);
+  const partial = summarizePairedAgentBenchmark([
+    { ...row, variant: "baseline", provider: "chatgpt", model: "gpt-6" },
+    { ...row, variant: "governed", provider: "chatgpt", model: "gpt-6" },
+  ]);
+  assert.equal(partial.pairs, 0);
+  assert.equal(partial.incomparablePairs, 1);
 });
 
 test("host-unobservable context stays missing, never converts to a fictitious zero", () => {
