@@ -4,7 +4,7 @@ import { basename, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ServerConfig } from "./config.js";
 
-export type LocalAgentProvider = "codex" | "claude" | "opencode" | "pi" | "cursor" | "copilot" | "grok";
+export type LocalAgentProvider = "codex" | "claude" | "opencode" | "pi" | "cursor" | "copilot" | "grok" | "antigravity";
 
 export const LOCAL_AGENT_PROVIDERS: readonly LocalAgentProvider[] = [
   "codex",
@@ -14,6 +14,7 @@ export const LOCAL_AGENT_PROVIDERS: readonly LocalAgentProvider[] = [
   "cursor",
   "copilot",
   "grok",
+  "antigravity",
 ];
 
 export interface LocalAgentProfile {
