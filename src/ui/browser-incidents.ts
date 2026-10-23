@@ -5,7 +5,8 @@ export function detectBrowserIncidents(events: BrowserEvent[]): BrowserIncident[
   const ordered = [...events].sort((a,b)=>a.at.localeCompare(b.at));
   const incidents: BrowserIncident[] = [];
   for (const event of ordered) {
-    if (!(event.error || event.status===429 || event.status>=500 || event.durationMs>30000)) continue;
+    if (!(event.status===429 || event.status>=500 || event.durationMs>30000 ||
+      (event.error && event.error!=="net::ERR_BLOCKED_BY_CLIENT" && event.error!=="net::ERR_ABORTED"))) continue;
     const at = Date.parse(event.at);
     if (!Number.isFinite(at)) continue;
     const id = [event.at,event.host,event.path,event.status,event.error].join("|");

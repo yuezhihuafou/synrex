@@ -33,6 +33,7 @@ export interface ConsoleSnapshot {
     revision: number; phase: string; summary: string; nextSteps: string[]; blockers: string[];
     taskIds: string[]; updatedAt: string;
   }>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
@@ -150,10 +151,25 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   );
   const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 20000 });
   const requests = summarizeDiagnosticTrace(events).requests.slice(-40).reverse();
+  const byConversation = new Map<string, typeof requests>();
+  for (const request of summarizeDiagnosticTrace(events).requests) {
+    if (!request.conversationId) continue;
+    const existing=byConversation.get(request.conversationId)??[];
+    existing.push(request);
+    byConversation.set(request.conversationId,existing);
+  }
+  const conversationSessions=[...byConversation].map(([id,items])=>{
+    const ordered=items.sort((a,b)=>b.lastAt.localeCompare(a.lastAt));
+    const recent=ordered[0]!;
+    const runningTasks=items.filter(x=>x.taskId && tasks.some(t=>t.id===x.taskId && (t.status==="working"||t.status==="input_required"))).length;
+    return {id,title:recent.conversationTitle??id,lastAt:recent.lastAt,requestCount:items.length,runningTasks,
+      state:runningTasks?"task_running":Date.now()-Date.parse(recent.lastAt)<30000?"recent_mcp_activity":"no_recent_mcp_activity",
+      requests:ordered.slice(0,80).map(r=>({requestId:r.requestId,tool:r.tool,lastAt:r.lastAt,taskId:r.taskId,runId:r.runId,classification:r.classification}))};
+  }).sort((a,b)=>b.lastAt.localeCompare(a.lastAt)).slice(0,40);
   return {
     generatedAt: new Date().toISOString(),
     service: { status: "online", release, diagnosticsBoundBytes: 2 * 1024 * 1024 },
-    nodes, workflows, tasks, memory, activeTaskUnits: readActiveTaskUnits(),
+    nodes, workflows, conversationSessions, tasks, memory, activeTaskUnits: readActiveTaskUnits(),
     diagnostics: { count: events.length, observability: summarizeConsoleObservability(events), requests, events: events.slice(-40).reverse() },
   };
 }

@@ -12,6 +12,7 @@ type Snapshot = {
     contract: { matching: number; missing: number; incompatible: number; total: number }; version: string | null }>;
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; updatedAt: string }>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits?: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
@@ -20,7 +21,7 @@ type Snapshot = {
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
-  { id: "workflows", title: "工作流", symbol: "☷", caption: "任务与检查点" },
+  { id: "workflows", title: "工作流", symbol: "☷", caption: "对话通过 Synrex 操作主机" },
   { id: "tasks", title: "执行索引", symbol: ">_", caption: "持久任务位置" },
   { id: "nodes", title: "主机节点", symbol: "⌘", caption: "版本与契约" },
   { id: "diagnostics", title: "诊断中心", symbol: "⌁", caption: "MCP 时间线" },
@@ -115,22 +116,21 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
 }
 function Workflows({d}:{d:Snapshot}) {
   const [id,setId]=useState<string|null>(null);
-  const current=d.workflows.find(x=>x.id===id)??d.workflows[0];
+  const sessions=d.conversationSessions??[];
+  const current=sessions.find(x=>x.id===id)??sessions[0];
   return <div className="columns workflows-columns">
-    <Panel title="工作流" hint="本地 SQLite 持久化">
-      {d.workflows.map(w=><button className={`pick ${current?.id===w.id?"picked":""}`} key={w.id} onClick={()=>setId(w.id)}>
-        <div className="grow"><strong>{w.title}</strong><small>{w.workspace} · Revision {w.revision}</small></div>
-        <Badge value={w.status}/></button>)}
-      {!d.workflows.length&&<Blank>暂无工作流</Blank>}
+    <Panel title="对话操作会话" hint="来自 MCP 诊断事件；不是研发目标清单">
+      {sessions.map(s=><button className={`pick ${current?.id===s.id?"picked":""}`} key={s.id} onClick={()=>setId(s.id)}>
+        <div className="grow"><strong>{s.title}</strong><small>{s.requestCount} 次 MCP 请求 · {time(s.lastAt)}</small></div>
+        <small>{s.state==="task_running"?"存在活动任务":s.state==="recent_mcp_activity"?"近期有调用":"无近期调用"}</small></button>)}
+      {!sessions.length&&<Blank>目前没有带对话 ID 的 MCP 调用记录。不能据此判断 GPT 是否仍在思考。</Blank>}
     </Panel>
-    <Panel title="检查点" hint="只读 · 通过 GPT 对话继续执行">
-      {current?<div className="checkpoint"><Badge value={current.status}/><h2>{current.title}</h2>
-        <p>{current.goal}</p><code className="id-block">{current.id}</code>
-        <div className="checkpoint-block"><small>当前阶段</small><strong>{current.phase||"—"}</strong><p>{current.summary}</p></div>
-        <div className="checkpoint-block"><small>下一步</small>{current.nextSteps.length
-          ?<ol>{current.nextSteps.map((x,i)=><li key={i}>{x}</li>)}</ol>:<p>没有剩余步骤</p>}</div>
-        {current.blockers.length>0&&<div className="checkpoint-block"><small>阻塞事项</small><ul>{current.blockers.map((x,i)=><li key={i}>{x}</li>)}</ul></div>}
-        <p className="footnote">复制工作流 ID，在普通 GPT 对话中要求继续该任务即可。</p>
+    <Panel title="对话 MCP 调用链" hint="只表示 Synrex 观测，不能判定 GPT 对话是否结束">
+      {current?<div className="checkpoint"><h2>{current.title}</h2><code className="id-block">{current.id}</code>
+        <p>最后一次 MCP 事件：{time(current.lastAt)} · 关联活动任务：{current.runningTasks}</p>
+        {current.requests.slice(0,35).map(r=><div key={r.requestId} className="list-row">
+          <div className="grow"><strong>{r.tool??"MCP 请求"}</strong><small>{r.requestId} · {time(r.lastAt)}</small>
+            {(r.taskId||r.runId)&&<small>{r.taskId??""} {r.runId??""}</small>}</div><Badge value={r.classification}/></div>)}
       </div>:<Blank>选择一个工作流查看</Blank>}
     </Panel>
   </div>;
@@ -254,7 +254,8 @@ function Diagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapshot;clockOffse
     <Panel title="自动故障快照" hint="扩展保留最近 2 分钟元数据；429、5xx、网络失败或超过 30 秒时自动冻结最多 30 份证据">
       {incidents.slice().reverse().slice(0,12).map(i=><div className="list-row" key={i.id}>
         <div className="grow"><strong>{i.trigger.status||i.trigger.error} · {i.trigger.path}</strong>
-          <small>{new Date(i.at).toLocaleString()} · {i.events.length} 条上下文请求</small></div>
+          <small>{new Date(i.at).toLocaleString()} · {i.events.length} 条浏览器上下文请求</small>
+          <small>附近 MCP 事件：{d.diagnostics.requests.filter(r=>Math.abs(Date.parse(r.lastAt)-Date.parse(i.at))<120000).length} 条（仅时间候选，非确定关联）</small></div>
         <button onClick={()=>exportIncident(i)}>导出证据</button>
       </div>)}
       {!incidents.length&&<Blank>尚无自动冻结的故障证据；需启用 Synrex Browser Trace 扩展</Blank>}
