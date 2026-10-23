@@ -18,6 +18,7 @@ type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"h
   host?:string;conversationTitle?:string};
 type Snapshot = {
   generatedAt: string;
+  snapshotStale?: boolean;
   service: { status: string; release: string };
   nodes: Array<{ id: string; alias: string; kind: string; health: string; os: string; lastSeenAt: string;
     contract: { matching: number; missing: number; incompatible: number; total: number }; version: string | null }>;
@@ -89,17 +90,20 @@ function UsagePage(){
   const [error,setError]=useState("");
   useEffect(()=>{
     let live=true;
-    const load=()=>getJson<Usage>("/console/api/usage").then(x=>{if(live)setData(x);})
+    const load=()=>getJson<Usage>("/console/api/usage").then(x=>{if(live){setData(x);setError("");}})
       .catch(()=>{if(live)setError("离线统计暂不可用");});
     void load();const timer=setInterval(()=>void load(),60000);
     return()=>{live=false;clearInterval(timer);};
   },[]);
   if(error)return <Blank>{error}</Blank>;
   if(!data||data.status)return <Blank>等待独立统计进程首次生成数据，不在 MCP 主进程中计算。</Blank>;
+  const age=Date.now()-Date.parse(data.generatedAt??"");
   const format=(n?:number|null)=>n===undefined||n===null?"未知":n.toLocaleString("zh-CN");
   return <div className="stack">
     <Panel title="7 天执行效率" hint="后台独立进程生成，只读取缓存；不会调用模型，也不会占用上下文">
       <p className="footnote">更新于 {time(data.generatedAt)}；统计口径为服务端实际观测的 MCP 请求。</p>
+      {(!Number.isFinite(age)||age>11*60*1000)&&<p role="alert" className="error-banner">
+        统计源已超过 11 分钟未更新，展示的是历史缓存，不能当作实时指标。</p>}
       <div className="metrics">
         <Metric label="MCP 请求" value={format(data.requests)} info="服务端观测" symbol="▤"/>
         <Metric label="已完成" value={format(data.completed)} info="HTTP 完成，不代表模型成功" symbol="✓"/>
@@ -519,6 +523,7 @@ function App() {
   const [view,setView]=useState<View>("overview");
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState("");
+  const [clock,setClock]=useState(Date.now());
   const refresh=useCallback(async()=>{
     setLoading(true);
     try { const response=await getJson<Snapshot>("/console/api/snapshot");
@@ -531,6 +536,8 @@ function App() {
   useEffect(()=>{if(!auth) return; const timer=window.setInterval(()=>{
     if(!document.hidden)void refresh();
   },10000);return ()=>window.clearInterval(timer);},[auth,refresh]);
+  useEffect(()=>{const timer=window.setInterval(()=>setClock(Date.now()),5000);
+    return ()=>window.clearInterval(timer);},[]);
   async function logout(){
     try {await getJson("/console/api/logout",{method:"POST",headers:{"content-type":"application/json"}});}
     finally {setAuth(false);setData(null);}
@@ -538,6 +545,8 @@ function App() {
   if(auth===null) return <main className="boot">正在连接 Synrex…</main>;
   if(!auth) return <Login done={()=>void refresh()}/>;
   const meta=menus.find(x=>x.id===view)!;
+  const ageMs=clock-Date.parse(data?.generatedAt??"");
+  const stale=Boolean(data?.snapshotStale)||!Number.isFinite(ageMs)||ageMs>45000;
   return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">S</div>
     <div><strong>SYNREX<span>.</span></strong><small>CONTROL PLANE</small></div></div>
     <p className="sidebar-label">WORKSPACE</p><nav aria-label="Synrex 管理导航">
@@ -547,11 +556,12 @@ function App() {
     <div className="sidebar-bottom"><div className="owner"><span className="round-symbol">♙</span><div><strong>Owner Access</strong><small>只读控制台</small></div></div>
       <button onClick={()=>void logout()}>退出登录 ↗</button></div>
   </aside><main className="main"><header className="topbar"><span>Synrex Console <b>/</b> <strong>{meta.title}</strong></span>
-    <div><span className="online-dot"/> 连接正常 <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
+    <div><span className="online-dot"/> {stale?"数据过期":"数据新鲜"} <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
   </header><div className="content"><div className="heading"><p className="eyebrow">SYNREX OPERATIONS / {view.toUpperCase()}</p>
     <h1>{view==="overview"?"开发环境，一目了然。":meta.title}</h1>
     <div className="heading-line"><p>{view==="overview"?"主机、执行、工作流与诊断，一站式掌控。":meta.caption+" · 显示已有的真实数据"}</p>
-      <span>更新于 {time(data?.generatedAt)}</span></div></div>
+      <span>更新于 {time(data?.generatedAt)} · {Number.isFinite(ageMs)?Math.max(0,Math.round(ageMs/1000))+" 秒前":"时间未知"}</span></div></div>
+    {stale&&<div className="error-banner" role="alert">Console 快照已过期。当前为历史数据，不代表实时进程状态；请检查独立快照服务。</div>}
     {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh()}>重试</button></div>}
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
       {view==="usage"&&<UsagePage/>}

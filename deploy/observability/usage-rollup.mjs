@@ -32,11 +32,11 @@ const repo=process.env.SYNREX_REPO_ROOT;
 let code=null;
 if(repo){
   try{
-    const output=execFileSync("git",["log","--since=7 days ago","--format=COMMIT","--numstat","--no-merges"],{
+    const output=execFileSync("git",["log","--since=7 days ago","--oneline","--numstat","--no-merges"],{
       cwd:repo,encoding:"utf8",timeout:5000,maxBuffer:4*1024*1024});
     let added=0,deleted=0,commits=0,files=0;
     for(const line of output.split("\n")){
-      if(line==="COMMIT"){commits++;continue;}
+      if(/^[0-9a-f]{7,40} /.test(line)){commits++;continue;}
       const m=/^(\d+)\t(\d+)\t/.exec(line);
       if(m){added+=Number(m[1]);deleted+=Number(m[2]);files++;}
     }

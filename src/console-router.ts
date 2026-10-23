@@ -153,7 +153,20 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   });
   app.get("/console/api/snapshot", auth, (_req, res) => {
     try {
-      res.json(readConsoleSnapshot(config.stateDir, actualRelease()));
+      const file=path.join(config.stateDir,"observability","console-snapshot.json");
+      if(existsSync(file)){
+        const snap=JSON.parse(readFileSync(file,"utf8")) as {generatedAt?:string};
+        const age=Date.now()-Date.parse(snap.generatedAt??"");
+        if(Number.isFinite(age)){
+          res.setHeader("X-Synrex-Snapshot-Age-Ms",String(Math.max(0,Math.round(age))));
+          res.json({...snap,snapshotAgeMs:age,snapshotStale:age>45000});
+          return;
+        }
+      }
+      // Bootstrap/fault fallback, not the steady state. Never silently label
+      // a missing worker as a current sample.
+      res.json({...readConsoleSnapshot(config.stateDir,actualRelease()),
+        snapshotStale:true,snapshotMode:"inline_fallback"});
     } catch {
       res.status(503).json({ error: "Status data temporarily unavailable" });
     }
