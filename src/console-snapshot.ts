@@ -1,12 +1,12 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
-import { readOtelFileTail, type HostMetricSample } from "./otel-file-reader.js";
-import { readPeerSnapshot } from "./peer-observability.js";
+import { summarizeConsoleObservability } from "./console-observability.js";
 import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
-import { readConversationLabels } from "./conversation-labels.js";
 
 interface NodeRow {
   id: string; kind: string; alias: string | null; health: string;
@@ -33,33 +33,15 @@ export interface ConsoleSnapshot {
     revision: number; phase: string; summary: string; nextSteps: string[]; blockers: string[];
     taskIds: string[]; updatedAt: string;
   }>;
-  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string }>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  activeTaskUnits: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
   diagnostics: {
     count: number;
+    observability: ReturnType<typeof summarizeConsoleObservability>;
     requests: ReturnType<typeof summarizeDiagnosticTrace>["requests"];
     events: ReturnType<DiagnosticTrace["read"]>;
-  };
-  observability: {
-    collector: "bounded_tail" | "not_collected";
-    peerSync: { gateway: "current" | "stale" | "unavailable"; at?: string };
-    metrics: HostMetricSample[];
-    runtime: {
-      rssBytes?: number; heapUsedBytes?: number; eventLoopLagMs?: number;
-      cpuUserMicros?: number; cpuSystemMicros?: number;
-      eventLoopP95Ms?: number; eventLoopUtilizationPermille?: number;
-      gcDurationMs?: number; gcCount?: number; activeToolCount?: number;
-      otelSpanPending?: number; otelSpanDropped?: number;
-      at?: string;
-    };
-    network: {
-      tcpConnections?: number; tcpRttP50Ms?: number; tcpRttP95Ms?: number;
-      tcpRetransSockets?: number; tcpRetransSegmentsTotal?: number;
-      at?: string;
-    };
-    collectorHealth: {
-      refusedLogs?: number; refusedMetrics?: number; exporterFailed?: number; at?: string;
-    };
   };
 }
 
@@ -83,6 +65,31 @@ function strings(value: unknown, max = 8): string[] {
 }
 function count(db: Database.Database, statement: string): number {
   return Number((db.prepare(statement).get() as { n: number }).n);
+}
+function localTaskStatus(runId: string | null): { status: string; lastUpdatedAt?: string } {
+  if (!runId || !/^run_[0-9]{14}_[a-z0-9]+$/.test(runId)) return { status: "unknown" };
+  const root = process.env.DEVSPACE_COMPACT_RUN_ROOT || path.join(homedir(), ".local", "share", "devspace", "runs");
+  const day = runId.slice(4,8)+"-"+runId.slice(8,10)+"-"+runId.slice(10,12);
+  try {
+    const file = path.join(root,day,runId,"task.json");
+    if (!existsSync(file)) return { status: "unknown" };
+    const state = JSON.parse(readFileSync(file,"utf8")) as {status?:string;lastUpdatedAt?:string};
+    if (!["working","input_required","completed","failed","cancelled"].includes(state.status??"")) return {status:"unknown"};
+    if (state.status==="working" && (!state.lastUpdatedAt || Date.now()-Date.parse(state.lastUpdatedAt)>120000)) {
+      return {status:"stale_unverified",lastUpdatedAt:state.lastUpdatedAt};
+    }
+    return {status:state.status!,lastUpdatedAt:state.lastUpdatedAt};
+  } catch { return {status:"unknown"}; }
+}
+function readActiveTaskUnits(): string[] | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const output=execFileSync("systemctl",["--user","list-units","devspace-task-*.service",
+      "--type=service","--state=running","--no-legend","--plain","--no-pager"],
+      {encoding:"utf8",timeout:800,maxBuffer:64*1024,stdio:["ignore","pipe","ignore"]});
+    return output.split("\n").map(line=>line.trim().split(/\s+/)[0]??"")
+      .filter(name=>/^devspace-task-[a-zA-Z0-9_-]+\.service$/.test(name)).slice(0,100);
+  } catch {return null;}
 }
 
 export function readConsoleSnapshot(stateDir: string, release: string): ConsoleSnapshot {
@@ -118,7 +125,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       tasks: (db.prepare("select task_id, node_id, workspace_id, run_id, created_at from task_routes order by created_at desc limit 30").all() as TaskRow[])
         .map((row) => ({
           id: row.task_id, nodeId: row.node_id, workspaceId: row.workspace_id,
-          runId: row.run_id, createdAt: row.created_at,
+          runId: row.run_id, createdAt: row.created_at, ...localTaskStatus(row.run_id),
         })),
       memory: {
         episodes: count(db, "select count(*) as n from learning_episodes"),
@@ -142,54 +149,27 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         };
       }),
   );
-  const archive = readOtelFileTail(stateDir);
-  const peer = readPeerSnapshot(stateDir);
-  const recent = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 2000 });
-  const combined = [...peer.events, ...archive.logs, ...recent].sort((a,b) => a.ts.localeCompare(b.ts));
-  const unique = new Map(combined.map((e) => [
-    [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId,e.taskId].join("|"), e,
-  ]));
-  const events = [...unique.values()].slice(-2000);
-  const requests = summarizeDiagnosticTrace(events).requests.slice(-40).reverse();
-  const ownerLabels = new Map(readConversationLabels(stateDir,requests.map(r=>r.requestId))
-    .map(label=>[label.requestId,label.conversationTitle]));
-  const runtime = [...events].reverse().find(e => e.event === "runtime_sampled");
-  const network = [...events].reverse().find(e => e.event === "network_sampled");
-  const collector = [...events].reverse().find(e => e.event === "collector_sampled");
+  const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 20000 });
+  const requests = summarizeDiagnosticTrace(events).requests.slice(-300).reverse();
+  const byConversation = new Map<string, typeof requests>();
+  for (const request of summarizeDiagnosticTrace(events).requests) {
+    if (!request.conversationId) continue;
+    const existing=byConversation.get(request.conversationId)??[];
+    existing.push(request);
+    byConversation.set(request.conversationId,existing);
+  }
+  const conversationSessions=[...byConversation].map(([id,items])=>{
+    const ordered=items.sort((a,b)=>b.lastAt.localeCompare(a.lastAt));
+    const recent=ordered[0]!;
+    const runningTasks=items.filter(x=>x.taskId && tasks.some(t=>t.id===x.taskId && (t.status==="working"||t.status==="input_required"))).length;
+    return {id,title:recent.conversationTitle??id,lastAt:recent.lastAt,requestCount:items.length,runningTasks,
+      state:runningTasks?"task_running":Date.now()-Date.parse(recent.lastAt)<30000?"recent_mcp_activity":"no_recent_mcp_activity",
+      requests:ordered.slice(0,80).map(r=>({requestId:r.requestId,tool:r.tool,lastAt:r.lastAt,taskId:r.taskId,runId:r.runId,classification:r.classification}))};
+  }).sort((a,b)=>b.lastAt.localeCompare(a.lastAt)).slice(0,40);
   return {
     generatedAt: new Date().toISOString(),
-    service: { status: "online", release, diagnosticsBoundBytes: 2 * 8 * 1024 * 1024 },
-    nodes, workflows, tasks, memory,
-    diagnostics: { count: events.length,
-      requests: requests.map(r=>({...r,
-        ...(ownerLabels.has(r.requestId)?{conversationTitle:ownerLabels.get(r.requestId)}:{}),
-      })),
-      events: events.slice(-200).reverse() },
-    observability: {
-      collector: archive.coverage,
-      peerSync: { gateway: peer.coverage, at: peer.updatedAt },
-      metrics: archive.metrics.slice(-120),
-      runtime: {
-        rssBytes: runtime?.rssBytes, heapUsedBytes: runtime?.heapUsedBytes,
-        eventLoopLagMs: runtime?.eventLoopLagMs,
-        cpuUserMicros: runtime?.cpuUserMicros, cpuSystemMicros: runtime?.cpuSystemMicros, at: runtime?.ts,
-        eventLoopP95Ms: runtime?.eventLoopP95Ms,
-        eventLoopUtilizationPermille: runtime?.eventLoopUtilizationPermille,
-        gcDurationMs: runtime?.gcDurationMs, gcCount: runtime?.gcCount,
-        activeToolCount: runtime?.activeToolCount,
-        otelSpanPending: runtime?.otelSpanPending, otelSpanDropped: runtime?.otelSpanDropped,
-      },
-      network: {
-        tcpConnections: network?.tcpConnections, tcpRttP50Ms: network?.tcpRttP50Ms,
-        tcpRttP95Ms: network?.tcpRttP95Ms, tcpRetransSockets: network?.tcpRetransSockets,
-        tcpRetransSegmentsTotal: network?.tcpRetransSegmentsTotal, at: network?.ts,
-      },
-      collectorHealth: {
-        refusedLogs: collector?.collectorRefusedLogRecords,
-        refusedMetrics: collector?.collectorRefusedMetricPoints,
-        exporterFailed: collector?.collectorExporterFailed,
-        at: collector?.ts,
-      },
-    },
+    service: { status: "online", release, diagnosticsBoundBytes: 2 * 1024 * 1024 },
+    nodes, workflows, conversationSessions, tasks, memory, activeTaskUnits: readActiveTaskUnits(),
+    diagnostics: { count: events.length, observability: summarizeConsoleObservability(events), requests, events: events.slice(-40).reverse() },
   };
 }

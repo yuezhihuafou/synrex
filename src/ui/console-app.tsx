@@ -1,61 +1,31 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { analyzeBrowserTransport } from "../browser-transport-analysis.js";
 import "./console-app.css";
+import { parseHar, type BrowserEvent } from "./browser-trace.js";
+import { detectBrowserIncidents } from "./browser-incidents.js";
+import { buildCausalGraph } from "./causal-graph.js";
 
-type View = "overview" | "usage" | "workflows" | "tasks" | "nodes" | "diagnostics" | "resources" | "memory";
-type Usage = {generatedAt?:string;status?:string;requests?:number;completed?:number;failed?:number;toolCalls?:number;
-  mcpWire?:{inputBytes:number;outputBytes:number;observedInputRequests:number;observedOutputRequests:number};
-  duration?:{observedRequests:number;meanMs:number|null};
-  modelTokens?:{input:null;output:null;reason:string};
-  comparison?:{baseline:null;savingsPercent:null;reason:string};
-  code?:{commits:number;added:number;deleted:number;net:number;fileChanges:number;warning:string}|null};
-type ObservedSpan = {ts:string;traceId:string;spanId:string;parentSpanId?:string;
-  name:string;durationMs:number;status:string;requestId?:string};
-type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"health";
-  reason:string;tabId?:number;flowId?:string;endpointGroup?:string;requestType?:string;
-  durationMs?:number;status?:number;errorCategory?:string;netError?:string;startedAt?:string;
-  host?:string;conversationTitle?:string};
+type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "memory";
 type Snapshot = {
   generatedAt: string;
-  snapshotStale?: boolean;
   service: { status: string; release: string };
   nodes: Array<{ id: string; alias: string; kind: string; health: string; os: string; lastSeenAt: string;
     contract: { matching: number; missing: number; incompatible: number; total: number }; version: string | null }>;
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; updatedAt: string }>;
-  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string }>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  activeTaskUnits?: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
-  diagnostics: { count: number; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
-    conversationTitle?:string; conversationId?:string;
-    classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
-    traceId?:string; nodeRequestId?:string; callId?:string; taskId?:string; nodeId?:string;
-    conversationTitle?:string; conversationId?:string;
-    stage?:string; durationMs?:number; elapsedMs?:number; status?:number; outcome?:string; tool?:string;
-    rssBytes?:number; heapUsedBytes?:number; cpuUserMicros?:number; cpuSystemMicros?:number; eventLoopLagMs?:number; bootId?:string;
-    eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number; gcDurationMs?:number; gcCount?:number;
-    activeToolCount?:number; tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
-    tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number; tunnelUnit?:string }> };
-  observability: { collector:"bounded_tail"|"not_collected"; peerSync: {
-    gateway:"current"|"stale"|"unavailable"; at?:string }; runtime: {
-    rssBytes?:number; heapUsedBytes?:number; eventLoopLagMs?:number;
-    eventLoopP95Ms?:number; eventLoopUtilizationPermille?:number;
-    gcDurationMs?:number; gcCount?:number; activeToolCount?:number;
-    otelSpanPending?:number; otelSpanDropped?:number;
-    cpuUserMicros?:number; cpuSystemMicros?:number; at?:string };
-    network: { tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
-      tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number; at?:string };
-    collectorHealth: { refusedLogs?:number; refusedMetrics?:number; exporterFailed?:number; at?:string };
-    metrics: Array<{ts:string;name:string;value:number;nodeId?:string;processPid?:number;processName?:string}> };
+  diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null }; capacity?: {inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null} }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string; runId?: string;
+    classification: string; status?: number }> };
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
-  { id: "usage", title: "效能统计", symbol: "▤", caption: "离线统计与对照" },
-  { id: "workflows", title: "工作流", symbol: "☷", caption: "任务与检查点" },
+  { id: "workflows", title: "工作流", symbol: "☷", caption: "对话通过 Synrex 操作主机" },
   { id: "tasks", title: "执行索引", symbol: ">_", caption: "持久任务位置" },
   { id: "nodes", title: "主机节点", symbol: "⌘", caption: "版本与契约" },
   { id: "diagnostics", title: "诊断中心", symbol: "⌁", caption: "MCP 时间线" },
-  { id: "resources", title: "资源与网络", symbol: "▥", caption: "进程 / CPU / 网络" },
   { id: "memory", title: "记忆与治理", symbol: "◇", caption: "学习证据" },
 ];
 const statusText: Record<string,string> = {
@@ -84,57 +54,6 @@ function Metric({ label, value, info, symbol }: { label:string; value:string|num
 }
 function Blank({ children }: { children:ReactNode }) {
   return <div className="blank"><span>◌</span><p>{children}</p></div>;
-}
-function UsagePage(){
-  const [data,setData]=useState<Usage|null>(null);
-  const [error,setError]=useState("");
-  useEffect(()=>{
-    let live=true;
-    const load=()=>getJson<Usage>("/console/api/usage").then(x=>{if(live){setData(x);setError("");}})
-      .catch(()=>{if(live)setError("离线统计暂不可用");});
-    void load();const timer=setInterval(()=>void load(),60000);
-    return()=>{live=false;clearInterval(timer);};
-  },[]);
-  if(error)return <Blank>{error}</Blank>;
-  if(!data||data.status)return <Blank>等待独立统计进程首次生成数据，不在 MCP 主进程中计算。</Blank>;
-  const age=Date.now()-Date.parse(data.generatedAt??"");
-  const format=(n?:number|null)=>n===undefined||n===null?"未知":n.toLocaleString("zh-CN");
-  return <div className="stack">
-    <Panel title="7 天执行效率" hint="后台独立进程生成，只读取缓存；不会调用模型，也不会占用上下文">
-      <p className="footnote">更新于 {time(data.generatedAt)}；统计口径为服务端实际观测的 MCP 请求。</p>
-      {(!Number.isFinite(age)||age>11*60*1000)&&<p role="alert" className="error-banner">
-        统计源已超过 11 分钟未更新，展示的是历史缓存，不能当作实时指标。</p>}
-      <div className="metrics">
-        <Metric label="MCP 请求" value={format(data.requests)} info="服务端观测" symbol="▤"/>
-        <Metric label="已完成" value={format(data.completed)} info="HTTP 完成，不代表模型成功" symbol="✓"/>
-        <Metric label="失败" value={format(data.failed)} info="已记录失败" symbol="!"/>
-        <Metric label="工具调用" value={format(data.toolCalls)} info="执行完成事件" symbol="⌘"/>
-        <Metric label="平均 MCP 耗时" value={data.duration?.meanMs==null?"未知":data.duration.meanMs+" ms"}
-          info="仅统计可观测请求" symbol="◷"/>
-      </div>
-    </Panel>
-    <Panel title="Token 与传输开销" hint="真实模型 Token 不可观测时保持未知，不把网络字节伪装成 Token">
-      <div className="metrics">
-        <Metric label="输入 Token" value="未知" info="宿主未开放用量" symbol="↗"/>
-        <Metric label="输出 Token" value="未知" info="宿主未开放用量" symbol="↙"/>
-        <Metric label="MCP 输入流量" value={format(data.mcpWire?.inputBytes)+" B"} info="HTTP 请求字节" symbol="⇢"/>
-        <Metric label="MCP 输出流量" value={format(data.mcpWire?.outputBytes)+" B"} info="HTTP 响应字节" symbol="⇠"/>
-      </div>
-      <p className="footnote">输入字节覆盖 {format(data.mcpWire?.observedInputRequests)} 次请求；
-        输出字节覆盖 {format(data.mcpWire?.observedOutputRequests)} 次请求。仅作为传输开销，不推断模型推理 Token。</p>
-    </Panel>
-    <Panel title="代码产出" hint="Git 七天提交记录，不将改动行数直接等同于有效代码">
-      {data.code?<><div className="metrics">
-        <Metric label="提交" value={format(data.code.commits)} info="不含合并提交" symbol="◇"/>
-        <Metric label="新增行" value={format(data.code.added)} info="Git numstat" symbol="+"/>
-        <Metric label="删除行" value={format(data.code.deleted)} info="Git numstat" symbol="−"/>
-        <Metric label="净变动" value={format(data.code.net)} info="新增减删除" symbol="≡"/>
-      </div><p className="footnote">{data.code.warning}</p></>:<Blank>未配置仓库路径，暂无可验证代码统计。</Blank>}
-    </Panel>
-    <Panel title="GPT / Codex 对照" hint="对照数据未采集前不展示虚构的节省百分比">
-      <Blank>{data.comparison?.reason??"尚无可比较的基线数据"}</Blank>
-    </Panel>
-  </div>;
 }
 async function getJson<T>(url:string, init?:RequestInit):Promise<T> {
   const r=await fetch(url,{ credentials:"same-origin",cache:"no-store",...init });
@@ -198,34 +117,39 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
 }
 function Workflows({d}:{d:Snapshot}) {
   const [id,setId]=useState<string|null>(null);
-  const current=d.workflows.find(x=>x.id===id)??d.workflows[0];
+  const sessions=d.conversationSessions??[];
+  const current=sessions.find(x=>x.id===id)??sessions[0];
   return <div className="columns workflows-columns">
-    <Panel title="工作流" hint="本地 SQLite 持久化">
-      {d.workflows.map(w=><button className={`pick ${current?.id===w.id?"picked":""}`} key={w.id} onClick={()=>setId(w.id)}>
-        <div className="grow"><strong>{w.title}</strong><small>{w.workspace} · Revision {w.revision}</small></div>
-        <Badge value={w.status}/></button>)}
-      {!d.workflows.length&&<Blank>暂无工作流</Blank>}
+    <Panel title="对话操作会话" hint="来自 MCP 诊断事件；不是研发目标清单">
+      {sessions.map(s=><button className={`pick ${current?.id===s.id?"picked":""}`} key={s.id} onClick={()=>setId(s.id)}>
+        <div className="grow"><strong>{s.title}</strong><small>{s.requestCount} 次 MCP 请求 · {time(s.lastAt)}</small></div>
+        <small>{s.state==="task_running"?"存在活动任务":s.state==="recent_mcp_activity"?"近期有调用":"无近期调用"}</small></button>)}
+      {!sessions.length&&<Blank>目前没有带对话 ID 的 MCP 调用记录。不能据此判断 GPT 是否仍在思考。</Blank>}
     </Panel>
-    <Panel title="检查点" hint="只读 · 通过 GPT 对话继续执行">
-      {current?<div className="checkpoint"><Badge value={current.status}/><h2>{current.title}</h2>
-        <p>{current.goal}</p><code className="id-block">{current.id}</code>
-        <div className="checkpoint-block"><small>当前阶段</small><strong>{current.phase||"—"}</strong><p>{current.summary}</p></div>
-        <div className="checkpoint-block"><small>下一步</small>{current.nextSteps.length
-          ?<ol>{current.nextSteps.map((x,i)=><li key={i}>{x}</li>)}</ol>:<p>没有剩余步骤</p>}</div>
-        {current.blockers.length>0&&<div className="checkpoint-block"><small>阻塞事项</small><ul>{current.blockers.map((x,i)=><li key={i}>{x}</li>)}</ul></div>}
-        <p className="footnote">复制工作流 ID，在普通 GPT 对话中要求继续该任务即可。</p>
+    <Panel title="对话 MCP 调用链" hint="只表示 Synrex 观测，不能判定 GPT 对话是否结束">
+      {current?<div className="checkpoint"><h2>{current.title}</h2><code className="id-block">{current.id}</code>
+        <p>最后一次 MCP 事件：{time(current.lastAt)} · 关联活动任务：{current.runningTasks}</p>
+        {current.requests.slice(0,35).map(r=><div key={r.requestId} className="list-row">
+          <div className="grow"><strong>{r.tool??"MCP 请求"}</strong><small>{r.requestId} · {time(r.lastAt)}</small>
+            {(r.taskId||r.runId)&&<small>{r.taskId??""} {r.runId??""}</small>}</div><Badge value={r.classification}/></div>)}
       </div>:<Blank>选择一个工作流查看</Blank>}
     </Panel>
   </div>;
 }
 function Tasks({d}:{d:Snapshot}) {
   const names=new Map(d.nodes.map(x=>[x.id,x.alias]));
-  return <Panel title="持久任务索引" hint="只显示已登记的执行位置；不能把任务索引误认为实际运行状态">
-    <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>Run ID</th><th>创建时间</th></tr></thead>
-    <tbody>{d.tasks.map(t=><tr key={t.id}><td><code title={t.id}>{t.id.slice(0,23)}…</code></td>
-      <td>{names.get(t.nodeId)??t.nodeId}</td><td><code>{t.runId??"—"}</code></td><td>{time(t.createdAt)}</td></tr>)}</tbody></table></div>
-    {!d.tasks.length&&<Blank>暂无任务索引</Blank>}
-    <p className="footnote">持久任务的实时进程状态与完整输出保存在执行节点上。当前页面不推断任务已完成。</p>
+  const [showHistory,setShowHistory]=useState(false);
+  const visible=showHistory?d.tasks:d.tasks.filter(t=>t.status==="working"||t.status==="input_required");
+  return <Panel title="持久任务监控" hint="默认只展示本机状态文件确认仍在执行的任务；历史记录不混入活动列表">
+    <p><strong>swy1 当前活动任务服务：</strong> {d.activeTaskUnits===null||d.activeTaskUnits===undefined?"无法读取":d.activeTaskUnits.length+" 个"}</p>
+    {d.activeTaskUnits?.map(unit=><div className="list-row" key={unit}><span className="online-dot"/><code>{unit}</code><small>systemd running</small></div>)}
+    <p>已确认运行 {d.tasks.filter(t=>t.status==="working"||t.status==="input_required").length} 项（只覆盖最近登记的本机任务） ·
+      <button onClick={()=>setShowHistory(v=>!v)}>{showHistory?"隐藏历史任务":"查看历史任务及未确认记录"}</button></p>
+    <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>状态（本机证据）</th><th>Run ID</th><th>创建时间</th></tr></thead>
+    <tbody>{visible.map(t=><tr key={t.id}><td><code title={t.id}>{t.id.slice(0,23)}…</code></td>
+      <td>{names.get(t.nodeId)??t.nodeId}</td><td>{t.status==="unknown"?"未确认":t.status==="stale_unverified"?"心跳过期 / 待核验":t.status}</td><td><code>{t.runId??"—"}</code></td><td>{time(t.createdAt)}</td></tr>)}</tbody></table></div>
+    {!visible.length&&<Blank>{showHistory?"暂无任务索引":"没有状态文件确认的活动任务；远程任务可能未纳入"}</Blank>}
+    <p className="footnote">此表为历史任务索引，不表示进程正在运行。实际活动进程需要独立的实时进程源，不应依据索引判断。</p>
   </Panel>;
 }
 function Nodes({d}:{d:Snapshot}) {
@@ -238,270 +162,171 @@ function Nodes({d}:{d:Snapshot}) {
     {n.contract.missing>0&&<p className="warning">{n.contract.missing} 个本地工具契约未在此节点声明；远程调用仍须逐项校验。</p>}
     <code>{n.id}</code></article>)}</div>;
 }
-function Diagnostics({d}:{d:Snapshot}) {
+function Diagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapshot;clockOffsetMs:number|null;clockUncertaintyMs:number|null}) {
   const [query,setQuery]=useState("");
-  const [selected,setSelected]=useState<string|null>(null);
-  const [detail,setDetail]=useState<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];
-    conversationTitle?:string|null;titleSource?:string;
-    truncated:boolean;archiveCoverage:string;remoteState?:string}|null>(null);
-  const [titleDraft,setTitleDraft]=useState("");
-  const [labelMessage,setLabelMessage]=useState("");
-  const [history,setHistory]=useState<Snapshot["diagnostics"]["events"]>([]);
-  const [filter,setFilter]=useState("");
-  const [historyStart,setHistoryStart]=useState("");
-  const [historyEnd,setHistoryEnd]=useState("");
-  const [historyStats,setHistoryStats]=useState<{events:number;spans:number;metrics:number;first?:string;last?:string}|null>(null);
-  const [historyPeer,setHistoryPeer]=useState("unknown");
-  const [browserEvents,setBrowserEvents]=useState<BrowserEvent[]>([]);
-  const [browserError,setBrowserError]=useState("");
-  const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??"")+" "+(r.conversationTitle??""))
-    .toLowerCase().includes(query.toLowerCase())),[d,query]);
-  const chosen=selected??matched[0]?.requestId;
+  const [selectedRun,setSelectedRun]=useState<string|null>(null);
+  const [runLog,setRunLog]=useState("");
+  const [runLogOffset,setRunLogOffset]=useState(0);
+  const [runLogSize,setRunLogSize]=useState(0);
+  const [runLogError,setRunLogError]=useState("");
+  async function loadRun(runId:string,offset=0){
+    if(!/^run_\d{14}_[a-zA-Z0-9]{4,32}$/.test(runId))return;
+    try{
+      const result=await getJson<{text:string;nextOffset:number;size:number}>(`/console/api/run-log/${encodeURIComponent(runId)}?offset=${offset}`);
+      setSelectedRun(runId);setRunLog(prev=>offset?prev+result.text:result.text);
+      setRunLogOffset(result.nextOffset);setRunLogSize(result.size);setRunLogError("");
+    }catch{setRunLogError("无法读取 Run Log；可能位于其他主机、已归档或已删除。");}
+  }
+  const [browser,setBrowser]=useState<BrowserEvent[]>([]);
+  const [harError,setHarError]=useState("");
+  const [autoCount,setAutoCount]=useState(0);
+  const [lastExtensionSync,setLastExtensionSync]=useState<number|null>(null);
+  const [incidents,setIncidents]=useState<Array<{id:string;at:string;trigger:BrowserEvent;events:BrowserEvent[]}>>([]);
   useEffect(()=>{
-    let cancelled=false;
-    setDetail(null);
-    if(chosen)void getJson<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];
-      conversationTitle?:string|null;titleSource?:string;truncated:boolean;archiveCoverage:string}>(
-      "/console/api/trace?requestId="+encodeURIComponent(chosen)).then(result=>{
-        if(!cancelled){setDetail(result);setTitleDraft(result.conversationTitle??"");}
-      }).catch(()=>{if(!cancelled)setDetail(null);});
-    return()=>{cancelled=true;};
-  },[chosen]);
-  const trace=(detail?.events??d.diagnostics.events.filter(e=>chosen && [e.requestId,e.traceId,e.nodeRequestId].includes(chosen)))
-    .slice().reverse();
-  async function labelSelected(){
-    if(!chosen || !titleDraft.trim())return;
-    setLabelMessage("");
-    try{
-      const result=await getJson<{label:{conversationTitle:string}}>("/console/api/conversation-label",{
-        method:"POST",headers:{"content-type":"application/json"},
-        body:JSON.stringify({requestId:chosen,conversationTitle:titleDraft.trim()}),
+    try {
+      const saved=JSON.parse(localStorage.getItem("synrex-browser-incidents-v1")||"[]");
+      if(Array.isArray(saved))setIncidents(saved.slice(-30));
+    } catch { /* Browser storage is optional. */ }
+  },[]);
+  useEffect(()=>{
+    function onMessage(event:MessageEvent){
+      if(event.source!==window || event.origin!==location.origin || event.data?.type!=="synrex-browser-trace-v1" || !Array.isArray(event.data.events))return;
+      const safe=(event.data.events as BrowserEvent[]).slice(-1000).filter(x=>x && typeof x.at==="string" &&
+        typeof x.host==="string" && typeof x.path==="string" && Number.isFinite(Date.parse(x.at)) &&
+        (x.host==="chatgpt.com" || x.host==="chat.openai.com"));
+      setBrowser(old=>{
+        const merged=new Map(old.map(x=>[`${x.at}|${x.host}|${x.path}|${x.durationMs}`,x]));
+        for(const x of safe)merged.set(`${x.at}|${x.host}|${x.path}|${x.durationMs}`,x);
+        const next=[...merged.values()].sort((a,b)=>a.at.localeCompare(b.at)).slice(-2000);
+        const discovered=detectBrowserIncidents(next);
+        if(discovered.length)setIncidents(previous=>{
+          const byId=new Map(previous.map(x=>[x.id,x]));
+          let changed=false;
+          for(const incident of discovered) {
+            if(!byId.has(incident.id)){byId.set(incident.id,incident);changed=true;}
+          }
+          if(!changed)return previous;
+          const recent=[...byId.values()].sort((a,b)=>a.at.localeCompare(b.at)).slice(-30);
+          try {localStorage.setItem("synrex-browser-incidents-v1",JSON.stringify(recent));} catch {}
+          return recent;
+        });
+        return next;
       });
-      setDetail(prev=>prev?{...prev,conversationTitle:result.label.conversationTitle,titleSource:"owner"}:prev);
-      setLabelMessage("已登记：手动关联该请求。");
-    }catch{setLabelMessage("标题登记失败，请确认请求仍在归档中。");}
+      setAutoCount(safe.length);
+      setLastExtensionSync(Date.now());
+      if(Array.isArray(event.data.incidents)) {
+        setIncidents(event.data.incidents.slice(-30).filter((x:unknown):x is {id:string;at:string;trigger:BrowserEvent;events:BrowserEvent[]}=>{
+          if(!x || typeof x!=="object")return false;
+          const item=x as {id?:unknown;at?:unknown;trigger?:unknown;events?:unknown};
+          return typeof item.id==="string"&&typeof item.at==="string"&&
+            Boolean(item.trigger)&&Array.isArray(item.events);
+        }));
+      }
+    }
+    window.addEventListener("message",onMessage);return()=>window.removeEventListener("message",onMessage);
+  },[]);
+  const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??""))
+    .toLowerCase().includes(query.toLowerCase())),[d,query]);
+  const graph=useMemo(()=>buildCausalGraph(d.diagnostics.requests,d.tasks,browser,clockOffsetMs??0),[d,browser,clockOffsetMs]);
+  const connectedPaths=useMemo(()=>{
+    const links=new Map<string,string[]>();
+    for(const edge of graph.edges.filter(e=>e.confidence==="verified")){
+      const targets=links.get(edge.from)??[];targets.push(edge.to);links.set(edge.from,targets);
+    }
+    return graph.nodes.filter(n=>n.kind==="mcp"&&links.has(n.id)).slice(-30).reverse().map(n=>{
+      const task=links.get(n.id)?.find(id=>id.startsWith("task:"));
+      const run=links.get(task??n.id)?.find(id=>id.startsWith("run:"))??
+        links.get(n.id)?.find(id=>id.startsWith("run:"));
+      return {mcp:n,task:task?graph.nodes.find(x=>x.id===task):undefined,run:run?graph.nodes.find(x=>x.id===run):undefined};
+    });
+  },[graph]);
+  const timeline=useMemo(()=>[
+    ...matched.map(r=>({at:clockOffsetMs===null?r.lastAt:new Date(Date.parse(r.lastAt)+clockOffsetMs).toISOString(),source:"MCP",detail:`${r.tool??"请求"} · ${r.requestId}`,state:r.classification})),
+    ...browser.filter(r=>(r.host+" "+r.path+" "+(r.requestId??"")).toLowerCase().includes(query.toLowerCase()))
+      .map(r=>({at:r.at,source:"浏览器",detail:`${r.method} ${r.host}${r.path} · ${Math.round(r.durationMs)}ms`,state:r.error || String(r.status || "未完成")})),
+  ].sort((a,b)=>a.at.localeCompare(b.at)).slice(-500),[matched,browser,query,clockOffsetMs]);
+  async function importHar(file?:File) {
+    if (!file) return;
+    setHarError("");
+    if(file.size>15_000_000){setHarError("HAR 超过 15 MB 限制");return;}
+    try {setBrowser(parseHar(JSON.parse(await file.text())));}catch(e){setHarError(e instanceof Error?e.message:"无效的 HAR 文件");}
   }
-  const spans=detail?.spans??[];
-  const origin=spans.length ? Math.min(...spans.map(s=>Date.parse(s.ts))) : 0;
-  const endpoint=spans.length ? Math.max(...spans.map(s=>Date.parse(s.ts)+s.durationMs)) : 0;
-  const total=Math.max(1,endpoint-origin);
-  const relatedBrowser=browserEvents.filter(e=>{
-    if(!trace.length)return false;
-    const times=trace.map(x=>Date.parse(x.ts)).filter(Number.isFinite);
-    if(!times.length)return false;
-    return e.ts>=Math.min(...times)-120000&&e.ts<=Math.max(...times)+120000;
-  }).slice(-100);
-  const browserFindings=analyzeBrowserTransport(browserEvents);
-  async function loadHistory(){
-    const params=new URLSearchParams();
-    if(filter)params.set("event",filter);
-    if(historyStart)params.set("start",new Date(historyStart).toISOString());
-    if(historyEnd)params.set("end",new Date(historyEnd).toISOString());
-    const payload=await getJson<{events:Snapshot["diagnostics"]["events"];stats:{events:number;spans:number;metrics:number;first?:string;last?:string};gatewayHistory:string}>(
-      "/console/api/history?"+params);
-    setHistory(payload.events);
-    setHistoryStats(payload.stats);setHistoryPeer(payload.gatewayHistory);
+  function exportIncident(incident:{id:string;at:string;trigger:BrowserEvent;events:BrowserEvent[]}) {
+    const payload={schema:"synrex-incident-v1",capturedAt:new Date().toISOString(),
+      browser:incident,serverClockOffsetMs:clockOffsetMs,serverClockUncertaintyMs:clockUncertaintyMs,
+      mcp:d.diagnostics.requests.filter(r=>Math.abs(Date.parse(r.lastAt)-Date.parse(incident.at))<120000)};
+    const blob=new Blob([JSON.stringify(payload,null,2)],{type:"application/json"});
+    const url=URL.createObjectURL(blob);
+    const anchor=document.createElement("a");anchor.href=url;anchor.download="synrex-incident-"+incident.id+".json";
+    anchor.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
-  async function loadBrowserMetadata(file:File){
-    setBrowserError("");
-    if(file.size>4*1024*1024){setBrowserError("文件超过 4 MiB 上限");return;}
-    try{
-      const data=JSON.parse(await file.text()) as {schema?:string;events?:BrowserEvent[]};
-      if(data.schema!=="synrex.browser.v1"||!Array.isArray(data.events))throw Error("Invalid schema");
-      const accepted=data.events.filter(e=>e && ["network","ui","conversation_title","tab","health"].includes(e.kind) &&
-        typeof e.ts==="number"&&Number.isFinite(e.ts)&&
-        ["started","headers_received","first_response","redirect","completed","handshake_completed","network_error",
-          "transport_timeout","retry_requested","observed","heartbeat",
-          "visible","hidden","pagehide","pageshow","incomplete"].includes(e.reason))
-        .map(e=>({ts:e.ts,kind:e.kind,reason:e.reason,
-          ...(typeof e.tabId==="number"?{tabId:e.tabId}:{}),
-          ...(typeof e.flowId==="string"&&/^[0-9a-f-]{36}$/.test(e.flowId)?{flowId:e.flowId}:{}),
-          ...(typeof e.endpointGroup==="string"&&["conversation","other","self_test","websocket_handshake"].includes(e.endpointGroup)
-            ?{endpointGroup:e.endpointGroup}:{}),
-          ...(typeof e.requestType==="string"?{requestType:e.requestType}:{}),
-          ...(typeof e.errorCategory==="string"?{errorCategory:e.errorCategory}:{}),
-          ...(typeof e.netError==="string"&&/^net::ERR_[A-Z0-9_]{2,60}$/.test(e.netError)?{netError:e.netError}:{}),
-          ...(e.kind==="conversation_title" && typeof e.conversationTitle==="string" &&
-            e.conversationTitle.length<=120?{conversationTitle:e.conversationTitle}:{}),
-          ...(typeof e.durationMs==="number"?{durationMs:e.durationMs}:{}),
-          ...(typeof e.status==="number"?{status:e.status}:{})})).slice(-5000);
-      setBrowserEvents(accepted);
-    }catch{setBrowserError("无法读取指定格式的浏览器元数据");}
-  }
-  const durations=d.diagnostics.events.filter(e=>e.event==="mcp_finished" && typeof e.durationMs==="number").map(e=>e.durationMs!);
-  const percentile=(p:number)=>durations.length ? [...durations].sort((a,b)=>a-b)[Math.floor((durations.length-1)*p)]!+" ms" : "—";
   return <div className="stack"><div className="notice"><strong>把卡顿定位到正确层级</strong>
     <p>工具执行结束且 HTTP 200，说明 Synrex 已返回；它无法证明 ChatGPT 模型或界面已经继续。</p></div>
-    <div className="metrics"><Metric label="诊断事件" value={d.diagnostics.count} info="当前读取窗口" symbol="⌁"/>
-      <Metric label="HTTP p50" value={percentile(.5)} info="近期请求" symbol="◷"/>
-      <Metric label="HTTP p95" value={percentile(.95)} info="近期请求" symbol="◷"/>
-      <Metric label="HTTP p99" value={percentile(.99)} info="样本量有限" symbol="◷"/></div>
-    <Panel title="MCP 请求时间线" hint="点击请求查看已记录阶段"
-      extra={<div><input className="filter" placeholder="按请求 ID 或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>
-        <button disabled={!/^[a-zA-Z0-9_-]{1,110}$/.test(query)} onClick={()=>setSelected(query)}>按 ID 查 7 天 Trace</button></div>}>
-      {matched.map(r=><button className={`pick ${chosen===r.requestId?"picked":""}`} key={r.requestId} onClick={()=>setSelected(r.requestId)}><span className="round-symbol">⌁</span>
-        <div className="grow"><strong>{r.tool??"MCP 请求"}</strong>
-          <small>对话：{r.conversationTitle??"未关联（宿主未提供标题）"}</small>
-          <small>{r.requestId}</small>
-          {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></button>)}
-      {!matched.length&&<Blank>没有匹配的请求记录</Blank>}
-    </Panel>
-    <Panel title="对话标题关联" hint="宿主标题优先；没有宿主元数据时可手动登记准确标题，不根据任务内容推测">
-      <p>当前请求：<code>{chosen??"未选择"}</code>。已知标题：<strong>{detail?.conversationTitle??"未知"}</strong>
-        {detail?.titleSource&&<small>（{detail.titleSource==="owner"?"手动登记":detail.titleSource==="host"?"宿主提供":"尚未关联"}）</small>}</p>
-      <div className="list-row">
-        <input className="filter" style={{flex:1}} maxLength={120} placeholder="输入此对话在 ChatGPT 中的实际标题"
-          value={titleDraft} onChange={e=>setTitleDraft(e.target.value)}/>
-        <button disabled={!chosen||!titleDraft.trim()} onClick={()=>void labelSelected()}>保存标题关联</button>
-      </div>
-      {labelMessage&&<p className="footnote">{labelMessage}</p>}
-      <p className="footnote">本操作仅绑定选中的请求 ID，不会自动把相邻时间的其他对话当作同一会话。</p>
-    </Panel>
-    <Panel title="关联事件" hint={detail?.truncated?"记录超过每次查询上限，显示最近 1000 条":"归档检索有窗口限制，缺失阶段保持未知"}>
-      {spans.length>0&&<div style={{marginBottom:16}}>
-        <strong>原生 OTel Span 瀑布图</strong>
-        <p className="footnote">时间轴基于实际 Span 时间戳；并行阶段会重叠，不能直接相加。</p>
-        {spans.slice(0,80).map(s=><div key={s.traceId+s.spanId} className="list-row">
-          <span style={{width:112,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}} title={s.name}>{s.name}</span>
-          <div style={{height:14,position:"relative",background:"var(--surface,#edf1f4)",flex:1}}>
-            <div title={s.durationMs+" ms · "+s.status} style={{position:"absolute",top:1,bottom:1,
-              left:((Date.parse(s.ts)-origin)/total*100)+"%",
-              width:Math.max(.5,s.durationMs/total*100)+"%",
-              background:s.status==="error"?"#cf644e":"#6c8fac",borderRadius:3}}/>
-          </div><small style={{width:65,textAlign:"right"}}>{Math.round(s.durationMs)} ms</small>
-        </div>)}
-      </div>}
-      {trace.length?<div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>阶段</th><th>耗时</th><th>状态</th></tr></thead><tbody>
-        {trace.map((e,i)=><tr key={`${e.ts}-${i}`}><td>{time(e.ts)}</td><td>{e.event}</td><td>{e.stage??e.tool??"—"}</td>
-          <td>{e.durationMs===undefined?"未知":`${e.durationMs} ms`}</td><td>{e.outcome??e.status??"—"}</td></tr>)}
-      </tbody></table></div>:<Blank>当前窗口没有关联事件，不能据此认定请求未发生。</Blank>}
-      {detail?.remoteState==="unavailable"&&<p className="footnote">gateway 历史查询不可用；已显示本地可用记录。</p>}
-    </Panel>
-    <Panel title="7 天历史检索" hint="SQLite 索引查询 · 500 条分页上限 · 默认近期">
-      <div className="list-row"><input className="filter" placeholder="事件名，例如 mcp_failed" value={filter} onChange={e=>setFilter(e.target.value)}/>
-        <label>起始 <input type="datetime-local" value={historyStart} onChange={e=>setHistoryStart(e.target.value)}/></label>
-        <label>结束 <input type="datetime-local" value={historyEnd} onChange={e=>setHistoryEnd(e.target.value)}/></label>
-        <button onClick={()=>void loadHistory()}>检索</button></div>
-      {historyStats&&<p className="footnote">本机索引：{historyStats.events} 事件，{historyStats.spans} 原生 Span，
-        {historyStats.metrics} 分钟级指标；gateway 历史查询：{historyPeer==="available"?"可用":"不可用"}。
-        当前保留范围：{time(historyStats.first)} 至 {time(historyStats.last)}。</p>}
-      <div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>对话标题</th><th>请求 ID</th></tr></thead>
-        <tbody>{history.slice(0,100).map((e,i)=><tr key={i}><td>{time(e.ts)}</td><td>{e.event}</td>
-          <td>{e.nodeId??"swy1"}</td><td>{e.conversationTitle??"未知"}</td><td>{e.requestId??e.nodeRequestId??"—"}</td></tr>)}</tbody></table></div>
-      {!history.length&&<Blank>点击“检索”可查询历史事件；未执行检索不代表没有日志。</Blank>}
-    </Panel>
-    <Panel title="浏览器消息流元数据" hint="手动导入扩展 JSON，不上传提示词和消息内容">
-      <a href="/console/api/browser-extension" download="synrex-browser-observer.zip">
-        下载浏览器观测扩展（安装需要用户自行确认）
-      </a>
-      <input type="file" accept=".json,application/json" onChange={e=>{
-        const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
-      }}/>
-      {browserError&&<p className="form-error">{browserError}</p>}
-      <p className="footnote">扩展 v1.1：在 ChatGPT 标签页打开扩展并点击“测试实际页面网络采集”。
-        看到通过后导出 JSON，再导入 Console。无共享请求 ID 的记录只按时间推测关联。</p>
-      {browserEvents.length>0&&<p className="footnote">已导入 {browserEvents.length} 条；
-        请求开始 {browserEvents.filter(e=>e.reason==="started").length}，
-        首响应 {browserEvents.filter(e=>e.reason==="first_response").length}，
-        结束 {browserEvents.filter(e=>e.reason==="completed"||e.reason==="network_error").length}，
-        页面超时 {browserEvents.filter(e=>e.reason==="transport_timeout").length}。</p>}
-      {browserFindings.map((f,i)=><p className="footnote" key={i}>
-        超时诊断（{time(new Date(f.at).toISOString())}）：{f.description}
-        候选流 {f.candidateFlows} 条，均非精确请求级归因。</p>)}
-      {relatedBrowser.some(e=>e.conversationTitle)&&<p className="footnote">
-        观测到的浏览器对话标题：
-        {[...new Set(relatedBrowser.map(e=>e.conversationTitle).filter(Boolean))].slice(0,5).join("、")}。
-        这些仅是时间上接近的候选标题，不代表已关联到当前请求。
-      </p>}
-      <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>阶段</th><th>本地流 ID</th><th>耗时</th></tr></thead>
-        <tbody>{(relatedBrowser.length?relatedBrowser:browserEvents.slice(-100)).slice(-60).map((e,i)=><tr key={i}>
-          <td>{time(new Date(e.ts).toISOString())}</td><td>{e.endpointGroup??e.kind}</td>
-          <td>{e.reason}{e.status!==undefined?" / HTTP "+e.status:""}
-            {e.errorCategory?" / "+e.errorCategory:""}{e.netError?" / "+e.netError:""}</td>
-          <td title={e.flowId??""}>{e.flowId?.slice(0,8)??"—"}</td>
-          <td>{e.durationMs===undefined?"未知":e.durationMs+" ms"}</td></tr>)}</tbody></table></div>
-      {browserEvents.length>0&&!relatedBrowser.length&&<Blank>已导入 {browserEvents.length} 条；当前请求时间窗口无匹配。</Blank>}
-    </Panel></div>;
-}
-function Resources({d}:{d:Snapshot}) {
-  const [host,setHost]=useState("swy1");
-  const runtime=d.observability.runtime;
-  const latestNodeNetwork=d.diagnostics.events.find(e=>e.event==="network_sampled"&&(e.nodeId??"swy1")===host);
-  const networkStatus=latestNodeNetwork??(host==="swy1"?d.observability.network:{});
-  const mib=(bytes?:number)=>bytes===undefined?"未知":(bytes/1048576).toFixed(1)+" MiB";
-  const runtimeSamples=d.diagnostics.events.filter(e=>e.event==="runtime_sampled"&&typeof e.rssBytes==="number"&&
-    (e.nodeId??"swy1")===host);
-  const latestBoot=runtimeSamples[0]?.bootId;
-  const samples=runtimeSamples.filter(e=>!latestBoot||e.bootId===latestBoot)
-    .slice().reverse().slice(-50);
-  const max=Math.max(1,...samples.map(e=>e.rssBytes!));
-  const points=samples.map((e,i)=>`${samples.length===1?0:i*600/(samples.length-1)},${110-100*e.rssBytes!/max}`).join(" ");
-  const latest=new Map<string,Snapshot["observability"]["metrics"][number]>();
-  for(const sample of d.observability.metrics){
-    const key=[sample.nodeId,sample.processPid,sample.name].join(":");
-    if(!latest.has(key)||latest.get(key)!.ts<sample.ts)latest.set(key,sample);
-  }
-  const processMetrics=[...latest.values()].filter(e=>e.processPid!==undefined)
-    .sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,30);
-  const network=[...latest.values()].filter(e=>e.name.startsWith("system.network"))
-    .sort((a,b)=>a.name.localeCompare(b.name)).slice(0,18);
-  const tunnelFailures=d.diagnostics.events.filter(e=>e.event==="tunnel_auth_failed"||e.event==="tunnel_disconnected");
-  return <div className="stack">
-    <div className="notice"><strong>采集范围：可控主机与进程</strong><p>
-      Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取（仅尾部窗口）":"尚无本地归档数据"}。
-      gateway 元数据：{d.observability.peerSync.gateway==="current"?"最近同步":d.observability.peerSync.gateway==="stale"?"已过期":"尚无同步"}。
-      网络计数器不能替代单次 MCP 请求 RTT；缺失数据显示“未知”。</p></div>
-    <label>节点 <select className="filter" value={host} onChange={e=>setHost(e.target.value)}>
-      <option value="swy1">swy1</option><option value="gateway">gateway（近一分钟元数据）</option>
-    </select></label>
-    <div className="metrics">
-      <Metric symbol="▥" label="Synrex RSS" value={host==="swy1"?mib(runtime.rssBytes):"未知"} info={host==="swy1"?time(runtime.at):"gateway 未部署新版进程埋点"}/>
-      <Metric symbol="▦" label="JS Heap" value={host==="swy1"?mib(runtime.heapUsedBytes):"未知"} info={host}/>
-      <Metric symbol="◷" label="事件循环采样延迟" value={host==="swy1"&&runtime.eventLoopLagMs!==undefined?runtime.eventLoopLagMs+" ms":"未知"} info="10 秒采样偏移"/>
-      <Metric symbol="⌁" label="正在执行工具" value={host==="swy1"?runtime.activeToolCount??"未知":"未知"} info="采样时刻的活动数量"/>
-    </div>
-    <Panel title="进程内存曲线" hint="真实采集记录 · 同一服务实例 · 采样缺失处不插值">
-      {samples.length>=2?<svg role="img" aria-label="Synrex 内存采样历史曲线"
-        viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:140}}>
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2" vectorEffect="non-scaling-stroke"/>
-      </svg>:<Blank>运行版本尚未产生足够的资源采样。</Blank>}
-    </Panel>
-    <div className="metrics">
-      <Metric symbol="◷" label="TCP RTT p95" value={networkStatus.tcpRttP95Ms===undefined?"未知":networkStatus.tcpRttP95Ms+" ms"}
-        info="主机已建立连接样本，非 MCP 请求 RTT"/>
-      <Metric symbol="⌁" label="TCP 已采样连接" value={networkStatus.tcpConnections??"未知"} info={time(latestNodeNetwork?.ts??(host==="swy1"?d.observability.network.at:undefined))}/>
-      <Metric symbol="▥" label="重传连接数" value={networkStatus.tcpRetransSockets??"未知"} info="采样窗口"/>
-      <Metric symbol="◷" label="GC 耗时" value={host==="swy1"&&runtime.gcDurationMs!==undefined?runtime.gcDurationMs+" ms":"未知"} info="最近 10 秒采样区间"/>
-    </div>
-    <Panel title="采集完整性" hint="Collector 计数器 · 计数非零表示存在丢失风险，并非全部丢失量">
+    {d.diagnostics.observability && <Panel title="请求延迟、生命周期与 Token 可观测性" hint="仅统计本机保留的诊断事件；不是 ChatGPT 端到端耗时">
       <div className="metrics">
-        <Metric symbol="⌁" label="拒收日志" value={d.observability.collectorHealth.refusedLogs??"未知"} info="Collector 累计计数"/>
-        <Metric symbol="⌁" label="拒收指标" value={d.observability.collectorHealth.refusedMetrics??"未知"} info="Collector 累计计数"/>
-        <Metric symbol="⌁" label="导出失败" value={d.observability.collectorHealth.exporterFailed??"未知"} info={time(d.observability.collectorHealth.at)}/>
-        <Metric symbol="⌁" label="原生 Span 丢弃" value={runtime.otelSpanDropped??"未知"} info="Synrex 运行实例累计"/>
+        <Metric label="MCP 中位 / p95" value={`${d.diagnostics.observability.latency.medianMs ?? "—"} / ${d.diagnostics.observability.latency.p95Ms ?? "—"} ms`} info={`${d.diagnostics.observability.latency.completed} 个有耗时的完成请求`} symbol="◷"/>
+        <Metric label="HTTP 完成 / 提前断开" value={`${d.diagnostics.observability.lifecycle.httpCompleted} / ${d.diagnostics.observability.lifecycle.closedEarly}`} info="只表示 Synrex 侧观测" symbol="⌁"/>
+        <Metric label="未确认 / 执行错误" value={`${d.diagnostics.observability.lifecycle.unknown + d.diagnostics.observability.lifecycle.toolCompletedWithoutHttp} / ${d.diagnostics.observability.lifecycle.handlerFailed}`} info="滚动日志截断可能造成未知状态" symbol="?"/>
+        <Metric label="MCP 输出 p95" value={`${d.diagnostics.observability.capacity?.outputP95?.toLocaleString()??"—"} B`} info="已完成请求的输出体积；不是 GPT Token" symbol="⇥"/>
       </div>
+      <p className="footnote">已观测 MCP 输入 {d.diagnostics.observability.transfer.observedInputBytes.toLocaleString()} B、输出 {d.diagnostics.observability.transfer.observedOutputBytes.toLocaleString()} B；覆盖 {d.diagnostics.observability.coverage.observedRequests} 个请求。仅有 HTTP 完成证据时，模型推理中断与 ChatGPT 消息断流仍不可区分，需结合浏览器 HAR。</p>
+      <p className="footnote">输入 p95：{d.diagnostics.observability.capacity?.inputP95?.toLocaleString()??"—"} B；最大输出：{d.diagnostics.observability.capacity?.largestOutput.toLocaleString()??"—"} B；超过 16 KiB 的响应：{d.diagnostics.observability.capacity?.largeResponses??"—"}；平均有效输出吞吐估计：{d.diagnostics.observability.capacity?.bytesPerSecond?.toLocaleString()??"—"} B/s（用整段 MCP 耗时估算，包含执行等待，不代表模型生成速度）。</p>
+    </Panel>}
+    <Panel title="浏览器网络证据" hint="本地读取 HAR，仅保留请求时间、域名、路径、状态和耗时；不会上传原始 HAR">
+      <p><a href="/console/browser-extension.zip">下载 Synrex Browser Trace 扩展</a> · 首次安装后按版本更新；扩展仅读取 ChatGPT 网络元数据</p>
+      <label>导入浏览器 DevTools 导出的 HAR（建议先过滤 ChatGPT 请求） <input type="file" accept=".har,.json,application/json" onChange={e=>void importHar(e.target.files?.[0])}/></label>
+      <p className="footnote">扩展链路：{lastExtensionSync===null?"尚未收到消息":`最近同步于 ${new Date(lastExtensionSync).toLocaleTimeString()}`}；已读取 {browser.length} 条浏览器请求；最近一次同步 {autoCount} 条。{clockOffsetMs===null?"尚未校准浏览器与 swy1 时钟":`估计浏览器相对 swy1 时钟偏移 ${Math.round(clockOffsetMs)} ms，采样网络不确定度约 ±${Math.round(clockUncertaintyMs??0)} ms`}。仅有共同请求 ID 才是确定关联；时间接近只是线索。</p>
+      {harError&&<p role="alert">{harError}</p>}
+      {!!browser.length&&<button onClick={()=>setBrowser([])}>清除浏览器数据</button>}
     </Panel>
-    <Panel title="Cloudflare 隧道异常" hint="区别正式入口与辅助测试隧道；仅本次快照中可见的最近事件">
-      {tunnelFailures.length?<div className="table-scroll"><table><thead><tr><th>时间</th><th>服务</th><th>事件</th></tr></thead>
-        <tbody>{tunnelFailures.slice(0,25).map((e,i)=><tr key={i}><td>{time(e.ts)}</td>
-          <td>{e.tunnelUnit??"未知"}</td><td>{e.event}</td></tr>)}</tbody></table></div>
-        :<Blank>当前采样窗口没有隧道异常记录，不代表完整历史没有故障。</Blank>}
+    <Panel title="自动故障快照" hint="扩展保留最近 2 分钟元数据；429、5xx、网络失败或超过 30 秒时自动冻结最多 30 份证据">
+      {incidents.slice().reverse().slice(0,12).map(i=><div className="list-row" key={i.id}>
+        <div className="grow"><strong>{i.trigger.status||i.trigger.error} · {i.trigger.path}</strong>
+          <small>{new Date(i.at).toLocaleString()} · {i.events.length} 条浏览器上下文请求</small>
+          <small>附近 MCP 事件：{d.diagnostics.requests.filter(r=>Math.abs(Date.parse(r.lastAt)-Date.parse(i.at))<120000).length} 条（仅时间候选，非确定关联）</small></div>
+        <button onClick={()=>exportIncident(i)}>导出证据</button>
+      </div>)}
+      {!incidents.length&&<Blank>尚无自动冻结的故障证据；需启用 Synrex Browser Trace 扩展</Blank>}
+      <p className="footnote">按需深度抓包：在 Chrome 打开 chrome://net-export，选择默认隐私保护模式开始记录，复现后停止；原始 NetLog 不会上传至 Synrex。扩展无法获取 ChatGPT 内部模型事件或完整流式消息帧。</p>
     </Panel>
-    <div className="columns">
-      <Panel title="活动进程指标" hint="来自 Collector 的 PID 采样；不等于任务存活证明">
-        <div className="table-scroll"><table><thead><tr><th>进程</th><th>PID</th><th>指标</th><th>数值</th></tr></thead>
-          <tbody>{processMetrics.map((e,i)=><tr key={i}><td>{e.processName??"未知"}</td><td>{e.processPid}</td>
-            <td>{e.name}</td><td>{Math.round(e.value).toLocaleString()}</td></tr>)}</tbody></table></div>
-        {!processMetrics.length&&<Blank>尚未收到可识别 PID 的进程指标。</Blank>}
-      </Panel>
-      <Panel title="网络指标" hint="网络吞吐、错误与连接计数 · 不估计单次请求 RTT">
-        <div className="table-scroll"><table><thead><tr><th>指标</th><th>节点</th><th>值</th></tr></thead>
-          <tbody>{network.map((e,i)=><tr key={i}><td>{e.name}</td><td>{e.nodeId??"本机"}</td>
-            <td>{Math.round(e.value).toLocaleString()}</td></tr>)}</tbody></table></div>
-        {!network.length&&<Blank>Collector 网络数据尚不可用。</Blank>}
-      </Panel>
-    </div>
-  </div>;
+    <Panel title="端到端时间线（已知事件）" hint="按请求 ID、工具、域名或路径过滤；浏览器时间必须校准">
+      <input className="filter" placeholder="会话 / 请求 / 域名筛选" value={query} onChange={e=>setQuery(e.target.value)}/>
+      <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>事件</th><th>状态</th></tr></thead><tbody>
+        {timeline.map((r,i)=><tr key={`${r.source}-${r.at}-${i}`}><td>{new Date(r.at).toLocaleString()}</td><td>{r.source}</td><td>{r.detail}</td><td>{r.state}</td></tr>)}
+      </tbody></table></div>
+    </Panel>
+    <Panel title="跨层因果关联图" hint="实线语义：共享 Task/Run ID；时间候选不构成因果证明">
+      <p>节点 {graph.nodes.length} · 确定关联 {graph.edges.filter(e=>e.confidence==="verified").length} · 时间候选 {graph.edges.filter(e=>e.confidence==="temporal").length}</p>
+      <div className="stack">
+        {connectedPaths.map(path=><div className="list-row" key={path.mcp.id} style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10}}>
+          <div className="checkpoint-block"><small>MCP</small><strong>{path.mcp.label}</strong><small>{path.mcp.status}</small></div>
+          <span aria-hidden="true">→</span>
+          {path.task?<div className="checkpoint-block"><small>Task · ID 确认</small><strong>{path.task.label}</strong><small>{path.task.status}</small></div>:<small>无持久子任务</small>}
+          {path.run&&<><span aria-hidden="true">→</span><div className="checkpoint-block">
+            <small>Run Log · ID 确认</small><button onClick={()=>void loadRun(path.run!.label)}>{path.run.label}</button></div></>}
+        </div>)}
+        {!connectedPaths.length&&<Blank>目前的诊断窗口没有带可确认 Task/Run ID 的调用链；下方仍保留浏览器时间候选。</Blank>}
+      </div>
+      <div className="table-scroll"><table><thead><tr><th>源事件</th><th>关系</th><th>目标事件</th><th>证据</th></tr></thead><tbody>
+        {graph.edges.slice(-150).reverse().map((edge,i)=><tr key={edge.from+edge.to+i}>
+          <td><code>{edge.from}</code></td><td>{edge.relation}</td><td>{edge.to.startsWith("run:")?<button onClick={()=>void loadRun(edge.to.slice(4))}>{edge.to}</button>:<code>{edge.to}</code>}</td>
+          <td>{edge.confidence==="verified"?"ID 确认":"仅时间接近"}</td></tr>)}
+      </tbody></table></div>
+      {selectedRun&&<div className="checkpoint"><strong>Run Log · {selectedRun}</strong>
+        <p>{runLogOffset.toLocaleString()} / {runLogSize.toLocaleString()} 字节</p>
+        <pre style={{maxHeight:320,overflow:"auto",whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{runLog}</pre>
+        {runLogOffset<runLogSize&&<button onClick={()=>void loadRun(selectedRun,runLogOffset)}>读取下一段（16 KB）</button>}
+      </div>}
+      {runLogError&&<p role="alert">{runLogError}</p>}
+      <p className="footnote">只读按需分页加载 Run Log，每页最多 16 KB。跨主机任务日志需在所属执行节点查询；时间相关不是已证明的父子调用。</p>
+    </Panel>
+    <Panel title="MCP 请求时间线" hint="最小可用诊断 · 约 2 MB 滚动容量"
+      extra={<input className="filter" placeholder="按请求或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>}>
+      {matched.map(r=><div className="list-row" key={r.requestId}><span className="round-symbol">⌁</span>
+        <div className="grow"><strong>{r.tool??"MCP 请求"}</strong><small>{r.requestId}</small>
+          {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></div>)}
+      {!matched.length&&<Blank>没有匹配的请求记录</Blank>}
+    </Panel></div>;
 }
 function Memory({d}:{d:Snapshot}) {
   return <div className="stack"><div className="metrics">
@@ -523,7 +348,8 @@ function App() {
   const [view,setView]=useState<View>("overview");
   const [loading,setLoading]=useState(false);
   const [error,setError]=useState("");
-  const [clock,setClock]=useState(Date.now());
+  const [clockOffsetMs,setClockOffsetMs]=useState<number|null>(null);
+  const [clockUncertaintyMs,setClockUncertaintyMs]=useState<number|null>(null);
   const refresh=useCallback(async()=>{
     setLoading(true);
     try { const response=await getJson<Snapshot>("/console/api/snapshot");
@@ -533,11 +359,35 @@ function App() {
     finally {setLoading(false);}
   },[]);
   useEffect(()=>{void refresh();},[refresh]);
-  useEffect(()=>{if(!auth) return; const timer=window.setInterval(()=>{
-    if(!document.hidden)void refresh();
-  },10000);return ()=>window.clearInterval(timer);},[auth,refresh]);
-  useEffect(()=>{const timer=window.setInterval(()=>setClock(Date.now()),5000);
-    return ()=>window.clearInterval(timer);},[]);
+  useEffect(()=>{
+    if(auth!==true)return;
+    let alive=true;
+    let inFlight=false;
+    const update=async()=>{
+      if(inFlight || document.visibilityState==="hidden")return;
+      inFlight=true;
+      const before=Date.now();
+      try {
+        if(view==="diagnostics") {
+          const clock=await getJson<{serverTimeMs:number}>("/console/api/clock");
+          const after=Date.now();
+          if(!alive)return;
+          if(Number.isFinite(clock.serverTimeMs)) {
+            setClockOffsetMs((before+after)/2-clock.serverTimeMs);
+            setClockUncertaintyMs((after-before)/2);
+          }
+        }
+        const snapshot=await getJson<Snapshot>("/console/api/snapshot");
+        if(alive){setData(snapshot);setError("");}
+      } catch { if(alive)setError("实时数据更新失败，当前显示的是上一次快照。"); }
+      finally {inFlight=false;}
+    };
+    void update();
+    const timer=setInterval(()=>void update(),5000);
+    const onVisible=()=>{if(document.visibilityState==="visible")void update();};
+    document.addEventListener("visibilitychange",onVisible);
+    return()=>{alive=false;clearInterval(timer);document.removeEventListener("visibilitychange",onVisible);};
+  },[auth,view]);
   async function logout(){
     try {await getJson("/console/api/logout",{method:"POST",headers:{"content-type":"application/json"}});}
     finally {setAuth(false);setData(null);}
@@ -545,8 +395,6 @@ function App() {
   if(auth===null) return <main className="boot">正在连接 Synrex…</main>;
   if(!auth) return <Login done={()=>void refresh()}/>;
   const meta=menus.find(x=>x.id===view)!;
-  const ageMs=clock-Date.parse(data?.generatedAt??"");
-  const stale=Boolean(data?.snapshotStale)||!Number.isFinite(ageMs)||ageMs>45000;
   return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">S</div>
     <div><strong>SYNREX<span>.</span></strong><small>CONTROL PLANE</small></div></div>
     <p className="sidebar-label">WORKSPACE</p><nav aria-label="Synrex 管理导航">
@@ -556,20 +404,17 @@ function App() {
     <div className="sidebar-bottom"><div className="owner"><span className="round-symbol">♙</span><div><strong>Owner Access</strong><small>只读控制台</small></div></div>
       <button onClick={()=>void logout()}>退出登录 ↗</button></div>
   </aside><main className="main"><header className="topbar"><span>Synrex Console <b>/</b> <strong>{meta.title}</strong></span>
-    <div><span className="online-dot"/> {stale?"数据过期":"数据新鲜"} <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
+    <div><span className="online-dot"/> {error?"数据刷新异常":!data?"等待数据":"数据已连接"} <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
   </header><div className="content"><div className="heading"><p className="eyebrow">SYNREX OPERATIONS / {view.toUpperCase()}</p>
     <h1>{view==="overview"?"开发环境，一目了然。":meta.title}</h1>
     <div className="heading-line"><p>{view==="overview"?"主机、执行、工作流与诊断，一站式掌控。":meta.caption+" · 显示已有的真实数据"}</p>
-      <span>更新于 {time(data?.generatedAt)} · {Number.isFinite(ageMs)?Math.max(0,Math.round(ageMs/1000))+" 秒前":"时间未知"}</span></div></div>
-    {stale&&<div className="error-banner" role="alert">Console 快照已过期。当前为历史数据，不代表实时进程状态；请检查独立快照服务。</div>}
+      <span>更新于 {time(data?.generatedAt)}</span></div></div>
     {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh()}>重试</button></div>}
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
-      {view==="usage"&&<UsagePage/>}
       {view==="workflows"&&<Workflows d={data}/>}
       {view==="tasks"&&<Tasks d={data}/>}
       {view==="nodes"&&<Nodes d={data}/>}
-      {view==="diagnostics"&&<Diagnostics d={data}/>}
-      {view==="resources"&&<Resources d={data}/>}
+      {view==="diagnostics"&&<Diagnostics d={data} clockOffsetMs={clockOffsetMs} clockUncertaintyMs={clockUncertaintyMs}/>}
       {view==="memory"&&<Memory d={data}/>}</>:<Blank>暂无系统数据</Blank>}
     <footer className="content-footer">Synrex Console · {data?.service.release??"离线"} <span>READ ONLY · GPT IS THE ORCHESTRATOR</span></footer>
   </div></main></div>;
