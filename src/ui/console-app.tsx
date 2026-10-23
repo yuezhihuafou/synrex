@@ -347,7 +347,7 @@ function App() {
     <div className="sidebar-bottom"><div className="owner"><span className="round-symbol">♙</span><div><strong>Owner Access</strong><small>只读控制台</small></div></div>
       <button onClick={()=>void logout()}>退出登录 ↗</button></div>
   </aside><main className="main"><header className="topbar"><span>Synrex Console <b>/</b> <strong>{meta.title}</strong></span>
-    <div><span className="online-dot"/> 连接正常 <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
+    <div><span className="online-dot"/> {error?"数据刷新异常":!data?"等待数据":"数据已连接"} <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
   </header><div className="content"><div className="heading"><p className="eyebrow">SYNREX OPERATIONS / {view.toUpperCase()}</p>
     <h1>{view==="overview"?"开发环境，一目了然。":meta.title}</h1>
     <div className="heading-line"><p>{view==="overview"?"主机、执行、工作流与诊断，一站式掌控。":meta.caption+" · 显示已有的真实数据"}</p>
