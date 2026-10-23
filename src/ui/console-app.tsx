@@ -17,7 +17,7 @@ type Snapshot = {
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits?: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
-  diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null } }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string; runId?: string;
+  diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null }; capacity?: {inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null} }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string; runId?: string;
     classification: string; status?: number }> };
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
@@ -267,9 +267,10 @@ function Diagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapshot;clockOffse
         <Metric label="MCP 中位 / p95" value={`${d.diagnostics.observability.latency.medianMs ?? "—"} / ${d.diagnostics.observability.latency.p95Ms ?? "—"} ms`} info={`${d.diagnostics.observability.latency.completed} 个有耗时的完成请求`} symbol="◷"/>
         <Metric label="HTTP 完成 / 提前断开" value={`${d.diagnostics.observability.lifecycle.httpCompleted} / ${d.diagnostics.observability.lifecycle.closedEarly}`} info="只表示 Synrex 侧观测" symbol="⌁"/>
         <Metric label="未确认 / 执行错误" value={`${d.diagnostics.observability.lifecycle.unknown + d.diagnostics.observability.lifecycle.toolCompletedWithoutHttp} / ${d.diagnostics.observability.lifecycle.handlerFailed}`} info="滚动日志截断可能造成未知状态" symbol="?"/>
-        <Metric label="GPT Token 用量" value="不可观测" info="MCP 字节数不等于模型 Token；无法观察 GPT 推理" symbol="∅"/>
+        <Metric label="MCP 输出 p95" value={`${d.diagnostics.observability.capacity?.outputP95?.toLocaleString()??"—"} B`} info="已完成请求的输出体积；不是 GPT Token" symbol="⇥"/>
       </div>
       <p className="footnote">已观测 MCP 输入 {d.diagnostics.observability.transfer.observedInputBytes.toLocaleString()} B、输出 {d.diagnostics.observability.transfer.observedOutputBytes.toLocaleString()} B；覆盖 {d.diagnostics.observability.coverage.observedRequests} 个请求。仅有 HTTP 完成证据时，模型推理中断与 ChatGPT 消息断流仍不可区分，需结合浏览器 HAR。</p>
+      <p className="footnote">输入 p95：{d.diagnostics.observability.capacity?.inputP95?.toLocaleString()??"—"} B；最大输出：{d.diagnostics.observability.capacity?.largestOutput.toLocaleString()??"—"} B；超过 16 KiB 的响应：{d.diagnostics.observability.capacity?.largeResponses??"—"}；平均有效输出吞吐估计：{d.diagnostics.observability.capacity?.bytesPerSecond?.toLocaleString()??"—"} B/s（用整段 MCP 耗时估算，包含执行等待，不代表模型生成速度）。</p>
     </Panel>}
     <Panel title="浏览器网络证据" hint="本地读取 HAR，仅保留请求时间、域名、路径、状态和耗时；不会上传原始 HAR">
       <p><a href="/console/browser-extension.zip">下载 Synrex Browser Trace 扩展</a> · 首次安装后按版本更新；扩展仅读取 ChatGPT 网络元数据</p>
