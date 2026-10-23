@@ -1,5 +1,6 @@
-[![CI](https://github.com/yuezhihuafou/devspace-verge/actions/workflows/ci.yml/badge.svg)](https://github.com/yuezhihuafou/devspace-verge/actions/workflows/ci.yml)
+[![CI](https://github.com/yuezhihuafou/synrex/actions/workflows/ci.yml/badge.svg)](https://github.com/yuezhihuafou/synrex/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/github/v/release/yuezhihuafou/synrex?include_prereleases)](https://github.com/yuezhihuafou/synrex/releases)
 
 # Synrex — Governed execution for AI
 
@@ -7,7 +8,7 @@
 
 Synrex connects conversational AI to real repositories and long-running engineering work over MCP, with durable jobs, inspectable evidence, and optional execution peers.
 
-**[Get started](#install-from-source)** · **[Architecture and scope](docs/PRODUCT_CHARTER.md)** · **[Deployment](docs/platform/SINGLE_OWNER_SELF_HOSTED.md)** · **[Contributing](CONTRIBUTING.md)**
+**[Get started](#install-from-source)** · **[Architecture and scope](docs/PRODUCT_CHARTER.md)** · **[Deployment](docs/platform/SINGLE_OWNER_SELF_HOSTED.md)** · **[Releases](https://github.com/yuezhihuafou/synrex/releases)** · **[Contributing](CONTRIBUTING.md)**
 
 > **Early release:** self-hosted, single-owner deployment. Linux is the primary supported platform. Synrex is not a hosted service; end-to-end performance superiority over upstream DevSpace has not yet been established.
 
@@ -95,8 +96,8 @@ fully supported production target.
 ## Install from source
 
 ```bash
-git clone https://github.com/yuezhihuafou/devspace-verge.git
-cd devspace-verge
+git clone https://github.com/yuezhihuafou/synrex.git
+cd synrex
 corepack enable
 corepack prepare pnpm@11.25.0 --activate
 pnpm install --frozen-lockfile

@@ -1,61 +1,19 @@
-# Contributing
+# Contributing to Synrex
 
-## Read This First
+Synrex is an early-stage, independently maintained derivative of [Waishnav/devspace](https://github.com/Waishnav/devspace). Issues, reproducible bug reports and focused pull requests are welcome. Maintainer capacity is limited; please open an issue before starting a large change.
 
-I'm not actively accepting contributions right now.
+## Helpful contributions
 
-You can still open an issue or PR, but please do so knowing there is a high chance I close it, defer it forever, or never look at it.
+- Reproducible reliability, recovery and multi-host bugs, with relevant versions, redacted logs and steps.
+- Small fixes with a regression test where practical.
+- Documentation and installation improvements, especially independent self-hosted setup reports.
+- Paired, reproducible benchmarks with model, effort, starting commit and environment identified.
 
-If that sounds annoying, that is because it is. This project is still early and me and users trying to keep it scoped, quality, and direction under control.
+## Before submitting a PR
 
-## What I'm Most Likely To Accept
+1. Describe the problem and scope; keep unrelated changes separate.
+2. Run `pnpm typecheck` and relevant tests, or document why they could not be run.
+3. For UI changes, attach before/after screenshots. Never attach passwords, access tokens, private hostnames or production databases.
+4. Preserve the inherited MIT license and upstream attribution, and respect the existing architecture and compatibility contracts.
 
-Small, focused bug fixes.
-
-Small reliability fixes.
-
-Small performance improvements.
-
-Tightly scoped maintenance work that clearly improves the project without changing its direction.
-
-## What I Least Likely To Accept
-
-Large PRs.
-
-Drive-by feature work.
-
-Opinionated rewrites.
-
-Anything that expands product scope without discussing it in community or asking for it first.
-
-If you open a 1,000+ line PR full of new features, I will probably close it quickly and remember that you ignored the clearly written instructions.
-
-## If You Still Want To Open A PR
-
-Keep it small.
-
-Explain exactly what changed.
-
-Explain exactly why the change should exist.
-
-Do not mix unrelated fixes together.
-
-If the PR makes anything resembling a UI change, include clear before/after images.
-
-If the change depends on motion, timing, transitions, or interaction details, include a short video.
-
-If I have to guess what changed, I are much less likely to review it.
-
-## Issues First
-
-If you are thinking about a non-trivial change, open an issue first.
-
-That still does not mean I will want the PR, but it gives you a chance to avoid wasting your time.
-
-## Be Realistic
-
-Opening a PR does not create an obligation on our side.
-
-I may close it. I may ignore it. I may ask you to shrink it. I may reimplement the idea ourselves later.
-
-If you are fine with that, proceed.
+The project is primarily developed and release-tested on Linux; macOS has a CI smoke path and Windows is currently best-effort. Review and merge are not guaranteed.
