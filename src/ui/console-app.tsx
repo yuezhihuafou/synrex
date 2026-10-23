@@ -13,6 +13,7 @@ type Snapshot = {
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; updatedAt: string }>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  activeTaskUnits?: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
   diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null } }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
     classification: string; status?: number }> };
@@ -139,6 +140,8 @@ function Tasks({d}:{d:Snapshot}) {
   const [showHistory,setShowHistory]=useState(false);
   const visible=showHistory?d.tasks:d.tasks.filter(t=>t.status==="working"||t.status==="input_required");
   return <Panel title="持久任务监控" hint="默认只展示本机状态文件确认仍在执行的任务；历史记录不混入活动列表">
+    <p><strong>swy1 当前活动任务服务：</strong> {d.activeTaskUnits===null||d.activeTaskUnits===undefined?"无法读取":d.activeTaskUnits.length+" 个"}</p>
+    {d.activeTaskUnits?.map(unit=><div className="list-row" key={unit}><span className="online-dot"/><code>{unit}</code><small>systemd running</small></div>)}
     <p>已确认运行 {d.tasks.filter(t=>t.status==="working"||t.status==="input_required").length} 项（只覆盖最近登记的本机任务） ·
       <button onClick={()=>setShowHistory(v=>!v)}>{showHistory?"隐藏历史任务":"查看历史任务及未确认记录"}</button></p>
     <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>状态（本机证据）</th><th>Run ID</th><th>创建时间</th></tr></thead>

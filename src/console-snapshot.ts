@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
@@ -33,6 +34,7 @@ export interface ConsoleSnapshot {
     taskIds: string[]; updatedAt: string;
   }>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  activeTaskUnits: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
   diagnostics: {
     count: number;
@@ -77,6 +79,16 @@ function localTaskStatus(runId: string | null): { status: string; lastUpdatedAt?
     }
     return {status:state.status!,lastUpdatedAt:state.lastUpdatedAt};
   } catch { return {status:"unknown"}; }
+}
+function readActiveTaskUnits(): string[] | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const output=execFileSync("systemctl",["--user","list-units","devspace-task-*.service",
+      "--type=service","--state=running","--no-legend","--plain","--no-pager"],
+      {encoding:"utf8",timeout:800,maxBuffer:64*1024,stdio:["ignore","pipe","ignore"]});
+    return output.split("\n").map(line=>line.trim().split(/\s+/)[0]??"")
+      .filter(name=>/^devspace-task-[a-zA-Z0-9_-]+\.service$/.test(name)).slice(0,100);
+  } catch {return null;}
 }
 
 export function readConsoleSnapshot(stateDir: string, release: string): ConsoleSnapshot {
@@ -141,7 +153,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   return {
     generatedAt: new Date().toISOString(),
     service: { status: "online", release, diagnosticsBoundBytes: 2 * 1024 * 1024 },
-    nodes, workflows, tasks, memory,
+    nodes, workflows, tasks, memory, activeTaskUnits: readActiveTaskUnits(),
     diagnostics: { count: events.length, observability: summarizeConsoleObservability(events), requests, events: events.slice(-40).reverse() },
   };
 }
