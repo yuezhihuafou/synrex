@@ -112,6 +112,11 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     ].join("; "));
     res.type("html").send(serveConsoleHtml(config));
   });
+  app.get("/console/browser-extension.zip", auth, (_req, res) => {
+    const archive = fileURLToPath(new URL("../browser-extension/synrex-browser-trace.zip", import.meta.url));
+    if (!existsSync(archive)) { res.status(404).json({ error: "Extension archive not included in this release" }); return; }
+    res.download(archive, "synrex-browser-trace.zip");
+  });
   app.post("/console/api/login", express.json({ limit: "2kb" }), (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
     const remote = req.ip ?? "unknown";
@@ -136,6 +141,9 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   });
   app.get("/console/api/session", auth, (_req, res) => {
     res.json({ authenticated: true });
+  });
+  app.get("/console/api/clock", auth, (_req, res) => {
+    res.json({ serverTimeMs: Date.now() });
   });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }

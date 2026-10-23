@@ -1,7 +1,9 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
+import { summarizeConsoleObservability } from "./console-observability.js";
 import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
 
@@ -30,10 +32,11 @@ export interface ConsoleSnapshot {
     revision: number; phase: string; summary: string; nextSteps: string[]; blockers: string[];
     taskIds: string[]; updatedAt: string;
   }>;
-  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string }>;
+  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
   diagnostics: {
     count: number;
+    observability: ReturnType<typeof summarizeConsoleObservability>;
     requests: ReturnType<typeof summarizeDiagnosticTrace>["requests"];
     events: ReturnType<DiagnosticTrace["read"]>;
   };
@@ -59,6 +62,21 @@ function strings(value: unknown, max = 8): string[] {
 }
 function count(db: Database.Database, statement: string): number {
   return Number((db.prepare(statement).get() as { n: number }).n);
+}
+function localTaskStatus(runId: string | null): { status: string; lastUpdatedAt?: string } {
+  if (!runId || !/^run_[0-9]{14}_[a-z0-9]+$/.test(runId)) return { status: "unknown" };
+  const root = process.env.DEVSPACE_COMPACT_RUN_ROOT || path.join(homedir(), ".local", "share", "devspace", "runs");
+  const day = runId.slice(4,8)+"-"+runId.slice(8,10)+"-"+runId.slice(10,12);
+  try {
+    const file = path.join(root,day,runId,"task.json");
+    if (!existsSync(file)) return { status: "unknown" };
+    const state = JSON.parse(readFileSync(file,"utf8")) as {status?:string;lastUpdatedAt?:string};
+    if (!["working","input_required","completed","failed","cancelled"].includes(state.status??"")) return {status:"unknown"};
+    if (state.status==="working" && (!state.lastUpdatedAt || Date.now()-Date.parse(state.lastUpdatedAt)>120000)) {
+      return {status:"stale_unverified",lastUpdatedAt:state.lastUpdatedAt};
+    }
+    return {status:state.status!,lastUpdatedAt:state.lastUpdatedAt};
+  } catch { return {status:"unknown"}; }
 }
 
 export function readConsoleSnapshot(stateDir: string, release: string): ConsoleSnapshot {
@@ -94,7 +112,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       tasks: (db.prepare("select task_id, node_id, workspace_id, run_id, created_at from task_routes order by created_at desc limit 30").all() as TaskRow[])
         .map((row) => ({
           id: row.task_id, nodeId: row.node_id, workspaceId: row.workspace_id,
-          runId: row.run_id, createdAt: row.created_at,
+          runId: row.run_id, createdAt: row.created_at, ...localTaskStatus(row.run_id),
         })),
       memory: {
         episodes: count(db, "select count(*) as n from learning_episodes"),
@@ -118,12 +136,12 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         };
       }),
   );
-  const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 120 });
+  const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 20000 });
   const requests = summarizeDiagnosticTrace(events).requests.slice(-40).reverse();
   return {
     generatedAt: new Date().toISOString(),
     service: { status: "online", release, diagnosticsBoundBytes: 2 * 1024 * 1024 },
     nodes, workflows, tasks, memory,
-    diagnostics: { count: events.length, requests, events: events.slice(-40).reverse() },
+    diagnostics: { count: events.length, observability: summarizeConsoleObservability(events), requests, events: events.slice(-40).reverse() },
   };
 }
