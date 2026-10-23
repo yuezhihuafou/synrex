@@ -3,6 +3,14 @@
 
 # Synrex — Governed execution for AI
 
+**Use ChatGPT as your engineering interface. Keep execution on your own machines.**
+
+Synrex connects conversational AI to real repositories and long-running engineering work over MCP, with durable jobs, inspectable evidence, and optional execution peers.
+
+**[Get started](#install-from-source)** · **[Architecture and scope](docs/PRODUCT_CHARTER.md)** · **[Deployment](docs/platform/SINGLE_OWNER_SELF_HOSTED.md)** · **[Contributing](CONTRIBUTING.md)**
+
+> **Early release:** self-hosted, single-owner deployment. Linux is the primary supported platform. Synrex is not a hosted service; end-to-end performance superiority over upstream DevSpace has not yet been established.
+
 **Synrex** is a self-hosted, GPT-first coding and execution harness. ChatGPT
 remains the primary reasoning agent; Synrex supplies workspace-scoped code
 tools, execution, verification, durable tasks, workflow recovery, multi-host
