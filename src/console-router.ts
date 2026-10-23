@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, openSync, closeSync, readSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
@@ -144,6 +145,26 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   });
   app.get("/console/api/clock", auth, (_req, res) => {
     res.json({ serverTimeMs: Date.now() });
+  });
+  app.get("/console/api/run-log/:runId", auth, (req, res) => {
+    const runId=typeof req.params.runId==="string"?req.params.runId:"";
+    if (!/^run_\d{14}_[a-zA-Z0-9]{4,32}$/.test(runId)) {
+      res.status(400).json({error:"Invalid run ID"});return;
+    }
+    const day=runId.slice(4,8)+"-"+runId.slice(8,10)+"-"+runId.slice(10,12);
+    const root=process.env.DEVSPACE_COMPACT_RUN_ROOT??path.join(homedir(),".local","share","devspace","runs");
+    const file=path.join(root,day,runId,"output.log");
+    try {
+      const size=statSync(file).size;
+      const raw=Number(req.query.offset??0);
+      if (!Number.isSafeInteger(raw) || raw<0 || raw>size) {res.status(400).json({error:"Invalid offset"});return;}
+      const limit=16*1024;
+      const length=Math.min(limit,size-raw);
+      const buf=Buffer.alloc(length);
+      const fd=openSync(file,"r");
+      try {readSync(fd,buf,0,length,raw);}finally{closeSync(fd);}
+      res.json({runId,offset:raw,nextOffset:raw+length,size,text:buf.toString("utf8")});
+    }catch{res.status(404).json({error:"Run log unavailable"});}
   });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }

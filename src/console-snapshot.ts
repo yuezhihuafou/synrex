@@ -150,7 +150,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       }),
   );
   const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 20000 });
-  const requests = summarizeDiagnosticTrace(events).requests.slice(-40).reverse();
+  const requests = summarizeDiagnosticTrace(events).requests.slice(-300).reverse();
   const byConversation = new Map<string, typeof requests>();
   for (const request of summarizeDiagnosticTrace(events).requests) {
     if (!request.conversationId) continue;

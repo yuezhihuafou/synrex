@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import "./console-app.css";
 import { parseHar, type BrowserEvent } from "./browser-trace.js";
 import { detectBrowserIncidents } from "./browser-incidents.js";
+import { buildCausalGraph } from "./causal-graph.js";
 
 type View = "overview" | "workflows" | "tasks" | "nodes" | "diagnostics" | "memory";
 type Snapshot = {
@@ -16,7 +17,7 @@ type Snapshot = {
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits?: string[] | null;
   memory: { episodes: number; successful: number; candidates: number; promoted: number };
-  diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null } }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
+  diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null } }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string; runId?: string;
     classification: string; status?: number }> };
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
@@ -163,6 +164,19 @@ function Nodes({d}:{d:Snapshot}) {
 }
 function Diagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapshot;clockOffsetMs:number|null;clockUncertaintyMs:number|null}) {
   const [query,setQuery]=useState("");
+  const [selectedRun,setSelectedRun]=useState<string|null>(null);
+  const [runLog,setRunLog]=useState("");
+  const [runLogOffset,setRunLogOffset]=useState(0);
+  const [runLogSize,setRunLogSize]=useState(0);
+  const [runLogError,setRunLogError]=useState("");
+  async function loadRun(runId:string,offset=0){
+    if(!/^run_\d{14}_[a-zA-Z0-9]{4,32}$/.test(runId))return;
+    try{
+      const result=await getJson<{text:string;nextOffset:number;size:number}>(`/console/api/run-log/${encodeURIComponent(runId)}?offset=${offset}`);
+      setSelectedRun(runId);setRunLog(prev=>offset?prev+result.text:result.text);
+      setRunLogOffset(result.nextOffset);setRunLogSize(result.size);setRunLogError("");
+    }catch{setRunLogError("无法读取 Run Log；可能位于其他主机、已归档或已删除。");}
+  }
   const [browser,setBrowser]=useState<BrowserEvent[]>([]);
   const [harError,setHarError]=useState("");
   const [autoCount,setAutoCount]=useState(0);
@@ -213,6 +227,19 @@ function Diagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapshot;clockOffse
   },[]);
   const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??""))
     .toLowerCase().includes(query.toLowerCase())),[d,query]);
+  const graph=useMemo(()=>buildCausalGraph(d.diagnostics.requests,d.tasks,browser,clockOffsetMs??0),[d,browser,clockOffsetMs]);
+  const connectedPaths=useMemo(()=>{
+    const links=new Map<string,string[]>();
+    for(const edge of graph.edges.filter(e=>e.confidence==="verified")){
+      const targets=links.get(edge.from)??[];targets.push(edge.to);links.set(edge.from,targets);
+    }
+    return graph.nodes.filter(n=>n.kind==="mcp"&&links.has(n.id)).slice(-30).reverse().map(n=>{
+      const task=links.get(n.id)?.find(id=>id.startsWith("task:"));
+      const run=links.get(task??n.id)?.find(id=>id.startsWith("run:"))??
+        links.get(n.id)?.find(id=>id.startsWith("run:"));
+      return {mcp:n,task:task?graph.nodes.find(x=>x.id===task):undefined,run:run?graph.nodes.find(x=>x.id===run):undefined};
+    });
+  },[graph]);
   const timeline=useMemo(()=>[
     ...matched.map(r=>({at:clockOffsetMs===null?r.lastAt:new Date(Date.parse(r.lastAt)+clockOffsetMs).toISOString(),source:"MCP",detail:`${r.tool??"请求"} · ${r.requestId}`,state:r.classification})),
     ...browser.filter(r=>(r.host+" "+r.path+" "+(r.requestId??"")).toLowerCase().includes(query.toLowerCase()))
@@ -266,6 +293,31 @@ function Diagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapshot;clockOffse
       <div className="table-scroll"><table><thead><tr><th>时间</th><th>来源</th><th>事件</th><th>状态</th></tr></thead><tbody>
         {timeline.map((r,i)=><tr key={`${r.source}-${r.at}-${i}`}><td>{new Date(r.at).toLocaleString()}</td><td>{r.source}</td><td>{r.detail}</td><td>{r.state}</td></tr>)}
       </tbody></table></div>
+    </Panel>
+    <Panel title="跨层因果关联图" hint="实线语义：共享 Task/Run ID；时间候选不构成因果证明">
+      <p>节点 {graph.nodes.length} · 确定关联 {graph.edges.filter(e=>e.confidence==="verified").length} · 时间候选 {graph.edges.filter(e=>e.confidence==="temporal").length}</p>
+      <div className="stack">
+        {connectedPaths.map(path=><div className="list-row" key={path.mcp.id} style={{display:"flex",alignItems:"center",flexWrap:"wrap",gap:10}}>
+          <div className="checkpoint-block"><small>MCP</small><strong>{path.mcp.label}</strong><small>{path.mcp.status}</small></div>
+          <span aria-hidden="true">→</span>
+          {path.task?<div className="checkpoint-block"><small>Task · ID 确认</small><strong>{path.task.label}</strong><small>{path.task.status}</small></div>:<small>无持久子任务</small>}
+          {path.run&&<><span aria-hidden="true">→</span><div className="checkpoint-block">
+            <small>Run Log · ID 确认</small><button onClick={()=>void loadRun(path.run!.label)}>{path.run.label}</button></div></>}
+        </div>)}
+        {!connectedPaths.length&&<Blank>目前的诊断窗口没有带可确认 Task/Run ID 的调用链；下方仍保留浏览器时间候选。</Blank>}
+      </div>
+      <div className="table-scroll"><table><thead><tr><th>源事件</th><th>关系</th><th>目标事件</th><th>证据</th></tr></thead><tbody>
+        {graph.edges.slice(-150).reverse().map((edge,i)=><tr key={edge.from+edge.to+i}>
+          <td><code>{edge.from}</code></td><td>{edge.relation}</td><td>{edge.to.startsWith("run:")?<button onClick={()=>void loadRun(edge.to.slice(4))}>{edge.to}</button>:<code>{edge.to}</code>}</td>
+          <td>{edge.confidence==="verified"?"ID 确认":"仅时间接近"}</td></tr>)}
+      </tbody></table></div>
+      {selectedRun&&<div className="checkpoint"><strong>Run Log · {selectedRun}</strong>
+        <p>{runLogOffset.toLocaleString()} / {runLogSize.toLocaleString()} 字节</p>
+        <pre style={{maxHeight:320,overflow:"auto",whiteSpace:"pre-wrap",overflowWrap:"anywhere"}}>{runLog}</pre>
+        {runLogOffset<runLogSize&&<button onClick={()=>void loadRun(selectedRun,runLogOffset)}>读取下一段（16 KB）</button>}
+      </div>}
+      {runLogError&&<p role="alert">{runLogError}</p>}
+      <p className="footnote">只读按需分页加载 Run Log，每页最多 16 KB。跨主机任务日志需在所属执行节点查询；时间相关不是已证明的父子调用。</p>
     </Panel>
     <Panel title="MCP 请求时间线" hint="最小可用诊断 · 约 2 MB 滚动容量"
       extra={<input className="filter" placeholder="按请求或工具筛选" value={query} onChange={e=>setQuery(e.target.value)}/>}>
