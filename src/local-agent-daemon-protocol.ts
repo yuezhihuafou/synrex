@@ -28,7 +28,10 @@ export type LocalAgentDaemonRequest =
   | AgentDaemonRequestBase<"hello", Record<string, never>>
   | AgentDaemonRequestBase<"agent.start", StartLocalAgentInput>
   | AgentDaemonRequestBase<"agent.continue", { id: string; prompt: string; scope: LocalAgentWorkspaceScope; overrides?: RunOverrides }>
-  | AgentDaemonRequestBase<"agent.get", { id: string; scope: LocalAgentWorkspaceScope }>
+  | AgentDaemonRequestBase<"agent.get", {
+      id: string; scope: LocalAgentWorkspaceScope;
+      includeEvidence?: boolean; evidenceRef?: string;
+    }>
   | AgentDaemonRequestBase<"agent.list", LocalAgentWorkspaceScope>
   | AgentDaemonRequestBase<"agent.events", { id: string; scope: LocalAgentWorkspaceScope; afterSeq?: number; limit?: number }>
   | AgentDaemonRequestBase<"agent.stats", LocalAgentWorkspaceScope>
@@ -129,6 +132,9 @@ export function decodeLocalAgentDaemonRequest(value: unknown): LocalAgentDaemonR
         params: {
           id: requiredString(asRecord(params)?.id, "id"),
           scope: decodeWorkspaceScope(asRecord(params)?.scope),
+          ...(asRecord(params)?.includeEvidence === true ? { includeEvidence: true } : {}),
+          ...(optionalString(asRecord(params)?.evidenceRef)
+            ? { evidenceRef: optionalString(asRecord(params)?.evidenceRef) } : {}),
         },
       } as LocalAgentDaemonRequest;
     case "agent.list":
@@ -220,6 +226,12 @@ export function decodeAgentRecord(value: unknown): LocalAgentRecord {
     error: optionalContentString(record?.error),
     errorCode: optionalString(record?.errorCode),
     errorRetryable: optionalBoolean(record?.errorRetryable),
+    ...(asRecord(record?.evidenceSummary) ? {
+      evidenceSummary: record!.evidenceSummary as LocalAgentRecord["evidenceSummary"],
+    } : {}),
+    ...(asRecord(record?.evidence) ? {
+      evidence: record!.evidence as LocalAgentRecord["evidence"],
+    } : {}),
     createdAt: requiredString(record?.createdAt, "createdAt"),
     updatedAt: requiredString(record?.updatedAt, "updatedAt"),
   };

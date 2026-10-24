@@ -61,3 +61,25 @@ test("AGY API errors are failures, not successful empty turns", async () => {
     await runtime.value.close();
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("Antigravity preserves observed pretty JSON result and does not claim tool events", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "synrex-agy-pretty-"));
+  try {
+    const binary = join(dir, "agy-mock");
+    writeFileSync(binary, '#!/bin/sh\nprintf \'diagnostic\\n{\\n  "status": "SUCCESS",\\n  "response": "PRETTY_OK",\\n  "usage": {"total_tokens": 14}\\n}\\n\'\n');
+    chmodSync(binary, 0o755);
+    const runtime = await new AntigravityLocalAgentDriver({
+      ...process.env, ANTIGRAVITY_COMMAND: binary,
+    }).createRuntime();
+    assert.equal(runtime.status, "ok");
+    if (runtime.status !== "ok") return;
+    const result = await runtime.value.run({ prompt: "test", workspaceRoot: dir });
+    assert.equal(result.status, "ok");
+    if (result.status === "ok") {
+      assert.equal(result.value.finalResponse, "PRETTY_OK");
+      assert.equal(result.value.items.length, 1);
+      assert.equal((result.value.items[0] as { toolEventsObserved: boolean }).toolEventsObserved, false);
+    }
+    await runtime.value.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

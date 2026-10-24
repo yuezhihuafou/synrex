@@ -13,6 +13,8 @@ export interface CodingWorkflowCheckpoint {
   blockers: string[];
   checks: string[];
   taskIds: string[];
+  /** Explicitly associated Subagent handles; never infer unrelated agents. */
+  agentIds?: string[];
   gitHead?: string;
   gitStatus?: string;
 }

@@ -1,5 +1,6 @@
 import type { LocalAgentCatalog } from "./local-agent-catalog.js";
 import type { LocalAgentRecord, LocalAgentStatus } from "./local-agent-store.js";
+import type { AgentEvidenceArtifact, AgentEvidenceSummary } from "./local-agent-evidence.js";
 
 export type AgentCommandStatus = "running" | "completed" | "failed" | "stopped";
 
@@ -39,10 +40,10 @@ export interface AgentFailureOutput {
 }
 
 export type AgentObservationOutput =
-  | { id: string; status: "running" }
-  | { id: string; status: "completed"; response?: string }
-  | { id: string; status: "failed"; error: AgentFailureOutput }
-  | { id: string; status: "stopped"; error?: AgentFailureOutput };
+  | { id: string; status: "running"; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact }
+  | { id: string; status: "completed"; response?: string; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact }
+  | { id: string; status: "failed"; error: AgentFailureOutput; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact }
+  | { id: string; status: "stopped"; error?: AgentFailureOutput; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact };
 
 export function presentAgentTargetCatalog(catalog: LocalAgentCatalog): AgentTargetCatalogOutput {
   return {
@@ -77,23 +78,29 @@ export function presentAgentSummary(record: LocalAgentRecord): AgentSummaryOutpu
 
 export function presentAgentObservation(record: LocalAgentRecord): AgentObservationOutput {
   const receipt = presentAgentReceipt(record);
+  const evidence = {
+    ...(record.evidenceSummary ? { evidenceSummary: record.evidenceSummary } : {}),
+    ...(record.evidence ? { evidence: record.evidence } : {}),
+  };
   switch (receipt.status) {
     case "completed":
       return {
         ...receipt,
         status: "completed",
         ...(record.latestResponse === undefined ? {} : { response: record.latestResponse }),
+        ...evidence,
       };
     case "failed":
-      return { ...receipt, status: "failed", error: presentAgentFailure(record) };
+      return { ...receipt, status: "failed", error: presentAgentFailure(record), ...evidence };
     case "stopped":
       return {
         ...receipt,
         status: "stopped",
         ...(hasAgentFailure(record) ? { error: presentAgentFailure(record) } : {}),
+        ...evidence,
       };
     case "running":
-      return { id: receipt.id, status: "running" };
+      return { id: receipt.id, status: "running", ...evidence };
   }
 }
 

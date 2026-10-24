@@ -1131,7 +1131,11 @@ async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
 
 async function runAgentsShow(args: string[], json: boolean): Promise<void> {
   const [id, ...extra] = args;
-  if (!id || extra.length > 0) throw new Error("Usage: devspace agents show <id> [--json]");
+  const includeEvidence = extra.includes("--evidence");
+  const evidenceRef = extra.find((item) => item.startsWith("--evidence-ref="))?.slice("--evidence-ref=".length);
+  if (!id || extra.some((item) => item !== "--evidence" && !item.startsWith("--evidence-ref="))) {
+    throw new Error("Usage: devspace agents show <id> [--json] [--evidence] [--evidence-ref=ev_...]");
+  }
 
   const config = loadConfig();
   const client = createLocalAgentClient(config);
@@ -1147,9 +1151,16 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
     if (!refreshed) return;
     record = refreshed;
   }
+  if (includeEvidence || evidenceRef) {
+    const withEvidence = presentAgentResult(await client.get(id, scope, {
+      includeEvidence: true, ...(evidenceRef ? { evidenceRef } : {}),
+    }), true);
+    if (!withEvidence) return;
+    record = withEvidence;
+  }
 
   const observation = presentAgentObservation(record);
-  if (json) printJson(observation);
+  if (json || includeEvidence || evidenceRef) printJson(observation);
   else console.log(formatAgentObservation(observation));
 }
 

@@ -4,6 +4,11 @@ import type { McpRegistrationTarget } from "./mcp-modern-server.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
 import { withCodingWorkflowStore, type CodingWorkflowCheckpoint } from "./coding-workflows.js";
 import { LearningStore } from "./learning-store.js";
+import { buildCodingWorkflowHandoff, type WorkflowAgentEvidence } from "./coding-workflow-handoff.js";
+import { LocalAgentStore } from "./local-agent-store.js";
+import { LocalAgentEvidenceStore } from "./local-agent-evidence.js";
+import type { ProjectMemoryPort } from "./project-memory-port.js";
+import { DisabledProjectMemoryPort } from "./project-memory-port.js";
 import { textBlock } from "./tool-surfaces/shared.js";
 import { workspaceIdDescription } from "./tool-surfaces/types.js";
 import { workflowHandoffText } from "./workflow-handoff.js";
@@ -41,8 +46,10 @@ export function registerCodingWorkflowTools(input: {
   server: McpRegistrationTarget;
   workspaces: WorkspaceRegistry;
   stateDir: string;
+  memory?: ProjectMemoryPort;
 }): void {
   const { server, workspaces, stateDir } = input;
+  const memory = input.memory ?? new DisabledProjectMemoryPort();
 
   server.registerTool("workflow_open", {
     title: "Open coding workflow",
@@ -76,9 +83,11 @@ export function registerCodingWorkflowTools(input: {
       workspaceId: z.string().describe(workspaceIdDescription),
       workflowId: workflowId.optional(),
       includeCompleted: z.boolean().optional().describe("Include finished history when listing; default false."),
+      includeMemory: z.boolean().optional().describe("Opt in to a bounded read-only MemHub project recall, not a task dependency."),
+      memoryProject: z.string().trim().min(1).max(128).optional().describe("Explicit canonical MemHub project slug (required for project recall)."),
     },
     annotations: { readOnlyHint: true },
-  }, async ({ workspaceId, workflowId: requestedId, includeCompleted }) => {
+  }, async ({ workspaceId, workflowId: requestedId, includeCompleted, includeMemory, memoryProject }) => {
     const workspace = await workspaces.getWorkspace(workspaceId);
     const result = withCodingWorkflowStore(stateDir, (store) => requestedId
       ? { workflow: store.getRequired(requestedId, workspace.root), history: store.history(requestedId, workspace.root) }
@@ -90,22 +99,53 @@ export function registerCodingWorkflowTools(input: {
     const handoff = workflow ? (() => {
       const liveGit = gitSnapshot(workspace.root);
       const checkpoint = workflow.checkpoint;
-      return {
-        workspaceRoot: workspace.root,
-        observedAt: new Date().toISOString(),
-        liveGit,
-        checkpointGitMatchesCurrent: checkpoint.gitHead && liveGit.gitHead
-          ? checkpoint.gitHead === liveGit.gitHead && checkpoint.gitStatus === liveGit.gitStatus
-          : null,
-        taskIdsToInspect: checkpoint.taskIds,
-        checksAreSelfReported: true,
-      };
+      const agentEvidence: WorkflowAgentEvidence[] = [];
+      if (checkpoint.agentIds?.length) {
+        const agentStore = new LocalAgentStore(stateDir);
+        const artifacts = new LocalAgentEvidenceStore(stateDir);
+        try {
+          for (const agentId of checkpoint.agentIds.slice(0, 20)) {
+            const agent = agentStore.getById(agentId);
+            if (!agent) { agentEvidence.push({ agentId, status: "not_found" }); continue; }
+            if (agent.workspaceRoot !== workspace.root ||
+                (agent.workspaceId && agent.workspaceId !== workspaceId)) {
+              agentEvidence.push({ agentId, status: "wrong_workspace" });
+              continue;
+            }
+            try {
+              const evidence = artifacts.latest(agentId);
+              agentEvidence.push(evidence
+                ? { agentId, status: "available", evidence }
+                : { agentId, status: "no_evidence" });
+            } catch { agentEvidence.push({ agentId, status: "no_evidence" }); }
+          }
+        } finally { agentStore.close(); }
+      }
+      return buildCodingWorkflowHandoff({
+        workflow, workspaceId, workspaceRoot: workspace.root, liveGit, agentEvidence,
+      });
     })() : undefined;
+    const memoryContext = requestedId && includeMemory
+      ? memoryProject
+        ? await memory.recall({
+          project: memoryProject,
+          query: workflow ? `${workflow.goal}\n${workflow.checkpoint.nextSteps.join("; ")}` : "",
+          maxBytes: 8_000,
+        }).catch(() => ({
+          status: "unavailable" as const,
+          reason: "Optional memory adapter failed; workflow state is still valid.",
+        }))
+        : { status: "ambiguous" as const, reason: "Explicit memoryProject required." }
+      : undefined;
     return {
       content: [textBlock(handoff && workflow
         ? workflowHandoffText(workflow, handoff.checkpointGitMatchesCurrent)
         : ("workflows" in result ? result.workflows?.map(w=>`${w.workflowId} ${w.status} rev=${w.revision}: ${w.goal.slice(0, 100)}; next=${(w.checkpoint.nextSteps[0]??"inspect original goal").slice(0, 100)}; tasks=${w.checkpoint.taskIds.slice(0,3).join(",")}`).join("\n") || "No unfinished workflows." : JSON.stringify(result)))],
-      structuredContent: { ...result, ...(handoff ? { handoff } : {}) },
+      structuredContent: {
+        ...result,
+        ...(handoff ? { handoff } : {}),
+        ...(memoryContext ? { memoryContext } : {}),
+      },
     };
   });
 
@@ -125,15 +165,22 @@ export function registerCodingWorkflowTools(input: {
       checks: items.describe("Actual test/check commands and observed outcomes; never assert unrun tests passed."),
       taskIds: z.array(z.string().regex(/^task_[a-zA-Z0-9-]+$/)).max(40)
         .describe("Durable shell task IDs that still need inspection or follow-up."),
+      agentIds: z.array(z.string().regex(/^agt_[a-f0-9]{8}$/)).max(20).optional()
+        .describe("Explicit Subagent handles whose evidence belongs to this workflow."),
     },
     annotations: { readOnlyHint: false, openWorldHint: false },
-  }, async ({ workspaceId, workflowId: id, expectedRevision, status, phase, summary, completedSteps, nextSteps, blockers, checks, taskIds }) => {
+  }, async ({ workspaceId, workflowId: id, expectedRevision, status, phase, summary, completedSteps, nextSteps, blockers, checks, taskIds, agentIds }) => {
     const workspace = await workspaces.getWorkspace(workspaceId);
     if (status === "completed" && (nextSteps.length || blockers.length || taskIds.length)) {
       throw new Error("Cannot mark completed while next steps, blockers, or unverified running task IDs remain.");
     }
+    const previousAgentIds = agentIds === undefined
+      ? withCodingWorkflowStore(stateDir, (store) =>
+        store.getRequired(id, workspace.root).checkpoint.agentIds)
+      : undefined;
     const checkpoint: CodingWorkflowCheckpoint = {
       phase, summary, completedSteps, nextSteps, blockers, checks, taskIds,
+      ...((agentIds ?? previousAgentIds) ? { agentIds: agentIds ?? previousAgentIds } : {}),
       ...gitSnapshot(workspace.root),
     };
     const result = withCodingWorkflowStore(stateDir, (store) => store.checkpoint(workspace.root, {

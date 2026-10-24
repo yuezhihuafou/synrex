@@ -72,6 +72,7 @@ import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { withCodingWorkflowStore } from "./coding-workflows.js";
 import { registerCodingWorkflowTools } from "./coding-workflow-tools.js";
+import { createOptionalProjectMemoryPort } from "./memhub-memory-adapter.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { localNodeRegistration } from "./multinode/local-node.js";
@@ -913,6 +914,7 @@ function registerMcpSurface(
     server: registrationTarget,
     workspaces,
     stateDir: config.stateDir,
+    memory: createOptionalProjectMemoryPort(),
   });
 
   toolSurface.register({

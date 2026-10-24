@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { Result, type Result as BetterResult } from "better-result";
 import { openDatabase, type DatabaseHandle } from "./db/client.js";
+import type { AgentEvidenceArtifact, AgentEvidenceSummary } from "./local-agent-evidence.js";
 import { AgentStoreError, isProgrammerDefect } from "./local-agent-errors.js";
 
 export type LocalAgentStatus = "starting" | "running" | "idle" | "error" | "stopped";
@@ -20,6 +21,9 @@ export interface LocalAgentRecord {
   error?: string;
   errorCode?: string;
   errorRetryable?: boolean;
+  /** Transient, scope-checked references to private peer-owned artifacts. */
+  evidenceSummary?: AgentEvidenceSummary;
+  evidence?: AgentEvidenceArtifact;
   createdAt: string;
   updatedAt: string;
 }

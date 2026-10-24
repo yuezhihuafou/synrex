@@ -34,6 +34,11 @@ import {
   type LocalAgentWriteMode,
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
+import {
+  captureAgentGit,
+  LocalAgentEvidenceStore,
+  type AgentGitObservation,
+} from "./local-agent-evidence.js";
 import { assertAllowedPath } from "./roots.js";
 import {
   isSubagentProviderEnabled,
@@ -69,6 +74,7 @@ export interface LocalAgentManagerOptions {
   allowedRoots?: readonly string[];
   logger?: LocalAgentManagerLogger;
   subagents: SubagentsConfig;
+  evidenceStore?: LocalAgentEvidenceStore;
 }
 
 export type AgentStartError = AgentTargetError | AgentScopeError | AgentConflictError | AgentStoreError;
@@ -90,6 +96,7 @@ export class LocalAgentManager {
   private readonly allowedRoots?: readonly string[];
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
+  private readonly evidenceStore?: LocalAgentEvidenceStore;
   private readonly activeTurns = new Map<string, Promise<void>>();
   private accepting = true;
   private closePromise?: Promise<void>;
@@ -103,6 +110,7 @@ export class LocalAgentManager {
     this.allowedRoots = options.allowedRoots;
     this.logger = options.logger;
     this.subagents = options.subagents;
+    this.evidenceStore = options.evidenceStore;
   }
 
   reconcileActiveRuns(message?: string): BetterResult<number, AgentStoreError> {
@@ -184,6 +192,7 @@ export class LocalAgentManager {
   get(
     agentId: string,
     scope: LocalAgentWorkspaceScope,
+    options: { includeEvidence?: boolean; evidenceRef?: string } = {},
   ): BetterResult<LocalAgentRecord, AgentLookupError> {
     const lookup = this.store.getByIdResult(agentId);
     if (lookup.isErr()) return lookup;
@@ -191,7 +200,26 @@ export class LocalAgentManager {
     if (!record) return Result.err(agentNotFound(agentId));
     const scoped = this.agentWorkspaceResult(record, scope, "get");
     if (scoped.isErr()) return scoped;
-    return Result.ok(record);
+    if (!this.evidenceStore) return Result.ok(record);
+    try {
+      const evidenceSummary = this.evidenceStore.latest(record.id);
+      if (!evidenceSummary) return Result.ok(record);
+      return Result.ok({
+        ...record,
+        evidenceSummary,
+        ...(options.includeEvidence ? {
+          evidence: this.evidenceStore.read(record.id, options.evidenceRef ?? evidenceSummary.ref),
+        } : {}),
+      });
+    } catch (error) {
+      this.log("warn", "local_agent_evidence_read_failed", {
+        agentId: record.id, error: errorMessage(error),
+      });
+      if (options.includeEvidence) {
+        return Result.err(new AgentStoreError("read_agent_evidence", error));
+      }
+      return Result.ok(record);
+    }
   }
 
   list(scope: LocalAgentWorkspaceScope): BetterResult<LocalAgentRecord[], AgentListError> {
@@ -290,6 +318,7 @@ export class LocalAgentManager {
     workspaceId?: string,
   ): Promise<void> {
     const startedAt = Date.now();
+    let beforeGit: AgentGitObservation | undefined;
     this.log("info", "agent_run_started", {
       provider: record.provider,
       agentId: record.id,
@@ -302,6 +331,7 @@ export class LocalAgentManager {
         return;
       }
       const workspaceRoot = authorized.value;
+      beforeGit = this.evidenceStore ? captureAgentGit(workspaceRoot) : undefined;
       const authorizedRecord = workspaceRoot === record.workspaceRoot
         ? record
         : { ...record, workspaceRoot };
@@ -350,13 +380,21 @@ export class LocalAgentManager {
       };
       const result = await this.pool.run(driver.value, context, input.value, callbacks);
       if (result.isErr()) {
-        this.persistRunError(record, result.error, startedAt);
+        this.persistRunError(record, result.error, startedAt, beforeGit);
         return;
       }
       const runResult = result.value;
       const current = this.store.getByIdResult(record.id);
       if (current.isErr()) throw current.error;
       if (!current.value) return;
+      this.saveEvidence(record, {
+        outcome: "completed",
+        startedAt,
+        beforeGit,
+        workspaceRoot,
+        response: runResult.finalResponse,
+        items: runResult.items,
+      });
       const updated = this.store.updateResult(record.id, {
         providerSessionId: runResult.providerSessionId ?? current.value.providerSessionId,
         status: "idle",
@@ -379,9 +417,14 @@ export class LocalAgentManager {
       });
     } catch (error) {
       if (isLocalAgentError(error)) {
-        this.persistRunError(record, error, startedAt);
+        this.persistRunError(record, error, startedAt, beforeGit);
         return;
       }
+      this.saveEvidence(record, {
+        outcome: "failed", startedAt, beforeGit,
+        workspaceRoot: record.workspaceRoot,
+        error: "Unexpected internal subagent failure.",
+      });
       const persisted = this.store.updateResult(record.id, {
         status: "error",
         error: "Unexpected internal subagent failure.",
@@ -411,7 +454,16 @@ export class LocalAgentManager {
     record: LocalAgentRecord,
     error: LocalAgentError,
     startedAt: number,
+    beforeGit?: AgentGitObservation,
   ): void {
+    this.saveEvidence(record, {
+      outcome: "failed", startedAt, beforeGit,
+      workspaceRoot: record.workspaceRoot,
+      error: error.message,
+      ...("cause" in error && error.cause ? {
+        items: [{ type: "provider_error_details", cause: error.cause }],
+      } : {}),
+    });
     const persisted = this.store.updateResult(record.id, {
       status: "error",
       error: error.message,
@@ -438,6 +490,42 @@ export class LocalAgentManager {
     const result = this.store.appendEventResult(agentId, kind, data);
     if (result.isErr()) {
       this.log("warn", "agent_event_write_failed", { agentId, kind, error: result.error.message });
+    }
+  }
+
+  private saveEvidence(
+    record: LocalAgentRecord,
+    input: {
+      outcome: "completed" | "failed";
+      startedAt: number;
+      workspaceRoot: string;
+      beforeGit?: AgentGitObservation;
+      response?: string;
+      error?: string;
+      items?: unknown[];
+    },
+  ): void {
+    if (!this.evidenceStore) return;
+    try {
+      this.evidenceStore.save({
+        agentId: record.id,
+        provider: record.provider,
+        workspaceRoot: input.workspaceRoot,
+        model: record.model,
+        startedAt: new Date(input.startedAt).toISOString(),
+        outcome: input.outcome,
+        response: input.response,
+        error: input.error,
+        items: input.items,
+        gitBefore: input.beforeGit,
+        gitAfter: input.beforeGit ? captureAgentGit(input.workspaceRoot) : undefined,
+      });
+    } catch (error) {
+      // Evidence write failure does not falsify the provider's execution
+      // result or prevent essential agent status persistence.
+      this.log("warn", "local_agent_evidence_write_failed", {
+        agentId: record.id, error: errorMessage(error),
+      });
     }
   }
 

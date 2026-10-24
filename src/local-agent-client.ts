@@ -127,8 +127,9 @@ export class LocalAgentClient {
   async get(
     agentId: string,
     scope: LocalAgentWorkspaceScope,
+    options: { includeEvidence?: boolean; evidenceRef?: string } = {},
   ): Promise<BetterResult<LocalAgentRecord, AgentLookupError | AgentDaemonError>> {
-    const result = await this.request("agent.get", { id: agentId, scope });
+    const result = await this.request("agent.get", { id: agentId, scope, ...options });
     return decodeRequestResult(result, "agent.get", decodeAgentRecord);
   }
 
