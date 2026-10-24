@@ -25,6 +25,8 @@ import {
   parseLocalAgentRunArgs,
 } from "./local-agent-targets.js";
 import { createLocalAgentClient } from "./local-agent-client.js";
+import { LocalAgentContextPacks } from "./local-agent-context-pack.js";
+import { createOptionalProjectMemoryPort } from "./memhub-memory-adapter.js";
 import { routeAutoAgent } from "./local-agent-router.js";
 import { toAgentErrorPayload, type LocalAgentError } from "./local-agent-errors.js";
 import {
@@ -1019,6 +1021,9 @@ async function runAgentsCommand(args: string[]): Promise<void> {
     case "watch":
       await runAgentsWatch(commandArgs, json);
       return;
+    case "context":
+      await runAgentsContext(commandArgs, json);
+      return;
     case "targets":
       await runAgentsTargets(commandArgs, json);
       return;
@@ -1034,6 +1039,32 @@ async function runAgentsCommand(args: string[]): Promise<void> {
     default:
       throw new Error(`Unknown agents command: ${subcommand}`);
   }
+}
+
+async function runAgentsContext(args: string[], json: boolean): Promise<void> {
+  const [action, ...rest] = args;
+  const config = loadConfig();
+  const workspace = resolveCliWorkspaceContext(config.allowedRoots);
+  const store = new LocalAgentContextPacks(config.stateDir, createOptionalProjectMemoryPort());
+  if (action === "show" && rest.length === 1) {
+    const pack = store.read(rest[0]!, workspace.workspaceRoot);
+    if (json) printJson(pack);
+    else console.log(pack.rendered);
+    return;
+  }
+  if (action === "build") {
+    const parsed = parseLocalAgentRunArgs(["context", ...rest]);
+    const result = await store.build({
+      workspaceRoot: workspace.workspaceRoot,
+      query: parsed.prompt,
+      request: parsed.context ?? {},
+    });
+    if (json) printJson({ metrics: result.metrics, pack: result.pack });
+    else console.log(result.pack.ref + " files=" + result.metrics.sourceCount +
+      " bytes=" + result.metrics.bytes + " reused=" + result.metrics.packReused);
+    return;
+  }
+  throw new Error("Usage: agents context <build [--workflow wf_...] [--context-file path] task | show ctx_ref> [--json]");
 }
 
 async function runAgentsTargets(args: string[], json: boolean): Promise<void> {
@@ -1099,6 +1130,7 @@ async function runAgentsRun(args: string[], json: boolean): Promise<void> {
     workspaceId: scope.workspaceId,
     model: parsed.model,
     effort: parsed.effort,
+    context: parsed.context,
   });
   const record = presentAgentResult(result, json);
   if (!record) return;
@@ -1118,6 +1150,7 @@ async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
   const result = await client.continue(parsed.agentId, parsed.prompt, {
     model: parsed.model,
     effort: parsed.effort,
+    context: parsed.context,
   }, scope);
   const record = presentAgentResult(result, json);
   if (!record) return;
@@ -1312,11 +1345,15 @@ function printAgentsHelp(): void {
       "Usage:",
       "  devspace agents ls [--json]",
       "  devspace agents run <profile-or-provider|auto> [--model <model>] [--effort <level>] [--json] <prompt>",
+      "    Add [--workflow wf_id] [--context-file relpath] [--memory-project slug] for an explicit G4 Context Pack.",
+      "    Reuse a pack with [--context-ref ctx_hash]; omitted context options preserve the legacy path.",
       "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
-      "  devspace agents show <id> [--json]",
+      "  devspace agents show <id> [--json] [--evidence] [--evidence-ref=ev_hash]",
       "  devspace agents events <id> [after-seq] [--json]",
       "  devspace agents watch <id> [--json]",
       "  devspace agents stats [--json]",
+      "  devspace agents context build [--workflow wf_id] [--context-file path] <query> [--json]",
+      "  devspace agents context show <ctx_hash> [--json]",
       "  devspace agents targets [--json]",
       "  devspace agents daemon <status|stop|logs> [--json]",
     ].join("\n"),

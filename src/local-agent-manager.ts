@@ -35,6 +35,9 @@ import {
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import {
+  LocalAgentContextPacks, type AgentContextRequest, type AgentContextMetrics,
+} from "./local-agent-context-pack.js";
+import {
   captureAgentGit,
   LocalAgentEvidenceStore,
   type AgentGitObservation,
@@ -53,12 +56,14 @@ export interface StartLocalAgentInput {
   model?: string;
   effort?: string;
   writeMode?: LocalAgentWriteMode;
+  context?: AgentContextRequest;
 }
 
 export interface RunOverrides {
   model?: string;
   effort?: string;
   writeMode?: LocalAgentWriteMode;
+  context?: AgentContextRequest;
 }
 
 export interface LocalAgentManagerLogger {
@@ -75,6 +80,7 @@ export interface LocalAgentManagerOptions {
   logger?: LocalAgentManagerLogger;
   subagents: SubagentsConfig;
   evidenceStore?: LocalAgentEvidenceStore;
+  contextPacks?: LocalAgentContextPacks;
 }
 
 export type AgentStartError = AgentTargetError | AgentScopeError | AgentConflictError | AgentStoreError;
@@ -97,6 +103,7 @@ export class LocalAgentManager {
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
   private readonly evidenceStore?: LocalAgentEvidenceStore;
+  private readonly contextPacks?: LocalAgentContextPacks;
   private readonly activeTurns = new Map<string, Promise<void>>();
   private accepting = true;
   private closePromise?: Promise<void>;
@@ -111,6 +118,7 @@ export class LocalAgentManager {
     this.logger = options.logger;
     this.subagents = options.subagents;
     this.evidenceStore = options.evidenceStore;
+    this.contextPacks = options.contextPacks;
   }
 
   reconcileActiveRuns(message?: string): BetterResult<number, AgentStoreError> {
@@ -165,6 +173,7 @@ export class LocalAgentManager {
         model: target.model,
         effort: target.effort,
         writeMode: input.writeMode,
+        context: input.context,
       }, input.workspaceId);
     });
   }
@@ -319,6 +328,7 @@ export class LocalAgentManager {
   ): Promise<void> {
     const startedAt = Date.now();
     let beforeGit: AgentGitObservation | undefined;
+    let contextMetrics: AgentContextMetrics | undefined;
     this.log("info", "agent_run_started", {
       provider: record.provider,
       agentId: record.id,
@@ -349,6 +359,35 @@ export class LocalAgentManager {
       if (input.isErr()) {
         this.persistRunError(record, input.error, startedAt);
         return;
+      }
+      if (overrides.context) {
+        try {
+          if (!this.contextPacks) throw new Error("Subagent context pack support is not configured.");
+          const compiled = await this.contextPacks.build({
+            workspaceRoot, query: prompt, request: overrides.context,
+          });
+          contextMetrics = compiled.metrics;
+          input.value.prompt = input.value.prompt + "\n\n" + compiled.pack.rendered;
+          this.log("info", "agent_context_pack_prepared", {
+            agentId: record.id, ...contextMetrics,
+          });
+        } catch (error) {
+          const reason = errorMessage(error).slice(0, 400);
+          this.saveEvidence(record, {
+            outcome: "failed", startedAt, beforeGit, workspaceRoot,
+            error: "Context preparation rejected: " + reason,
+          });
+          const persisted = this.store.updateResult(record.id, {
+            status: "error",
+            error: "Context preparation rejected: " + reason,
+            errorCode: "CONTEXT_PREPARATION_FAILED",
+            errorRetryable: false,
+          });
+          this.log("warn", "agent_context_pack_failed", {
+            agentId: record.id, error: reason, persistenceFailed: persisted.isErr(),
+          });
+          return;
+        }
       }
       const driver = this.driverResult(record.provider, "run", record.id);
       if (driver.isErr()) {
@@ -394,6 +433,7 @@ export class LocalAgentManager {
         workspaceRoot,
         response: runResult.finalResponse,
         items: runResult.items,
+        context: contextMetrics,
       });
       const updated = this.store.updateResult(record.id, {
         providerSessionId: runResult.providerSessionId ?? current.value.providerSessionId,
@@ -424,6 +464,7 @@ export class LocalAgentManager {
         outcome: "failed", startedAt, beforeGit,
         workspaceRoot: record.workspaceRoot,
         error: "Unexpected internal subagent failure.",
+        context: contextMetrics,
       });
       const persisted = this.store.updateResult(record.id, {
         status: "error",
@@ -503,6 +544,7 @@ export class LocalAgentManager {
       response?: string;
       error?: string;
       items?: unknown[];
+      context?: AgentContextMetrics;
     },
   ): void {
     if (!this.evidenceStore) return;
@@ -517,6 +559,7 @@ export class LocalAgentManager {
         response: input.response,
         error: input.error,
         items: input.items,
+        context: input.context,
         gitBefore: input.beforeGit,
         gitAfter: input.beforeGit ? captureAgentGit(input.workspaceRoot) : undefined,
       });

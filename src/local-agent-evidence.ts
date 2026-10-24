@@ -4,6 +4,7 @@ import {
   mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import type { AgentContextMetrics } from "./local-agent-context-pack.js";
 
 // Private execution artifacts, not a second workflow or model-memory store.
 const MAX_PROVIDER_ITEMS_BYTES = 256 * 1024;
@@ -23,6 +24,7 @@ export interface AgentEvidenceSummary {
   itemCount: number;
   itemsTruncated: boolean;
   sha256: string;
+  context?: AgentContextMetrics;
 }
 
 export interface AgentEvidenceArtifact extends AgentEvidenceSummary {
@@ -77,6 +79,7 @@ export class LocalAgentEvidenceStore {
     items?: unknown[];
     gitBefore?: AgentGitObservation;
     gitAfter?: AgentGitObservation;
+    context?: AgentContextMetrics;
   }): AgentEvidenceSummary {
     const dir = this.agentDir(input.agentId);
     mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -110,6 +113,7 @@ export class LocalAgentEvidenceStore {
       sha256,
       ...(input.gitBefore ? { gitBefore: input.gitBefore } : {}),
       ...(input.gitAfter ? { gitAfter: input.gitAfter } : {}),
+      ...(input.context ? { context: input.context } : {}),
       ...(input.response ? { answerPreview: input.response.slice(0, 2000) } : {}),
       ...(input.error ? { error: input.error.slice(0, 4000) } : {}),
       itemsJson,
@@ -183,5 +187,6 @@ function summary(value: AgentEvidenceArtifact): AgentEvidenceSummary {
     itemCount: value.itemCount,
     itemsTruncated: value.itemsTruncated,
     sha256: value.sha256,
+    ...(value.context ? { context: value.context } : {}),
   };
 }

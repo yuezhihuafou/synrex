@@ -11,6 +11,9 @@ import { LocalAgentManager } from "./local-agent-manager.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
 import { LocalAgentEvidenceStore } from "./local-agent-evidence.js";
+import { LocalAgentContextPacks } from "./local-agent-context-pack.js";
+import { createOptionalProjectMemoryPort } from "./memhub-memory-adapter.js";
+import { SerenaSemanticManager } from "./serena-semantic.js";
 
 const config = loadConfig();
 const DEFAULT_DAEMON_SHUTDOWN_TIMEOUT_MS = 10_000;
@@ -24,6 +27,11 @@ const store = new LocalAgentStore(paths.stateDir);
 const manager = new LocalAgentManager({
   store,
   evidenceStore: new LocalAgentEvidenceStore(config.stateDir),
+  contextPacks: new LocalAgentContextPacks(
+    config.stateDir,
+    createOptionalProjectMemoryPort(),
+    process.env.SYNREX_CONTEXT_USE_SERENA === "1" ? new SerenaSemanticManager() : undefined,
+  ),
   drivers: createLocalAgentDrivers({ subagents: config.subagents, stateDir: config.stateDir }),
   pool: new LocalAgentRuntimePool({ logger: log }),
   loadProfiles: (workspaceRoot) => loadLocalAgentProfiles(config, workspaceRoot, { includeDisabled: true }),

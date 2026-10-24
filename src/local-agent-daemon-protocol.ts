@@ -10,6 +10,7 @@ import type {
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
 import type { LocalAgentWriteMode } from "./local-agent-runtime.js";
+import type { AgentContextRequest } from "./local-agent-context-pack.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION } from "./local-agent-daemon-lifecycle.js";
 
 export type LocalAgentDaemonMethod =
@@ -317,6 +318,7 @@ function decodeStartInput(value: unknown): StartLocalAgentInput {
     model: optionalString(record?.model),
     effort: optionalString(record?.effort),
     writeMode: decodeWriteMode(record?.writeMode),
+    context: decodeContextRequest(record?.context),
   };
 }
 
@@ -331,8 +333,41 @@ function decodeContinueInput(value: unknown): { id: string; prompt: string; scop
       model: optionalString(overrides.model),
       effort: optionalString(overrides.effort),
       writeMode: decodeWriteMode(overrides.writeMode),
+      context: decodeContextRequest(overrides.context),
     } } : {}),
   };
+}
+
+function decodeContextRequest(value: unknown): AgentContextRequest | undefined {
+  if (value === undefined) return undefined;
+  const data = asRecord(value);
+  if (!data) throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Context must be an object.");
+  if (Object.keys(data).some((key) => !["workflowId", "files", "memoryProject", "contextRef", "maxBytes"].includes(key))) {
+    throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Unknown context option.");
+  }
+  const out: AgentContextRequest = {};
+  for (const key of ["workflowId", "memoryProject", "contextRef"] as const) {
+    if (data[key] !== undefined) {
+      if (typeof data[key] !== "string" || data[key].length > 512) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Invalid context " + key + ".");
+      }
+      out[key] = data[key] as string;
+    }
+  }
+  if (data.files !== undefined) {
+    if (!Array.isArray(data.files) || data.files.length > 16 ||
+        data.files.some((file) => typeof file !== "string" || file.length > 300)) {
+      throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Invalid context file hints.");
+    }
+    out.files = data.files as string[];
+  }
+  if (data.maxBytes !== undefined) {
+    if (!Number.isInteger(data.maxBytes) || (data.maxBytes as number) < 2_000 || (data.maxBytes as number) > 20_000) {
+      throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Invalid context byte budget.");
+    }
+    out.maxBytes = data.maxBytes as number;
+  }
+  return out;
 }
 
 function decodeWorkspaceScope(value: unknown): LocalAgentWorkspaceScope {
