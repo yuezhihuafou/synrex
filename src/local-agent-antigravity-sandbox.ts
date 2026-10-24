@@ -105,7 +105,15 @@ export function prepareAntigravityExecution(options: {
       options.providerCommand, ...options.providerArgs,
     );
     return {
-      command: "bwrap", args,
+      // Ubuntu 24.04's distro bwrap-userns-restrict profile permits the
+      // outer sandbox but blocks nested user namespaces required by some
+      // Antigravity terminal tools. A root-owned Synrex-specific bwrap
+      // executable has an independently attached AppArmor userns profile.
+      // Other hosts continue to use their normal distro executable.
+      command: options.env.SYNREX_ANTIGRAVITY_BWRAP ||
+        (existsSync("/usr/local/libexec/synrex-bwrap")
+          ? "/usr/local/libexec/synrex-bwrap" : "bwrap"),
+      args,
       env: scrubInheritedSecrets(options.env),
       close: () => { rmSync(scratch, { recursive: true, force: true }); },
     };

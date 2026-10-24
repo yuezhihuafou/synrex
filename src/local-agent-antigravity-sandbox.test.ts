@@ -43,7 +43,8 @@ test("autonomous shell runs without approvals but cannot write host files, git m
       env: { ...process.env, HOME: home },
     });
     try {
-      assert.equal(plan.command, "bwrap");
+      assert.equal(plan.command, existsSync("/usr/local/libexec/synrex-bwrap")
+        ? "/usr/local/libexec/synrex-bwrap" : "bwrap");
       const ran = spawnSync(plan.command, plan.args, {
         env: plan.env, cwd: workspace, encoding: "utf8", timeout: 15_000,
       });
@@ -76,4 +77,15 @@ test("autonomous shell runs without approvals but cannot write host files, git m
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }
+});
+
+test("Synrex-scoped bwrap permits nested terminal sandboxes when installed", {
+  skip: process.platform !== "linux" || !existsSync("/usr/local/libexec/synrex-bwrap"),
+}, () => {
+  const ran = spawnSync("/usr/local/libexec/synrex-bwrap", [
+    "--ro-bind", "/", "/", "--proc", "/proc", "--dev-bind", "/dev", "/dev",
+    "--", "bwrap", "--ro-bind", "/", "/", "--proc", "/proc",
+    "--dev-bind", "/dev", "/dev", "--", "/bin/true",
+  ], { encoding: "utf8", timeout: 12_000 });
+  assert.equal(ran.status, 0, ran.stderr || ran.error?.message);
 });

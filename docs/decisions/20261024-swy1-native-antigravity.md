@@ -26,6 +26,16 @@ empty user namespace (`unshare -U`), but denied the UID map required by
    returns zero. The global restriction remains **1**, so ordinary
    `unshare -Ur` remains blocked by design.
 
+4. The official restricted profile deliberately denies capability acquisition
+   by bwrap children. This prevents **nested** bwrap, while Antigravity's
+   terminal-command backend can require a second user namespace. A separate,
+   root-owned `/usr/local/libexec/synrex-bwrap` (mode `0750`, group `swy`)
+   and `/etc/apparmor.d/synrex-bwrap` allow user namespaces only for this
+   Synrex-specific launcher. Verified that an outer `synrex-bwrap` can
+   successfully launch an inner regular `bwrap` while the regular outer
+   `bwrap` still cannot. The system's original profile and global sysctl
+   were **not** changed by this additional fix.
+
 This does **not** turn Synrex into a Docker workflow. Normal Subagent
 processes launch the host's native `bwrap`, read and edit the real selected
 host workspace, and run host Node/Python toolchains. Container runtime
@@ -48,10 +58,18 @@ inside an explicitly writable workspace can still remove its own files.
 
 - Check prerequisite: `bwrap --ro-bind / / --proc /proc --dev-bind /dev /dev -- /bin/true`.
 - View policy: `/etc/apparmor.d/bwrap-userns-restrict`.
+- Scoped nested profile: `/etc/apparmor.d/synrex-bwrap`, attached only to
+  `/usr/local/libexec/synrex-bwrap`. Its use is detected by the Synrex
+  adapter, with `SYNREX_ANTIGRAVITY_BWRAP` available as an explicit override.
 - Rollback (root only): unload that one profile with
   `apparmor_parser -R /etc/apparmor.d/bwrap-userns-restrict`, then remove
   `/etc/apparmor.d/bwrap-userns-restrict`. No global sysctl modification
   is necessary either to install or roll back.
+- Scoped launcher rollback (root): unload
+  `/etc/apparmor.d/synrex-bwrap` with `apparmor_parser -R`, then remove
+  `/etc/apparmor.d/synrex-bwrap` and
+  `/usr/local/libexec/synrex-bwrap`. The unmodified official profile
+  continues to govern system-wide bwrap users.
 - Ubuntu `apparmor` upgrades may ship or alter the same filename; inspect
   conflicts and profile attachment before reapplying this setup.
 
