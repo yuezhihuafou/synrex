@@ -111,8 +111,19 @@ export class LocalAgentContextPacks {
     const ranked = [...allow].filter(validRelative).filter((p) => !DANGEROUS.test(p))
       .map((path) => ({ path, score: relevance(path, search, requested) }))
       .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path));
-    const selected = [...new Set([...requested.filter((p) => allow.has(p)), ...ranked.map((p) => p.path)])]
+    // A caller with exact file hints has already paid the discovery cost.
+    // Prefetching unrelated alphabetically ranked files defeats G4's goal
+    // and can increase model input tokens for simple source inspections.
+    const matchedHints = requested.filter((p) => allow.has(p) && !DANGEROUS.test(p));
+    const selected = [...new Set(matchedHints.length > 0
+      ? matchedHints
+      : ranked.filter((item) => item.score >= 3).map((item) => item.path))]
       .slice(0, MAX_SOURCES);
+    // No guesses about unknown symbols: a small fallback map is preferable
+    // to an empty handoff when the prompt contains no filename vocabulary.
+    if (selected.length === 0 && requested.length === 0) {
+      selected.push(...ranked.slice(0, 3).map((item) => item.path));
+    }
     const sources: AgentContextSource[] = [];
     const seenDigest = new Set<string>();
     let filesRead = 0;
@@ -150,11 +161,16 @@ export class LocalAgentContextPacks {
       // Reuse the existing Serena backend on demand; do not start a separate
       // mandatory semantic service or block Git fallback on warmup failures.
       for (const source of sources.slice(0, 2)) {
+        if (source.semanticOverview) continue;
         try {
           const result = await this.semantic.call(root, "get_symbols_overview", {
             relative_path: source.path, depth: 1,
           }, { timeoutMs: 2_000 });
           source.semanticOverview = result.result.slice(0, 650);
+          const cached = this.cachedSource.get(join(root, source.path));
+          if (cached && cached.source.sha256 === source.sha256) {
+            cached.source.semanticOverview = source.semanticOverview;
+          }
           semanticCalls++;
         } catch { /* Local outlines remain usable. */ }
       }

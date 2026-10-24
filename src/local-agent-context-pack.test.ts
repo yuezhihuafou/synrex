@@ -97,11 +97,14 @@ test("context packs are bounded, content addressed, scoped and incrementally cac
     assert.ok(first.metrics.semanticCalls >= 1);
     assert.ok(semanticCount >= 1);
     assert.equal(recalls, 1);
+    assert.equal(first.pack.sources.length, 1,
+      "explicit duplicate file hints must deduplicate content without prefetching unrelated files");
     const second = await contexts.build({ workspaceRoot: repo, query: "Fix recoverSession", request });
     assert.equal(second.pack.ref, first.pack.ref);
     assert.equal(second.metrics.filesRead, 0);
     assert.ok(second.metrics.sourceCacheHits >= 1);
     assert.equal(second.metrics.packReused, true);
+    assert.equal(second.metrics.semanticCalls, 0, "unchanged symbol overview should not relaunch Serena");
     assert.equal(contexts.read(first.pack.ref, repo).ref, first.pack.ref);
     assert.throws(() => contexts.read("ctx_" + "f".repeat(64), repo));
     const other = mkdtempSync(join(temp, "other-"));
