@@ -154,3 +154,24 @@ test("MemHub outage degrades without blocking a code context pack", async () => 
     assert.match(pack.pack.rendered, /index.ts/);
   } finally { rmSync(temp, { recursive: true, force: true }); }
 });
+
+test("unhinted symbol references are located by bounded Git grep, not arbitrary alphabetical files", async () => {
+  const temp = mkdtempSync(join(tmpdir(), "synrex-context-symbol-grep-"));
+  try {
+    execFileSync("git", ["init", "-q", temp]);
+    for (const name of ["a", "b", "c", "d", "e", "f", "g"]) {
+      writeFileSync(join(temp, name + ".ts"), "export const unrelated_" + name + " = 1;");
+    }
+    writeFileSync(join(temp, "z.ts"), "export function rareRecoveryHandle() { return 42; }");
+    execFileSync("git", ["-C", temp, "add", "."]);
+    execFileSync("git", ["-C", temp, "-c", "user.name=Test",
+      "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
+    const contexts = new LocalAgentContextPacks(join(temp, "state"));
+    const result = await contexts.build({
+      workspaceRoot: temp, query: "Locate rareRecoveryHandle implementation",
+      request: { maxBytes: 2_000 },
+    });
+    assert.equal(result.pack.sources[0]?.path, "z.ts");
+    assert.ok(result.pack.bytes <= 2_000);
+  } finally { rmSync(temp, { recursive: true, force: true }); }
+});

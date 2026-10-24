@@ -115,9 +115,12 @@ export class LocalAgentContextPacks {
     // Prefetching unrelated alphabetically ranked files defeats G4's goal
     // and can increase model input tokens for simple source inspections.
     const matchedHints = requested.filter((p) => allow.has(p) && !DANGEROUS.test(p));
+    const symbolMatches = matchedHints.length === 0 && requested.length === 0
+      ? grepRelevantSymbols(root, search).filter((path) => allow.has(path) && validRelative(path) && !DANGEROUS.test(path))
+      : [];
     const selected = [...new Set(matchedHints.length > 0
       ? matchedHints
-      : ranked.filter((item) => item.score >= 3).map((item) => item.path))]
+      : [...symbolMatches, ...ranked.filter((item) => item.score >= 3).map((item) => item.path)])]
       .slice(0, MAX_SOURCES);
     // No guesses about unknown symbols: a small fallback map is preferable
     // to an empty handoff when the prompt contains no filename vocabulary.
@@ -266,6 +269,30 @@ function trackedPaths(root: string): string[] {
       encoding: "utf8", timeout: 3_000, maxBuffer: 2 * 1024 * 1024,
       stdio: ["ignore", "pipe", "ignore"],
     }).split("\0").filter(Boolean).slice(0, 16_000);
+  } catch { return []; }
+}
+
+function grepRelevantSymbols(root: string, query: string): string[] {
+  // A single bounded Git grep is cheaper than asking a second model to walk
+  // an unknown repository. Exact file hints always take precedence.
+  const ignored = new Set([
+    "function", "method", "class", "interface", "export", "exported",
+    "source", "code", "project", "workflow", "please", "return",
+    "which", "where", "tests", "files", "from", "with", "that",
+  ]);
+  const terms = words(query).filter((term) =>
+    term.length >= 5 && /[a-z_]/i.test(term) && !ignored.has(term)).slice(0, 4);
+  if (!terms.length) return [];
+  try {
+    const result = execFileSync("git", [
+      "-C", root, "grep", "-l", "-i", "-z", "-F",
+      ...terms.flatMap((term) => ["-e", term]),
+      "--", "*.ts", "*.tsx", "*.js", "*.py", "*.rs", "*.go", "*.cpp", "*.md",
+    ], {
+      encoding: "utf8", timeout: 2_000, maxBuffer: 256 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return result.split("\0").filter(Boolean).slice(0, 40);
   } catch { return []; }
 }
 
