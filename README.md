@@ -1,4 +1,4 @@
-[![CI](https://github.com/yuezhihuafou/devspace-verge/actions/workflows/ci.yml/badge.svg)](https://github.com/yuezhihuafou/devspace-verge/actions/workflows/ci.yml)
+[![CI](https://github.com/yuezhihuafou/synrex/actions/workflows/ci.yml/badge.svg)](https://github.com/yuezhihuafou/synrex/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 # Synrex — Governed execution for AI
@@ -87,8 +87,8 @@ fully supported production target.
 ## Install from source
 
 ```bash
-git clone https://github.com/yuezhihuafou/devspace-verge.git
-cd devspace-verge
+git clone https://github.com/yuezhihuafou/synrex.git
+cd synrex
 corepack enable
 corepack prepare pnpm@11.25.0 --activate
 pnpm install --frozen-lockfile
