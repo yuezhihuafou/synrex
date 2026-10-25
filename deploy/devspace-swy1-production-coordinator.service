@@ -1,5 +1,5 @@
 [Unit]
-Description=DevSpace swy1 equal-peer MCP coordinator (production after validated cutover)
+Description=Synrex swy1 equal-peer MCP coordinator (production)
 After=network-online.target
 Wants=network-online.target
 

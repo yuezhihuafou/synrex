@@ -3,7 +3,7 @@ import { subagentsConfigSchema } from "./local-agent-config.js";
 
 export const DEVSPACE_CONFIG_VERSION = 1 as const;
 export const DEVSPACE_CONFIG_SCHEMA_URL =
-  "https://raw.githubusercontent.com/yuezhihuafou/devspace-verge/main/schema/v1/devspace.schema.json";
+  "https://raw.githubusercontent.com/yuezhihuafou/synrex/main/schema/v1/devspace.schema.json";
 
 const serverConfigSchema = z.object({
   host: z.string().trim().min(1).default("127.0.0.1"),

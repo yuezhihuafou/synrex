@@ -5,11 +5,11 @@
   "description": "Synrex: self-hosted, GPT-first coding and execution with durable tasks, compact context, multi-host workspaces, and architecture governance.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yuezhihuafou/devspace-verge.git"
+    "url": "git+https://github.com/yuezhihuafou/synrex.git"
   },
-  "homepage": "https://github.com/yuezhihuafou/devspace-verge#readme",
+  "homepage": "https://github.com/yuezhihuafou/synrex#readme",
   "bugs": {
-    "url": "https://github.com/yuezhihuafou/devspace-verge/issues"
+    "url": "https://github.com/yuezhihuafou/synrex/issues"
   },
   "type": "module",
   "main": "dist/server.js",
