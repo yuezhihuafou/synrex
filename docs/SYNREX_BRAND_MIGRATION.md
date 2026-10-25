@@ -24,9 +24,9 @@ Retain explicit upstream attribution to Waishnav/devspace and MIT notices.
 - The active public MCP/OAuth issuer and domain, existing client tokens,
   refresh tokens, Console cookie name and session HMAC version are continuity
   and security contracts. Existing sessions must survive a UI-only rename.
-- The GitHub slug yuezhihuafou/devspace-verge is still the real remote URL.
-  Rename it only when the repository owner performs an actual GitHub rename
-  and verifies redirects and installation links.
+- The canonical GitHub repository is `yuezhihuafou/synrex`. The former
+  `yuezhihuafou/devspace-verge` slug is historical; use the canonical URL for
+  installation, metadata, configuration schemas, and Git remotes.
 - Historic pinned releases and workflow titles remain audit evidence. Never
   rewrite immutable release manifests or user task histories for branding.
 - Tool events such as rev_http_completed are historical durable diagnostic
@@ -49,8 +49,8 @@ diagnostics when the gate is blocked. The legacy mutable `pnpm deploy:live`
 shortcut now fails closed. Retain real Git and historical release evidence;
 do not rewrite old manifests to simulate a clean source baseline.
 
-The swy1 development checkout contains pre-existing uncommitted changes.
-Do not replace its pinned production release from mutable source via
+Development checkouts may contain uncommitted changes at any time.
+Do not replace the pinned production release from mutable source via
 pnpm deploy:live or silently change OAuth authority for a brand-only release.
 
 The installed ChatGPT plugin's display description belongs to its host UI.

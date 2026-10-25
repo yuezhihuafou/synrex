@@ -20,8 +20,8 @@ proxy.
 Synrex is currently distributed from its GitHub repository rather than npm:
 
 ```bash
-git clone https://github.com/yuezhihuafou/devspace-verge.git
-cd devspace-verge
+git clone https://github.com/yuezhihuafou/synrex.git
+cd synrex
 corepack enable
 corepack prepare pnpm@11.25.0 --activate
 pnpm install --frozen-lockfile
@@ -32,7 +32,7 @@ npm link
 Then initialize it:
 
 ```bash
-devspace init
+synrex init
 ```
 
 The setup flow asks one question at a time.
@@ -73,7 +73,7 @@ These choices are stored as provider objects under `subagents` in
 If you selected Coding Agents, install the Synrex subagents skill from GitHub:
 
 ```bash
-npx skills add yuezhihuafou/devspace-verge --skill subagents --global
+npx skills add yuezhihuafou/synrex --skill subagents --global
 ```
 
 The Skills CLI asks which installed Coding Agents should receive the skill.

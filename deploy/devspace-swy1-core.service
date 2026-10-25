@@ -1,5 +1,5 @@
 [Unit]
-Description=DevSpace swy1 lightweight coordinator (private candidate)
+Description=Synrex swy1 lightweight coordinator (private candidate)
 Wants=network-online.target
 After=network-online.target
 
