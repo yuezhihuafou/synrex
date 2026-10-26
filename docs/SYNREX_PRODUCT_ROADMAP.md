@@ -4,8 +4,11 @@
 continuity and Tunnel/port ownership form one engineering effort. Consult
 `docs/platform/SYNREX_P0_CONTINUITY_INTEGRATION.md` for the measured baseline,
 read-only inventory tools, release-lock source and isolated ingress prototype.
-That source work is **not** a claim that the proxy or revised activation guard
-is already deployed on swy1's public ingress.
+The stable proxy has been deployed on swy1; Core listens privately on :7677,
+with the stable owner ingress on :7676. The promotion implementation also
+requires exact remote main + active production ancestry and immutable build
+verification. Git publication, candidate verification and production activation
+are separate observable states, not one implied action.
 
 ## Product identity
 

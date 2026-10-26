@@ -27,6 +27,15 @@ mkdir -p "$dropdir" "$backup_root"
 chmod 700 "$backup_root"
 test -f "$candidate/dist/cli.js"
 test -f "$candidate/release-manifest.json"
+test -f "$candidate/scripts/synrex-release-provenance.py"
+# Do not regress production just because a developer finished on an older
+# worktree. The candidate must equal the remote canonical main at cutover,
+# contain the CURRENT pinned release, and have verified immutable build bytes.
+if ! python3 "$candidate/scripts/synrex-release-provenance.py" \
+  --candidate "$candidate" >"$backup_root/provenance-preflight.json"; then
+  echo "OWNER_RELEASE_BLOCKED candidate is stale or not on canonical main; inspect $backup_root/provenance-preflight.json" >&2
+  exit 75
+fi
 ingress_socket="${SYNREX_INGRESS_CONTROL_SOCKET:-}"
 # After the first migration, the owner ingress is an independently managed
 # service. Never silently fall back to the legacy :7676 layout while it runs.
@@ -52,6 +61,27 @@ if ! python3 "$candidate/scripts/synrex-p0.py" release-check --node swy1 "${stab
   exit 75
 fi
 old=""
+changed=false
+paused=false
+activated=false
+write_release_receipt() {
+  local outcome="$1"
+  python3 - "$backup_root/release-receipt.json" "$candidate" "$outcome" <<'PY'
+import json,sys,datetime,pathlib
+output=pathlib.Path(sys.argv[1])
+release=pathlib.Path(sys.argv[2])
+manifest=json.loads((release/"release-manifest.json").read_text())
+output.write_text(json.dumps({
+  "status":sys.argv[3],
+  "candidate":str(release),
+  "sourceRevision":manifest["sourceRevision"],
+  "at":datetime.datetime.now(datetime.timezone.utc).isoformat(),
+  "productionCorePort":7677,
+  "publicIngressUnchanged":True
+},sort_keys=True,indent=2)+"\n")
+output.chmod(0o600)
+PY
+}
 if test -e "$dropin"; then
   cp -p "$dropin" "$backup_root/pre-switch-dropin.conf"
   old=present
@@ -62,8 +92,41 @@ resume_ingress() {
       echo 'OWNER_RELEASE_INGRESS_RESUME_FAILED inspect stable ingress control socket' >&2
       return 1
     fi
+    paused=false
   fi
 }
+cleanup() {
+  local failure=$?
+  trap - EXIT ERR INT TERM
+  if test "$activated" = true; then
+    exit 0
+  fi
+  if test "$changed" = true; then
+    echo 'OWNER_RELEASE_RESTORING previous immutable Core' >&2
+    if test "$old" = present; then
+      cp -p "$backup_root/pre-switch-dropin.conf" "$dropin" || failure=1
+    else
+      rm -f "$dropin" || failure=1
+    fi
+    if ! systemctl --user daemon-reload || ! systemctl --user restart "$service"; then
+      echo 'OWNER_RELEASE_ROLLBACK_FAILED previous configuration restored but Core needs inspection' >&2
+      failure=1
+      write_release_receipt "rollback-failed" || true
+    else
+      echo 'OWNER_RELEASE_ROLLED_BACK' >&2
+      write_release_receipt "rolled-back" || true
+    fi
+  else
+    write_release_receipt "blocked-before-switch" || true
+  fi
+  if test "$paused" = true; then
+    resume_ingress || failure=1
+  fi
+  exit "${failure:-1}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # Only a configured, owner-local Unix control socket enables true request
 # admission pausing. Older deployments still use known-busy protection but
@@ -78,6 +141,7 @@ if test -n "$ingress_socket"; then
     echo 'OWNER_RELEASE_BLOCKED ingress pause failed' >&2
     exit 75
   fi
+  paused=true
   idle=false
   for _ in $(seq 1 60); do
     if node "$ingress_ctl" --socket "$ingress_socket" --command STATUS --idle >/dev/null 2>&1; then
@@ -94,25 +158,15 @@ if test -n "$ingress_socket"; then
 else
   echo 'OWNER_RELEASE_LEGACY_INGRESS no stable admission controller; in-flight MCP requests remain unobservable' >&2
 fi
-restore() {
-  local failure=$?
-  trap - ERR
-  if test "$old" = present; then
-    cp -p "$backup_root/pre-switch-dropin.conf" "$dropin" || exit 1
-  else
-    rm -f "$dropin" || exit 1
-  fi
-  if ! systemctl --user daemon-reload || ! systemctl --user restart "$service"; then
-    echo 'OWNER_RELEASE_ROLLBACK_FAILED previous drop-in restored but service recovery needs inspection' >&2
-    resume_ingress || true
-    exit 1
-  fi
-  resume_ingress || exit 1
-  echo 'OWNER_RELEASE_ROLLED_BACK' >&2
-  exit "$failure"
-}
-trap 'restore' ERR
+# Recheck immediately before the switch: another conversation may publish a
+# newer main while requests are draining. No version is ever silently skipped.
+if ! python3 "$candidate/scripts/synrex-release-provenance.py" \
+  --candidate "$candidate" >"$backup_root/provenance-cutover.json"; then
+  echo 'OWNER_RELEASE_BLOCKED main advanced during drain; restarting would be stale' >&2
+  exit 75
+fi
 node="/home/swy/.nvm/versions/node/v22.22.2/bin/node"
+changed=true
 cat > "$dropin.tmp" <<EOF
 [Service]
 ExecStart=
@@ -145,5 +199,6 @@ if ! curl -fsS --max-time 12 https://devspace.yuezhihuafou.dpdns.org/.well-known
 fi
 systemctl --user is-active --quiet "$service"
 resume_ingress
+write_release_receipt "activated"
+activated=true
 printf 'OWNER_RELEASE_ACTIVATED %s\n' "$candidate"
-trap - ERR

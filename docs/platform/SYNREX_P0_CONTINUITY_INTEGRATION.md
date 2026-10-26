@@ -183,6 +183,62 @@ stable-ingress Core upgrade; accepted HTTP requests must still drain within
 the bounded admission window. A failed drain cancels the upgrade rather
 than terminating ongoing tools or robot actions.
 
+**2026-10-26 canonical version protection:** Production had reached
+`e9114fb` while `origin/main` was still `9438b6b` (two Console usage
+commits ahead). This is a normal fast-forward opportunity, *not* permission
+to downgrade production with an older candidate. The release authority now
+calls `scripts/synrex-release-provenance.py` twice (before admission control
+and again after draining). It verifies the immutable candidate's manifest,
+dist build identity and asset SHA-256 hashes, that its source revision equals
+the **latest remote canonical main**, and that it descends from the **actual
+running production revision**. Any other branch advancing during a build or
+drain causes a refusal, not a forced overwrite. Other conversations can keep
+working; only the actual integration/publish and Core promotion are
+serialized. A private release receipt records activation or rollback.
+
+The Git Worktree default remains normal `HEAD` for arbitrary projects.
+For Synrex itself, new integration worktrees must explicitly start from the
+**fetched origin/main**; never use a stale mutable checkout HEAD as proof of
+the latest source. Changes from dirty gateway/other WTs must be selected and
+reviewed, not automatically swept into production.
+
+### One-command recurring production promotion
+
+Once *selected and tested* changes have been committed and pushed to canonical
+`main`, use its clean checkout (including a detached worktree checked out at
+the exact published SHA):
+
+```sh
+bash deploy/promote-main.sh --check .
+bash deploy/promote-main.sh --deploy .
+```
+
+The command refuses dirty source, a noncanonical remote, stale `HEAD`, a
+commit that does not contain the running production source, or a candidate
+with missing/changed immutable build assets. It runs the project build,
+supported regression tests and isolated OAuth/MCP/Console ingress checks
+before creating an immutable release under
+`/home/swy/services/devspace/releases/synrex-main-<SHA>`.
+The `--check` result is reusable: `--deploy` validates the same immutable
+package instead of rebuilding or overwriting it.
+
+Production promotion then backs up the authoritative OAuth/SQLite state and
+dispatches an independent **user systemd unit**, so terminating the launching
+MCP call cannot silently truncate the rollback script. That script takes a
+release lock, verifies the GitHub `main` SHA **again** immediately before
+changing Core, and pauses/drains the stable ingress for a bounded period.
+The Cloudflare Tunnel stays alive; detached systemd task units remain
+independent. A bad startup, public OAuth failure, later GitHub push during
+drain, or exhausted drain window refuses or reverses the switch. The
+per-release private directory records a receipt and preflight evidence.
+
+This is a **Core release protocol, not automatic promotion of every dirty
+worktree**. A newly pushed main is not secretly deployed. The owner starts
+the command when desired; other conversations keep coding. A publish that
+races the release causes a safe refusal, after which the newer main is built
+and promoted instead. Tests cannot guarantee that an external ChatGPT client
+resumes reasoning after a pre-existing network failure.
+
 Subsequent Core upgrades need bounded admission drain. To avoid a permanent
 block from idle, long-lived SSE **GET** notification subscriptions, the
 ingress closes only these read-only streams with an SSE reconnect comment
@@ -198,8 +254,8 @@ The stable ingress remains running throughout ordinary Core deployment.
 | --- | --- | --- |
 | Concurrent Console/Mem/Subagent development | 3 independent Worktrees, no overwritten dirty files, selected commits integrated once | inventory and static integration plan implemented; full convergence pending |
 | Concurrent release requests | second operation refused without modifying unit/drop-in | isolated mocked systemd test |
-| Upgrade during durable robot simulation | restart refused while task is running, run ID survives reconnect | known-busy guard tested; real-client restart test pending |
-| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | isolated real-Core/Console/proxy restart probe passed; **not live deployed** |
+| Upgrade during durable robot simulation | task remains a separate systemd unit, ID and run receipt survive Core restart | stable-mode guard implemented; repeated real-client release test required |
+| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | first swy1 cutover completed; Core port :7677 / ingress :7676 live, subsequent Core upgrade test required |
 | Cloudflare/SSH/GPU peer | swy1 works with gateway offline; no duplicate public OAuth, no port conflict | live inventory partial; fault injection pending |
 | Console observability | actual process/port/tunnel + request/task/run causal timeline, unknowns labeled | core historical diagnostics exist; P0 inventory not yet wired to UI |
 | LayerFS | meaningful measured advantage versus Git Worktree | deliberately deferred |
@@ -212,6 +268,7 @@ python3 -m unittest discover -s tests -p 'test_activate_owner_release.py' -v
 node --test scripts/ingress-gate.test.mjs
 node scripts/probe-stable-ingress.mjs .
 python3 -m unittest discover -s tests -p 'test_migrate_stable_ingress.py' -v
+python3 -m unittest discover -s tests -p 'test_release_provenance.py' -v
 pnpm typecheck && pnpm build
 ```
 

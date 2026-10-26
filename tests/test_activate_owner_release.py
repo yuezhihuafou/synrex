@@ -30,6 +30,10 @@ class ActivationTests(unittest.TestCase):
         (self.release / "scripts/synrex-p0.py").write_text(
             "import os,sys,json\nprint(json.dumps({'readyForRestart': not os.getenv('FAKE_BUSY')}))\n"
             "sys.exit(2 if os.getenv('FAKE_BUSY') else 0)\n")
+        (self.release / "scripts/synrex-release-provenance.py").write_text(
+            "import os,sys,json\n"
+            "print(json.dumps({'ready': not os.getenv('FAKE_STALE')}))\n"
+            "sys.exit(75 if os.getenv('FAKE_STALE') else 0)\n")
         (self.bin / "systemctl").write_text(
             "#!/bin/sh\necho \"$*\" >>\"$FAKE_SYSTEMD_CALLS\"\n"
             "if [ \"$2\" = is-active ] && [ \"$4\" = synrex-ingress.service ]; "
@@ -60,6 +64,14 @@ class ActivationTests(unittest.TestCase):
         report = json.loads((self.backup / "preflight.json").read_text())
         self.assertFalse(report["readyForRestart"])
 
+    def test_stale_main_or_production_regression_never_restarts_core(self):
+        result = self.activate(FAKE_STALE="1")
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertIn("candidate is stale", result.stderr)
+        self.assertFalse(self.calls.exists(), "Provenance check must precede systemd")
+        self.assertFalse((self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf").exists())
+        self.assertFalse(json.loads((self.backup / "provenance-preflight.json").read_text())["ready"])
+
     def test_activation_switches_only_after_preflight(self):
         result = self.activate()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -67,6 +79,9 @@ class ActivationTests(unittest.TestCase):
         self.assertIn("restart devspace.service", self.calls.read_text())
         dropin = self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf"
         self.assertIn(str(self.release / "dist/cli.js"), dropin.read_text())
+        receipt = json.loads((self.backup / "release-receipt.json").read_text())
+        self.assertEqual(receipt["status"], "activated")
+        self.assertEqual(receipt["sourceRevision"], "a" * 40)
 
     def test_rejects_concurrent_activation_without_touching_release(self):
         directory = self.home / ".local/state/synrex"
@@ -93,6 +108,7 @@ class ActivationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(dropin.read_text(), "previous pinned core\n")
         self.assertIn("OWNER_RELEASE_ROLLED_BACK", result.stderr)
+        self.assertEqual(json.loads((self.backup / "release-receipt.json").read_text())["status"], "rolled-back")
 
 
 if __name__ == "__main__":
