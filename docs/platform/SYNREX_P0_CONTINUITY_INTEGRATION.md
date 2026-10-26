@@ -151,6 +151,16 @@ In legacy mode, known live tasks still block direct restart.
 4. Arrange the **one-time** public `:7676` ownership cutover from Core to
    stable ingress. This cutover itself may cause a short interruption; do not
    market it as zero downtime without observing actual ChatGPT clients.
+   The guarded one-time procedure is
+   `deploy/migrate-stable-ingress.sh <immutable-release> <backup-dir>`,
+   launched in an independent user systemd transient unit, NOT from the
+   Core process being restarted. It snapshots the previous pinned drop-in,
+   verifies the existing Cloudflare/Core services, waits for initiating MCP
+   requests to finish, moves the Core to :7677, starts the ingress on :7676,
+   verifies public OAuth identity and topology, and only then enables the
+   ingress at boot. A failed handoff stops the gate and restores the previous
+   drop-in/Core at :7676. Its JSON receipt and QA evidence are placed in the
+   private backup directory. The first handoff has a short unavoidable gap.
 5. For subsequent releases, check active requests and preserve task IDs,
    waiting only a bounded period. If a Core exits mid-request, return an
    explicit unknown outcome and recover from saved run receipts, never replay
@@ -161,6 +171,14 @@ activation logic, **not** deployed to the public swy1 endpoint. Verify the
 one-time ingress port cutover, exact systemd environment and authenticated
 client behavior before relying on it. Socket permissions are one layer of
 local owner authority; they do not replace production OAuth.
+
+After a successful one-time cutover, `activate-owner-release.sh`
+automatically detects the running ingress unit and its owner-local control
+socket. It will not accidentally revert to the legacy :7676 Core bind.
+Independent systemd durable task units are not grounds to block a safe
+stable-ingress Core upgrade; accepted HTTP requests must still drain within
+the bounded admission window. A failed drain cancels the upgrade rather
+than terminating ongoing tools or robot actions.
 
 ## P0 acceptance and remaining work
 
@@ -181,6 +199,7 @@ python3 -m unittest discover -s tests -p 'test_synrex_p0.py' -v
 python3 -m unittest discover -s tests -p 'test_activate_owner_release.py' -v
 node --test scripts/ingress-gate.test.mjs
 node scripts/probe-stable-ingress.mjs .
+python3 -m unittest discover -s tests -p 'test_migrate_stable_ingress.py' -v
 pnpm typecheck && pnpm build
 ```
 

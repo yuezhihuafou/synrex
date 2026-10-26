@@ -28,6 +28,16 @@ chmod 700 "$backup_root"
 test -f "$candidate/dist/cli.js"
 test -f "$candidate/release-manifest.json"
 ingress_socket="${SYNREX_INGRESS_CONTROL_SOCKET:-}"
+# After the first migration, the owner ingress is an independently managed
+# service. Never silently fall back to the legacy :7676 layout while it runs.
+if systemctl --user is-active --quiet synrex-ingress.service; then
+  if test -z "$ingress_socket"; then
+    ingress_socket="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/synrex-ingress.sock"
+  fi
+elif test -n "$ingress_socket"; then
+  echo 'OWNER_RELEASE_BLOCKED ingress socket configured but stable unit is not active' >&2
+  exit 75
+fi
 ingress_ctl="$candidate/scripts/ingress-ctl.mjs"
 listen_port=7676
 stable_args=()

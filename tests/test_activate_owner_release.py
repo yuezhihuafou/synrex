@@ -32,6 +32,8 @@ class ActivationTests(unittest.TestCase):
             "sys.exit(2 if os.getenv('FAKE_BUSY') else 0)\n")
         (self.bin / "systemctl").write_text(
             "#!/bin/sh\necho \"$*\" >>\"$FAKE_SYSTEMD_CALLS\"\n"
+            "if [ \"$2\" = is-active ] && [ \"$4\" = synrex-ingress.service ]; "
+            "then exit 3; fi\n"
             "if [ \"$2\" = restart ] && [ \"$FAKE_RESTART_FAIL\" = 1 ] "
             "&& [ ! -e \"$HOME/.mock-restart-failed\" ]; then "
             "touch \"$HOME/.mock-restart-failed\"; exit 1; fi\n"
@@ -53,7 +55,7 @@ class ActivationTests(unittest.TestCase):
     def test_busy_preflight_never_calls_systemctl(self):
         result = self.activate(FAKE_BUSY="1")
         self.assertEqual(result.returncode, 75, result.stderr)
-        self.assertFalse(self.calls.exists())
+        self.assertNotIn("restart devspace.service", self.calls.read_text())
         self.assertFalse((self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf").exists())
         report = json.loads((self.backup / "preflight.json").read_text())
         self.assertFalse(report["readyForRestart"])
@@ -79,8 +81,8 @@ class ActivationTests(unittest.TestCase):
     def test_configured_but_missing_ingress_control_blocks_before_restart(self):
         result = self.activate(SYNREX_INGRESS_CONTROL_SOCKET=str(self.root / "not-running.sock"))
         self.assertEqual(result.returncode, 75)
-        self.assertIn("controller is unavailable", result.stderr)
-        self.assertFalse(self.calls.exists())
+        self.assertIn("stable unit is not active", result.stderr)
+        self.assertNotIn("restart devspace.service", self.calls.read_text())
 
     def test_failed_activation_restores_previous_dropin(self):
         dropin = self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf"
