@@ -116,7 +116,7 @@ test('connected request is never automatically replayed after backend failure', 
   assert.equal(hits, 1);
 });
 
-test('SSE-style active response drains while newer calls remain paused', async (t) => {
+test('long-lived GET SSE is gracefully closed while new requests remain queued', async (t) => {
   const tmp = await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
   const original = await backend((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -135,8 +135,34 @@ test('SSE-style active response drains while newer calls remain paused', async (
   await sleep(35);
   assert.equal((await control(socket, 'STATUS')).pending, 1);
   const streamed = await current;
-  assert.match(streamed.body, /data: first[\s\S]*data: finished/);
+  assert.match(streamed.body, /data: first[\s\S]*reconnect to continue/);
+  assert.doesNotMatch(streamed.body, /data: finished/);
   assert.equal((await control(socket, 'STATUS')).active, 0);
   await control(socket, 'RESUME');
   assert.equal((await next).status, 200);
+});
+
+test('streaming POST is never terminated by PAUSE because its side effects may be unknown', async (t) => {
+  const tmp=await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
+  let invoked=0;
+  const original=await backend((_req, res)=>{
+    invoked++;
+    res.writeHead(200,{'content-type':'text/event-stream'});
+    res.write('data: in-progress\n\n');
+    setTimeout(()=>res.end('data: completed\n\n'), 180);
+  });
+  const socket=join(tmp,'control.sock');
+  const ingress=createIngressGate({upstreamPort:original.port,controlSocket:socket});
+  t.after(async()=>{await ingress.close();await original.close();await rm(tmp,{recursive:true,force:true});});
+  const port=await ingress.start();
+  const ongoing=http(port,'/mcp','task-start');
+  await sleep(40);
+  assert.equal((await control(socket,'STATUS')).active,1);
+  await control(socket,'PAUSE');
+  assert.equal((await control(socket,'STATUS')).active,1);
+  const response=await ongoing;
+  assert.match(response.body, /data: in-progress[\s\S]*data: completed/);
+  assert.equal(invoked,1);
+  assert.equal((await control(socket,'STATUS')).active,0);
+  await control(socket,'RESUME');
 });

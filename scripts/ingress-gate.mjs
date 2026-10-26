@@ -13,7 +13,7 @@ const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
 export function createIngressGate({
   listenPort = 0, upstreamPort, controlSocket,
-  maxPending = 48, maxPendingMs = 20_000, pauseLeaseMs = 30_000,
+  maxPending = 48, maxPendingMs = 60_000, pauseLeaseMs = 75_000,
 }) {
   if (!Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535) {
     throw new Error('upstreamPort must be a valid local TCP port');
@@ -29,6 +29,9 @@ export function createIngressGate({
   let pending = 0;
   let pauseTimer;
   let listening = false;
+  // Long-lived read-only GET notification streams must not indefinitely
+  // prevent a Core rollout. Never close an SSE POST (may contain tool output).
+  const reconnectableGetStreams = new Set();
 
   const snapshot = () => ({ paused, active, pending, upstreamPort });
   function resume() {
@@ -42,6 +45,15 @@ export function createIngressGate({
     if (pauseTimer) clearTimeout(pauseTimer);
     pauseTimer = setTimeout(resume, pauseLeaseMs);
     pauseTimer.unref();
+    for (const stream of reconnectableGetStreams) {
+      if (stream.destroyed || stream.writableEnded) continue;
+      try {
+        // SSE clients may reconnect to the stable public endpoint after this
+        // controlled end-of-stream. No task/event replay is performed here.
+        stream.write(': synrex core updating; reconnect to continue\n\n');
+        stream.end();
+      } catch { stream.destroy(); }
+    }
   }
 
   async function waitReady(req, res) {
@@ -90,6 +102,7 @@ export function createIngressGate({
       if (finished) return;
       finished = true;
       active -= 1;
+      reconnectableGetStreams.delete(res);
     }
     res.once('close', finish);
     const upstream = httpRequest({
@@ -98,6 +111,10 @@ export function createIngressGate({
       agent: false,
     }, (answer) => {
       res.writeHead(answer.statusCode ?? 502, answer.statusMessage, answer.headers);
+      const responseType = String(answer.headers['content-type'] ?? '');
+      if (req.method === 'GET' && /^text\/event-stream(?:;|$)/i.test(responseType)) {
+        reconnectableGetStreams.add(res);
+      }
       answer.pipe(res);
     });
     upstream.once('error', () => {

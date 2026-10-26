@@ -139,7 +139,10 @@ In stable mode, independently running durable task units survive Core
 restart; new MCP requests pause and accepted HTTP requests must drain.
 In legacy mode, known live tasks still block direct restart.
 
-**It is NOT installed on production.** A future controlled migration would:
+**The first swy1 cutover was completed on 2026-10-26.** The original
+Core now listens on :7677 and the independent stable ingress owns :7676.
+The steps below remain the required procedure for another host or recovery,
+not instructions to repeat the first cutover on swy1.
 
 1. Verify the Cloudflare remote ingress mapping and current service owner.
 2. Run the ingress on disposable QA ports against a fresh isolated Core/OAuth
@@ -179,6 +182,15 @@ Independent systemd durable task units are not grounds to block a safe
 stable-ingress Core upgrade; accepted HTTP requests must still drain within
 the bounded admission window. A failed drain cancels the upgrade rather
 than terminating ongoing tools or robot actions.
+
+Subsequent Core upgrades need bounded admission drain. To avoid a permanent
+block from idle, long-lived SSE **GET** notification subscriptions, the
+ingress closes only these read-only streams with an SSE reconnect comment
+before restarting Core. It **never** closes or retries a streaming POST/tool
+request; an unfinished POST remains a bounded release blocker, not a reason
+to cancel robot execution. Clients might briefly reconnect their GET stream;
+HTTP continuity does not prove lossless replay of unacknowledged notifications.
+The stable ingress remains running throughout ordinary Core deployment.
 
 ## P0 acceptance and remaining work
 
