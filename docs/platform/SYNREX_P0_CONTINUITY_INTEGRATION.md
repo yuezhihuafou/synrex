@@ -248,6 +248,43 @@ to cancel robot execution. Clients might briefly reconnect their GET stream;
 HTTP continuity does not prove lossless replay of unacknowledged notifications.
 The stable ingress remains running throughout ordinary Core deployment.
 
+### Truncated upstream streams must never permanently block rollout
+
+On 2026-10-26 a source-controlled main promotion refused to restart Core:
+the ingress counted five outstanding HTTP streams, although recent Core
+diagnostics did not show five unfinished tool calls. One possible mechanism
+was confirmed in the source: a server-side upstream `IncomingMessage` abort
+could leave the downstream proxy response open indefinitely. The ingress now
+closes truncated responses, deletes their active counts, and never retries a
+possibly side-effecting POST. Its STATUS response exposes bounded method,
+route category, response category and age only; no request path, query string,
+header, payload or credential is recorded. Dedicated tests simulate a
+half-written SSE stream and assert that the connection and activity count
+both terminate.
+
+Upgrading the *stable ingress code itself* is exceptional, not part of routine
+Core deployments. `deploy/request-ingress-upgrade.sh <verified-main-release>`
+starts an independent user-systemd job with a pinned unit backup, preflight
+source checks, health and public OAuth checks and automatic old-unit recovery.
+It keeps the Core and Cloudflare untouched. **This one-time proxy upgrade can
+interrupt already-open HTTP streams.** Afterward the proxy remains pinned
+and continuously running for ordinary Core updates.
+
+### Explicit rollback to the previous verified production release
+
+The existing activation routine automatically restores the old Core if a
+deployment fails, but a healthy-looking release can still have a functional
+regression. `bash deploy/request-owner-rollback.sh --previous` launches a
+detached user-systemd rollback that selects only the current release's
+*recorded* `previousRelease` immutable sibling. Its manifest, build identity
+and file hashes must match, and the previous Core must support :7677.
+The same release lock, bounded ingress drain, health/OAuth checks, preserved
+task units and rollback receipt apply. This is an intentional operator
+exception to the normal no-downgrade policy; no arbitrary branch or mutable
+checkout can be promoted through it. A failed rollback restores the original
+Core and records the failure rather than making the public Tunnel a second
+runtime owner.
+
 ## P0 acceptance and remaining work
 
 | Scenario | Required evidence | Current status |

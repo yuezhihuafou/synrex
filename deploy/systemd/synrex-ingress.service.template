@@ -12,7 +12,7 @@ RestartSec=2
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
-TimeoutStopSec=12
+TimeoutStopSec=7
 
 [Install]
 WantedBy=default.target
