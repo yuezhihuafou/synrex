@@ -29,7 +29,13 @@ test -f "$candidate/dist/cli.js"
 test -f "$candidate/release-manifest.json"
 ingress_socket="${SYNREX_INGRESS_CONTROL_SOCKET:-}"
 ingress_ctl="$candidate/scripts/ingress-ctl.mjs"
-if ! python3 "$candidate/scripts/synrex-p0.py" release-check --node swy1 \
+listen_port=7676
+stable_args=()
+if test -n "$ingress_socket"; then
+  listen_port=7677
+  stable_args=(--stable-ingress)
+fi
+if ! python3 "$candidate/scripts/synrex-p0.py" release-check --node swy1 "${stable_args[@]}" \
   --manifest "$candidate/config/ops/network-topology.json" \
   >"$backup_root/preflight.json"; then
   echo "OWNER_RELEASE_BLOCKED busy tasks or production network mismatch; inspect $backup_root/preflight.json" >&2
@@ -100,6 +106,7 @@ node="/home/swy/.nvm/versions/node/v22.22.2/bin/node"
 cat > "$dropin.tmp" <<EOF
 [Service]
 ExecStart=
+Environment=SYNREX_CORE_LISTEN_PORT=$listen_port
 ExecStart=$node $candidate/dist/cli.js serve
 EOF
 mv -f "$dropin.tmp" "$dropin"
@@ -107,7 +114,7 @@ systemctl --user daemon-reload
 systemctl --user restart "$service"
 healthy=false
 for _ in $(seq 1 40); do
-  if curl -fsS --max-time 2 http://127.0.0.1:7676/healthz >/dev/null; then
+  if curl -fsS --max-time 2 "http://127.0.0.1:$listen_port/healthz" >/dev/null; then
     healthy=true
     break
   fi
@@ -116,6 +123,11 @@ done
 if test "$healthy" != true; then
   echo 'New runtime failed health; reverting' >&2
   false
+fi
+if test -n "$ingress_socket"; then
+  # The stable ingress is paused until the candidate is responding directly.
+  # Resume before checking the public end-to-end OAuth identity.
+  resume_ingress
 fi
 if ! curl -fsS --max-time 12 https://devspace.yuezhihuafou.dpdns.org/.well-known/oauth-authorization-server >/dev/null; then
   echo 'Public OAuth discovery unavailable; reverting' >&2

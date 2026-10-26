@@ -125,16 +125,27 @@ responses before restart, and always resumes after success or rollback. An
 unavailable controller blocks a requested controlled cutover before restart.
 Without this environment variable, the older ingress path remains in use and
 the script reports that active MCP requests cannot be fully observed.
-While Core is unavailable,
-it bounds pending requests and reconnects **only before dispatch**. It never
+While Core is unavailable, it bounds pending requests and reconnects
+**only before dispatch**. It never
 automatically retries a request once forwarded to Core, because a lost
 response does not prove the tool had no side effects.
+
+The Core now supports a process-local SYNREX_CORE_LISTEN_PORT=7677 override
+only on loopback with an explicit HTTPS public OAuth issuer. It relocates the
+private listener without changing the persisted OAuth address or credentials.
+The stable layout assigns :7676 to synrex-ingress.service and :7677 to
+devspace.service; see deploy/systemd/synrex-ingress.service.template.
+In stable mode, independently running durable task units survive Core
+restart; new MCP requests pause and accepted HTTP requests must drain.
+In legacy mode, known live tasks still block direct restart.
 
 **It is NOT installed on production.** A future controlled migration would:
 
 1. Verify the Cloudflare remote ingress mapping and current service owner.
 2. Run the ingress on disposable QA ports against a fresh isolated Core/OAuth
    state; compare GET, authenticated POST, streaming, cancellation and refresh.
+   The isolated scripts/probe-stable-ingress.mjs test verifies live Core
+   relocation, OAuth identity, Console cookies and queued requests on restart.
 3. Prove a bounded pause/drain/switch/resume/rollback flow and prevent two
    independent Core processes from writing the owner SQLite/OAuth state.
 4. Arrange the **one-time** public `:7676` ownership cutover from Core to
@@ -158,7 +169,7 @@ local owner authority; they do not replace production OAuth.
 | Concurrent Console/Mem/Subagent development | 3 independent Worktrees, no overwritten dirty files, selected commits integrated once | inventory and static integration plan implemented; full convergence pending |
 | Concurrent release requests | second operation refused without modifying unit/drop-in | isolated mocked systemd test |
 | Upgrade during durable robot simulation | restart refused while task is running, run ID survives reconnect | known-busy guard tested; real-client restart test pending |
-| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | isolated proxy tests; **not live deployed** |
+| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | isolated real-Core/Console/proxy restart probe passed; **not live deployed** |
 | Cloudflare/SSH/GPU peer | swy1 works with gateway offline; no duplicate public OAuth, no port conflict | live inventory partial; fault injection pending |
 | Console observability | actual process/port/tunnel + request/task/run causal timeline, unknowns labeled | core historical diagnostics exist; P0 inventory not yet wired to UI |
 | LayerFS | meaningful measured advantage versus Git Worktree | deliberately deferred |
@@ -169,6 +180,7 @@ local owner authority; they do not replace production OAuth.
 python3 -m unittest discover -s tests -p 'test_synrex_p0.py' -v
 python3 -m unittest discover -s tests -p 'test_activate_owner_release.py' -v
 node --test scripts/ingress-gate.test.mjs
+node scripts/probe-stable-ingress.mjs .
 pnpm typecheck && pnpm build
 ```
 

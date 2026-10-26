@@ -186,7 +186,24 @@ def bound_on(endpoint, socket):
             or actual in ("*", "0.0.0.0", "::"))
 
 
-def network_inventory(manifest, node, probe=False):
+def network_inventory(manifest, node, probe=False, stable_ingress=False):
+    # The legacy Core and stable ingress are two mutually exclusive owners of
+    # the SAME loopback port, not simultaneously scheduled listeners.
+    if stable_ingress:
+        if node != "swy1":
+            raise ValueError("Only the swy1 public owner may use the stable ingress layout")
+        stable = manifest.get("stableIngress")
+        if not isinstance(stable, dict):
+            raise ValueError("Missing explicitly configured stable ingress layout")
+        manifest = {**manifest, "endpoints": [
+            (dict(endpoint, port=stable["corePort"], unit=stable["coreUnit"])
+             if endpoint["id"] == "swy1-core" else endpoint)
+            for endpoint in manifest["endpoints"]
+        ] + [{
+            "id": "swy1-stable-ingress", "node": "swy1", "bind": "127.0.0.1",
+            "port": stable["listenPort"], "unit": stable["ingressUnit"],
+            "expected": "active", "probe": "/healthz",
+        }]}
     conflicts = validate_manifest(manifest)
     sockets = listen_sockets()
     states = {}
@@ -244,26 +261,32 @@ def active_durable_units():
             if line.split() and re.fullmatch(r"devspace-task-[^ ]+\.service", line.split()[0])]
 
 
-def release_readiness(manifest, node):
+def release_readiness(manifest, node, stable_ingress=False):
     if node != "swy1":
         raise ValueError("The production owner is swy1; do not substitute an execution peer")
-    network = network_inventory(manifest, node, probe=True)
+    network = network_inventory(manifest, node, probe=True, stable_ingress=stable_ingress)
     critical = set(manifest.get("releaseCriticalEndpoints", ["swy1-core"]))
+    if stable_ingress:
+        critical.add("swy1-stable-ingress")
     critical_issues = [x["id"] for x in network["endpoints"]
                        if x["id"] in critical and x["status"] != "ok"]
     critical_units = manifest.get("releaseCriticalUnits", ["devspace.service", "cloudflared-devspace.service"])
     failed_units = [unit for unit in critical_units if service_status(unit) != "active"]
     tasks = active_durable_units()
     return {"kind": "release_readiness", "node": node,
+            "stableIngress": stable_ingress,
             "networkViolations": len(critical_issues) + len(network["manifestConflicts"]),
             "criticalEndpointIssues": critical_issues,
             "criticalUnitIssues": failed_units,
             "otherEndpointWarnings": [x["id"] for x in network["endpoints"]
                                       if x["status"] != "ok" and x["id"] not in critical],
             "activeDurableTaskUnits": tasks,
-            "readyForRestart": not (critical_issues or network["manifestConflicts"] or failed_units or tasks),
-            "inFlightHttpRequests": "unknown",
-            "note": "This blocks a known-busy restart; it does NOT prove a zero-interruption handoff or drain MCP requests."}
+            "readyForRestart": not (critical_issues or network["manifestConflicts"] or failed_units
+                                   or (tasks and not stable_ingress)),
+            "inFlightHttpRequests": "not_measured_by_preflight",
+            "note": ("Stable ingress must be separately paused/drained before restarting Core; detached durable task units are preserved."
+                     if stable_ingress else
+                     "Legacy release blocks known live tasks; cannot establish that in-flight MCP requests drained.")}
 
 
 def main():
@@ -279,8 +302,10 @@ def main():
     net = sub.add_parser("network")
     net.add_argument("--node", choices=["swy1", "gateway"], required=True)
     net.add_argument("--probe", action="store_true")
+    net.add_argument("--stable-ingress", action="store_true")
     ready = sub.add_parser("release-check")
     ready.add_argument("--node", default="swy1", choices=["swy1"])
+    ready.add_argument("--stable-ingress", action="store_true")
     for part in (net, ready):
         part.add_argument("--manifest", default=str(Path(__file__).resolve().parent.parent /
                                                      "config/ops/network-topology.json"))
@@ -292,8 +317,8 @@ def main():
             output = integration_plan(args.repo, args.base, args.candidate)
         else:
             manifest = json.loads(Path(args.manifest).read_text())
-            output = (network_inventory(manifest, args.node, args.probe)
-                      if args.action == "network" else release_readiness(manifest, args.node))
+            output = (network_inventory(manifest, args.node, args.probe, args.stable_ingress)
+                      if args.action == "network" else release_readiness(manifest, args.node, args.stable_ingress))
         print(json.dumps(output, ensure_ascii=False, indent=2))
         if args.action == "release-check" and not output["readyForRestart"]:
             return 2

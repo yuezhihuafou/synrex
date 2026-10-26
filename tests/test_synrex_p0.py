@@ -42,6 +42,28 @@ class P0Tests(unittest.TestCase):
     def test_same_port_on_different_nodes_is_allowed(self):
         self.assertEqual(p0.validate_manifest(simple_manifest()), [])
 
+    def test_stable_ingress_reassigns_legacy_port_without_duplicate_listener(self):
+        manifest = simple_manifest()
+        manifest["endpoints"][0]["id"] = "swy1-core"
+        manifest["links"][0]["to"] = "swy1-core"
+        manifest["stableIngress"] = {
+            "listenPort": 7676, "ingressUnit": "synrex-ingress.service",
+            "corePort": 7677, "coreUnit": "devspace.service",
+        }
+        with patch.object(p0, "listen_sockets", return_value=[
+            {"bind": "127.0.0.1", "port": 7676, "unit": "synrex-ingress.service"},
+            {"bind": "127.0.0.1", "port": 7677, "unit": "devspace.service"},
+        ]), patch.object(p0, "service_status", return_value="active"):
+            output = p0.network_inventory(manifest, "swy1", stable_ingress=True)
+        self.assertEqual(output["violations"], 0)
+        self.assertEqual({e["id"] for e in output["endpoints"]}, {"swy1-core", "swy1-stable-ingress"})
+
+    def test_stable_ingress_requires_explicit_owner_layout(self):
+        with self.assertRaisesRegex(ValueError, "public owner"):
+            p0.network_inventory(simple_manifest(), "gateway", stable_ingress=True)
+        with self.assertRaisesRegex(ValueError, "Missing explicitly"):
+            p0.network_inventory(simple_manifest(), "swy1", stable_ingress=True)
+
     def test_collision_detects_wildcard_and_reused_port(self):
         manifest = simple_manifest()
         manifest["endpoints"].append({"id": "oops", "node": "swy1", "bind": "0.0.0.0",
@@ -88,7 +110,18 @@ class P0Tests(unittest.TestCase):
     def test_release_refuses_known_busy_task(self, _network, _status, _tasks):
         status = p0.release_readiness(simple_manifest(), "swy1")
         self.assertFalse(status["readyForRestart"])
-        self.assertEqual(status["inFlightHttpRequests"], "unknown")
+        self.assertEqual(status["inFlightHttpRequests"], "not_measured_by_preflight")
+
+    @patch.object(p0, "active_durable_units", return_value=["devspace-task-robot.service"])
+    @patch.object(p0, "service_status", return_value="active")
+    @patch.object(p0, "network_inventory", return_value={"endpoints": [
+        {"id": "swy1-core", "status": "ok"}, {"id": "swy1-stable-ingress", "status": "ok"},
+    ], "manifestConflicts": []})
+    def test_stable_ingress_allows_detached_tasks_after_network_verified(self, _network, _status, _tasks):
+        status = p0.release_readiness(simple_manifest(), "swy1", stable_ingress=True)
+        self.assertTrue(status["readyForRestart"])
+        self.assertEqual(status["activeDurableTaskUnits"], ["devspace-task-robot.service"])
+        self.assertTrue(status["stableIngress"])
 
     @patch.object(p0, "active_durable_units", return_value=[])
     @patch.object(p0, "service_status", return_value="active")
