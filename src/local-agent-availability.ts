@@ -4,6 +4,7 @@ import {
   LOCAL_AGENT_PROVIDERS,
   type LocalAgentProvider,
 } from "./local-agent-profiles.js";
+import type { SubagentsConfig } from "./local-agent-config.js";
 
 export interface LocalAgentProviderAvailability {
   name: LocalAgentProvider;
@@ -14,14 +15,19 @@ export interface LocalAgentProviderAvailability {
 
 export function getLocalAgentProviderAvailabilitySnapshot(
   env: NodeJS.ProcessEnv = process.env,
+  config?: SubagentsConfig,
 ): LocalAgentProviderAvailability[] {
-  return LOCAL_AGENT_PROVIDERS.map((provider) => checkLocalAgentProviderAvailability(provider, env));
+  const providers = new Set([...LOCAL_AGENT_PROVIDERS, ...(config?.providers.map((entry) => entry.id) ?? [])]);
+  return [...providers].map((provider) => checkLocalAgentProviderAvailability(provider, env, config));
 }
 
 function checkLocalAgentProviderAvailability(
   provider: LocalAgentProvider,
   env: NodeJS.ProcessEnv = process.env,
+  config?: SubagentsConfig,
 ): LocalAgentProviderAvailability {
+  const cli = config?.providers.find((entry) => entry.id === provider)?.cli;
+  if (cli) return commandAvailability(provider, cli.command, env);
   switch (provider) {
     case "codex":
       return codexAvailability(env);
@@ -39,6 +45,8 @@ function checkLocalAgentProviderAvailability(
       return commandAvailability(provider, env.GROK_COMMAND ?? "grok", env);
     case "antigravity":
       return commandAvailability(provider, env.ANTIGRAVITY_COMMAND ?? "agy", env);
+    default:
+      return { name: provider, available: false, reason: "Unknown CLI provider" };
   }
 }
 

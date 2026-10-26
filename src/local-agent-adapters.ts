@@ -11,6 +11,8 @@ import {
 } from "./local-agent-claude.js";
 import { CodexLocalAgentDriver } from "./local-agent-codex.js";
 import { AntigravityLocalAgentDriver } from "./local-agent-antigravity.js";
+import { GenericCliAgentDriver } from "./local-agent-cli.js";
+import type { SubagentsConfig } from "./local-agent-config.js";
 import {
   OpencodeLocalAgentDriver,
   extractOpenCodeFinalResponse,
@@ -31,6 +33,8 @@ export interface LocalAgentDriverOptions {
   claudeQueryFactory?: ClaudeQueryFactory;
   opencodeFactory?: OpencodeFactory;
   piSessionFactory?: PiSessionFactory;
+  subagents?: SubagentsConfig;
+  stateDir?: string;
 }
 
 export function createLocalAgentDrivers(
@@ -38,13 +42,15 @@ export function createLocalAgentDrivers(
 ): LocalAgentDriver[] {
   return [
     new CodexLocalAgentDriver(options.env),
-    new AntigravityLocalAgentDriver(options.env),
+    new AntigravityLocalAgentDriver(options.env, options.stateDir),
     new ClaudeLocalAgentDriver(options.claudeQueryFactory, options.env),
     new OpencodeLocalAgentDriver(options.opencodeFactory),
     new PiLocalAgentDriver(options.piSessionFactory),
     new AcpLocalAgentDriver("cursor", options.env),
     new AcpLocalAgentDriver("copilot", options.env),
     new AcpLocalAgentDriver("grok", options.env),
+    ...(options.subagents?.providers.filter((entry) => entry.cli).map((entry) =>
+      new GenericCliAgentDriver(entry.id, entry.cli!, options.env, options.stateDir)) ?? []),
   ];
 }
 

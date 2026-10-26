@@ -143,7 +143,7 @@ export function resolveLocalAgentTarget(
     };
   }
 
-  if (isLocalAgentProvider(target)) {
+  if (isLocalAgentProvider(target) || providerConfigs.some((entry) => entry.id === target && entry.cli)) {
     const providerConfig = providerConfigs.find((entry) => entry.id === target);
     return {
       kind: "provider",

@@ -452,6 +452,7 @@ function displayProvider(provider: LocalAgentProvider): string {
     case "copilot": return "Copilot";
     case "grok": return "Grok";
     case "antigravity": return "Antigravity";
+    default: return provider;
   }
 }
 

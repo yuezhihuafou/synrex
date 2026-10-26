@@ -74,6 +74,29 @@ test("autonomous shell runs without approvals but cannot write host files, git m
       assert.match(ran.stdout, /READ_OK/);
       assert.equal(existsSync(join(workspace, "forbidden.txt")), false);
     } finally { readonly.close(); }
+
+    const sessionStateDir = join(testRoot, "private", "agt_test");
+    const first = prepareAntigravityExecution({
+      workspaceRoot: workspace, providerCommand: "/bin/sh",
+      providerArgs: ["-c", 'echo MEMORIZED > "$HOME/.gemini/antigravity-cli/continuation-marker"'],
+      writeMode: "allowed", env: { ...process.env, HOME: home }, sessionStateDir,
+    });
+    try {
+      const ran = spawnSync(first.command, first.args, { env: first.env, cwd: workspace, encoding: "utf8", timeout: 15_000 });
+      assert.equal(ran.status, 0, ran.stderr);
+    } finally { first.close(); }
+    assert.equal(readFileSync(join(sessionStateDir, "continuation-marker"), "utf8").trim(), "MEMORIZED");
+    assert.equal(existsSync(join(home, ".gemini", "antigravity-cli", "continuation-marker")), false);
+    const second = prepareAntigravityExecution({
+      workspaceRoot: workspace, providerCommand: "/bin/sh",
+      providerArgs: ["-c", 'cat "$HOME/.gemini/antigravity-cli/continuation-marker"'],
+      writeMode: "read_only", env: { ...process.env, HOME: home }, sessionStateDir,
+    });
+    try {
+      const ran = spawnSync(second.command, second.args, { env: second.env, cwd: workspace, encoding: "utf8", timeout: 15_000 });
+      assert.equal(ran.status, 0, ran.stderr);
+      assert.match(ran.stdout, /MEMORIZED/);
+    } finally { second.close(); }
   } finally {
     rmSync(testRoot, { recursive: true, force: true });
   }

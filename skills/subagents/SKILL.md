@@ -38,6 +38,9 @@ The result contains a Synrex agent `id` and its current status. Execution contin
 synrex agents show <id> --json
 synrex agents continue <id> "<follow-up brief>" --json
 synrex agents ls --json
+synrex agents events <id> --json
+synrex agents watch <id> --json
+synrex agents stats --json
 ```
 
 - `show` waits briefly for active work, then returns the current status and any
@@ -45,6 +48,11 @@ synrex agents ls --json
 - `continue` gives the same subagent another turn with its existing provider
   session and context.
 - `ls` returns sessions belonging to the current project.
+- `events` returns a paginated, persistent execution timeline; use the last
+  event's `seq` as the `after-seq` argument for incremental reads.
+- `watch` tails streamed event metadata until completion or a bounded window.
+- `stats` summarizes completed turns, measured duration, and provider-reported
+  tokens for the current workspace; missing usage remains `null`.
 
 Run `synrex agents show <id> --json` again later while the status is `running`.
 `completed` includes the response. `failed` includes a structured error, and

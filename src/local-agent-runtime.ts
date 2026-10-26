@@ -20,6 +20,8 @@ export interface LocalAgentRunResult {
   providerSessionId: string | null;
   finalResponse: string;
   items: unknown[];
+  usage?: { inputTokens?: number; outputTokens?: number; thinkingTokens?: number; cacheReadTokens?: number; totalTokens?: number };
+  outputBytes?: number;
 }
 
 export interface LocalAgentRunCallbacks {
@@ -29,6 +31,11 @@ export interface LocalAgentRunCallbacks {
    * could otherwise fail and lose that identity.
    */
   onSessionId?: (providerSessionId: string) => void | Promise<void>;
+  /** Provider progress metadata only: no raw prompts, code, or hidden reasoning. */
+  onEvent?: (event: {
+    label: string;
+    usage?: LocalAgentRunResult["usage"];
+  }) => void | Promise<void>;
 }
 
 export interface LocalAgentRuntimeContext {

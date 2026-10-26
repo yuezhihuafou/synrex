@@ -41,8 +41,17 @@ assert.throws(
     enabled: true,
     providers: [{ id: "unknown", enabled: true }],
   }),
-  /Invalid option/,
+  /requires a CLI specification/,
 );
+
+const configuredCli = subagentsConfigSchema.parse({
+  enabled: true,
+  providers: [{
+    id: "my-cli", enabled: true,
+    cli: { command: "/usr/local/bin/my-agent", args: ["--output-format", "json"], sessionFlag: "--session" },
+  }],
+});
+assert.equal(configuredCli.providers[0]?.cli?.command, "/usr/local/bin/my-agent");
 assert.throws(
   () => subagentsConfigSchema.parse({
     enabled: true,

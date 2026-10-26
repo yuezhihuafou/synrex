@@ -43,6 +43,52 @@ export interface LocalAgentListScope {
   workspaceRoot?: string;
 }
 
+export type LocalAgentEventKind = "turn_started" | "progress" | "session_saved" | "turn_completed" | "turn_failed";
+
+export interface LocalAgentEventData {
+  label?: string;
+  durationMs?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  thinkingTokens?: number;
+  cacheReadTokens?: number;
+  totalTokens?: number;
+  outputBytes?: number;
+}
+
+export interface LocalAgentEvent extends LocalAgentEventData {
+  seq: number;
+  agentId: string;
+  at: string;
+  kind: LocalAgentEventKind;
+}
+
+export interface LocalAgentStats {
+  sessions: number;
+  running: number;
+  completed: number;
+  failed: number;
+  turns: number;
+  successfulTurns: number;
+  failedTurns: number;
+  durationMs: number;
+  /** Null means the provider did not report this measurement. */
+  inputTokens: number | null;
+  outputTokens: number | null;
+  thinkingTokens: number | null;
+  cacheReadTokens: number | null;
+  totalTokens: number | null;
+  outputBytes: number | null;
+  byProvider: Record<string, { sessions: number; turns: number; successfulTurns: number; failedTurns: number; durationMs: number }>;
+}
+
+interface LocalAgentEventRow {
+  seq: number; agent_id: string; at: string; kind: LocalAgentEventKind; label: string | null;
+  duration_ms: number | null; input_tokens: number | null; output_tokens: number | null;
+  thinking_tokens: number | null; cache_read_tokens: number | null;
+  total_tokens: number | null; output_bytes: number | null;
+}
+
 interface LocalAgentRow {
   id: string;
   workspace_id: string | null;
@@ -66,6 +112,27 @@ export class LocalAgentStore {
 
   constructor(stateDir: string) {
     this.database = openDatabase(stateDir);
+    // Additive telemetry extension: intentionally no new global migration
+    // version, so an older pinned Synrex release can still open this SQLite
+    // database after rollback. No pre-existing tables are changed.
+    this.database.sqlite.exec(`
+      create table if not exists local_agent_events (
+        seq integer primary key autoincrement,
+        agent_id text not null references local_agent_sessions(id) on delete cascade,
+        at text not null,
+        kind text not null,
+        label text,
+        duration_ms integer,
+        input_tokens integer,
+        output_tokens integer,
+        thinking_tokens integer,
+        cache_read_tokens integer,
+        total_tokens integer,
+        output_bytes integer
+      );
+      create index if not exists local_agent_events_agent_seq_idx
+        on local_agent_events(agent_id, seq);
+    `);
   }
 
   list(scope: LocalAgentListScope = {}): LocalAgentRecord[] {
@@ -235,16 +302,108 @@ export class LocalAgentStore {
     return storeResult("update", () => this.update(id, patch));
   }
 
+  appendEvent(agentId: string, kind: LocalAgentEventKind, details: LocalAgentEventData = {}): LocalAgentEvent {
+    const at = new Date().toISOString();
+    const row = this.database.sqlite.prepare(`
+      insert into local_agent_events (
+        agent_id, at, kind, label, duration_ms, input_tokens, output_tokens,
+        thinking_tokens, cache_read_tokens, total_tokens, output_bytes
+      ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      agentId, at, kind, details.label?.slice(0, 128) ?? null,
+      details.durationMs ?? null, details.inputTokens ?? null,
+      details.outputTokens ?? null, details.thinkingTokens ?? null,
+      details.cacheReadTokens ?? null, details.totalTokens ?? null,
+      details.outputBytes ?? null,
+    );
+    return { seq: Number(row.lastInsertRowid), agentId, at, kind, ...details };
+  }
+
+  appendEventResult(agentId: string, kind: LocalAgentEventKind, details: LocalAgentEventData = {}): BetterResult<LocalAgentEvent, AgentStoreError> {
+    return storeResult("append_agent_event", () => this.appendEvent(agentId, kind, details));
+  }
+
+  listEvents(agentId: string, afterSeq = 0, limit = 100): LocalAgentEvent[] {
+    const rows = this.database.sqlite.prepare(`
+      select * from local_agent_events where agent_id = ? and seq > ?
+      order by seq asc limit ?
+    `).all(agentId, afterSeq, Math.min(500, Math.max(1, limit))) as LocalAgentEventRow[];
+    return rows.map(eventFromRow);
+  }
+
+  listEventsResult(agentId: string, afterSeq = 0, limit = 100): BetterResult<LocalAgentEvent[], AgentStoreError> {
+    return storeResult("list_agent_events", () => this.listEvents(agentId, afterSeq, limit));
+  }
+
+  stats(scope: LocalAgentListScope): LocalAgentStats {
+    const agents = this.list(scope);
+    const summary: LocalAgentStats = {
+      sessions: agents.length, running: 0, completed: 0, failed: 0,
+      turns: 0, successfulTurns: 0, failedTurns: 0, durationMs: 0,
+      inputTokens: null, outputTokens: null, thinkingTokens: null,
+      cacheReadTokens: null, totalTokens: null, outputBytes: null,
+      byProvider: Object.create(null) as LocalAgentStats["byProvider"],
+    };
+    for (const agent of agents) {
+      if (agent.status === "running" || agent.status === "starting") summary.running++;
+      if (agent.status === "idle") summary.completed++;
+      if (agent.status === "error") summary.failed++;
+      summary.byProvider[agent.provider] ??= {
+        sessions: 0, turns: 0, successfulTurns: 0, failedTurns: 0, durationMs: 0,
+      };
+      summary.byProvider[agent.provider].sessions++;
+    }
+    const matching = new Set(agents.map((agent) => agent.id));
+    if (matching.size === 0) return summary;
+    const rows = this.database.sqlite.prepare(`
+      select e.*, a.provider from local_agent_events e
+      join local_agent_sessions a on a.id = e.agent_id
+      where a.workspace_root = ? and (? is null or a.workspace_id = ?)
+        and e.kind in ('turn_completed', 'turn_failed')
+    `).all(resolve(scope.workspaceRoot ?? ""), scope.workspaceId ?? null, scope.workspaceId ?? null) as (LocalAgentEventRow & { provider: string })[];
+    const sum = (a: number | null, b: number | null): number | null => b === null ? a : (a ?? 0) + b;
+    for (const event of rows) {
+      if (!matching.has(event.agent_id)) continue;
+      const provider = summary.byProvider[event.provider];
+      if (!provider) continue;
+      summary.turns++; provider.turns++;
+      if (event.kind === "turn_completed") { summary.successfulTurns++; provider.successfulTurns++; }
+      else { summary.failedTurns++; provider.failedTurns++; }
+      summary.durationMs += event.duration_ms ?? 0;
+      provider.durationMs += event.duration_ms ?? 0;
+      summary.inputTokens = sum(summary.inputTokens, event.input_tokens);
+      summary.outputTokens = sum(summary.outputTokens, event.output_tokens);
+      summary.thinkingTokens = sum(summary.thinkingTokens, event.thinking_tokens);
+      summary.cacheReadTokens = sum(summary.cacheReadTokens, event.cache_read_tokens);
+      summary.totalTokens = sum(summary.totalTokens, event.total_tokens);
+      summary.outputBytes = sum(summary.outputBytes, event.output_bytes);
+    }
+    return summary;
+  }
+
+  statsResult(scope: LocalAgentListScope): BetterResult<LocalAgentStats, AgentStoreError> {
+    return storeResult("agent_stats", () => this.stats(scope));
+  }
+
   reconcileActiveRuns(message = "Synrex restarted while this agent turn was running."): number {
     const now = new Date().toISOString();
-    const result = this.database.sqlite
-      .prepare(
-        `update local_agent_sessions
-         set status = 'error', error = ?, error_code = 'DAEMON_UNAVAILABLE', error_retryable = 'true', updated_at = ?
-         where status in ('starting', 'running')`,
-      )
-      .run(message, now);
-    return Number(result.changes);
+    return this.database.sqlite.transaction(() => {
+      const interrupted = this.database.sqlite
+        .prepare("select id from local_agent_sessions where status in ('starting', 'running')")
+        .all() as Array<{ id: string }>;
+      if (interrupted.length === 0) return 0;
+      const result = this.database.sqlite
+        .prepare(
+          `update local_agent_sessions
+           set status = 'error', error = ?, error_code = 'DAEMON_UNAVAILABLE', error_retryable = 'true', updated_at = ?
+           where status in ('starting', 'running')`,
+        )
+        .run(message, now);
+      for (const row of interrupted) {
+        this.appendEvent(row.id, "turn_failed", { label: "DAEMON_UNAVAILABLE" });
+      }
+      return Number(result.changes);
+    })();
   }
 
   reconcileActiveRunsResult(
@@ -261,6 +420,20 @@ export class LocalAgentStore {
 
 export function createLocalAgentStore(stateDir: string): LocalAgentStore {
   return new LocalAgentStore(stateDir);
+}
+
+function eventFromRow(row: LocalAgentEventRow): LocalAgentEvent {
+  const values: LocalAgentEventData = {
+    ...(row.label !== null ? { label: row.label } : {}),
+    ...(row.duration_ms !== null ? { durationMs: row.duration_ms } : {}),
+    ...(row.input_tokens !== null ? { inputTokens: row.input_tokens } : {}),
+    ...(row.output_tokens !== null ? { outputTokens: row.output_tokens } : {}),
+    ...(row.thinking_tokens !== null ? { thinkingTokens: row.thinking_tokens } : {}),
+    ...(row.cache_read_tokens !== null ? { cacheReadTokens: row.cache_read_tokens } : {}),
+    ...(row.total_tokens !== null ? { totalTokens: row.total_tokens } : {}),
+    ...(row.output_bytes !== null ? { outputBytes: row.output_bytes } : {}),
+  };
+  return { seq: row.seq, agentId: row.agent_id, at: row.at, kind: row.kind, ...values };
 }
 
 function rowToLocalAgentRecord(row: LocalAgentRow): LocalAgentRecord {

@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, renameSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { LocalAgentWriteMode } from "./local-agent-runtime.js";
 
 export interface AntigravityExecutionPlan {
@@ -28,6 +28,8 @@ export function prepareAntigravityExecution(options: {
   providerArgs: string[];
   writeMode?: LocalAgentWriteMode;
   env: NodeJS.ProcessEnv;
+  /** Per-Agent private CLI home, retained across turns. Never the user's canonical login directory. */
+  sessionStateDir?: string;
 }): AntigravityExecutionPlan {
   if (process.platform !== "linux") {
     throw new Error("Autonomous Antigravity requires verified Linux filesystem isolation.");
@@ -42,15 +44,31 @@ export function prepareAntigravityExecution(options: {
 
   const scratch = mkdtempSync(join(tmpdir(), "synrex-agy-private-"));
   try {
-    const copiedState = join(scratch, "antigravity-cli");
-    // Local reflink copy is usually sub-second. Never let a headless agent
-    // modify the logged-in account's persistent sessions or authentication.
-    const copied = spawnSync("cp", ["-a", "--reflink=auto", state, copiedState], {
-      timeout: 8_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
-    });
-    if (copied.error || copied.status !== 0) {
-      throw new Error("Unable to prepare private Antigravity state: " +
-        (copied.error?.message ?? copied.stderr.slice(-400)));
+    const copiedState = options.sessionStateDir ? resolve(options.sessionStateDir) : join(scratch, "antigravity-cli");
+    if (copiedState === state || state.startsWith(copiedState + sep) || copiedState.startsWith(state + sep)) {
+      throw new Error("Private AGY session state must not overlap the canonical login state.");
+    }
+    if (options.sessionStateDir) {
+      const parent = dirname(copiedState);
+      mkdirSync(parent, { recursive: true, mode: 0o700 });
+      chmodSync(parent, 0o700);
+      if (existsSync(copiedState)) {
+        if (lstatSync(copiedState).isSymbolicLink() || !lstatSync(copiedState).isDirectory()) {
+          throw new Error("Private AGY session state is not a real directory.");
+        }
+      } else {
+        // Atomic publish prevents interrupted snapshots from being treated as complete.
+        const stage = mkdtempSync(join(parent, ".new-"));
+        try {
+          copyState(state, join(stage, "antigravity-cli"));
+          renameSync(join(stage, "antigravity-cli"), copiedState);
+        } finally {
+          rmSync(stage, { recursive: true, force: true });
+        }
+      }
+    } else {
+      // Compatibility mode for isolated direct tests without a durable agent identity.
+      copyState(state, copiedState);
     }
 
     const root = join(userHome, ".gemini", "antigravity-cli");
@@ -69,8 +87,8 @@ export function prepareAntigravityExecution(options: {
         !lstatSync(git).isSymbolicLink()) {
       args.push("--ro-bind", git, git);
     }
-    // Private per-turn state. Any auth refresh or cache writes are discarded
-    // after the run; the host's canonical login stays unchanged.
+    // Private per-agent state can persist session history without writing the
+    // owner's canonical AGY credentials or mutable worktree metadata.
     args.push("--dir", root, "--bind", copiedState, root);
     for (const path of [".ssh", ".aws", ".gnupg", ".kube", ".docker"]) {
       const dest = join(userHome, path);
@@ -120,6 +138,16 @@ export function prepareAntigravityExecution(options: {
   } catch (error) {
     rmSync(scratch, { recursive: true, force: true });
     throw error;
+  }
+}
+
+function copyState(from: string, to: string): void {
+  const copied = spawnSync("cp", ["-a", "--reflink=auto", from, to], {
+    timeout: 8_000, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (copied.error || copied.status !== 0) {
+    throw new Error("Unable to prepare private Antigravity state: " +
+      (copied.error?.message ?? copied.stderr.slice(-400)));
   }
 }
 

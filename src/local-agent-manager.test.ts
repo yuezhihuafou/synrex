@@ -223,6 +223,10 @@ assert.equal(getRecord(stale.id).latestResponse, "previous response");
 assert.equal(getRecord(stale.id).error, "Synrex restarted while this agent turn was running.");
 assert.equal(getRecord(stale.id).errorCode, "DAEMON_UNAVAILABLE");
 assert.equal(getRecord(stale.id).errorRetryable, true);
+const staleEvents = unwrap(manager.events(stale.id, scope));
+assert.deepEqual(staleEvents.map((event) => event.kind), ["turn_failed"]);
+assert.equal(staleEvents[0]?.label, "DAEMON_UNAVAILABLE");
+assert.equal(unwrap(manager.stats(scope)).failedTurns, 1);
 
 const first = unwrap(await manager.start({
   target: "reviewer",

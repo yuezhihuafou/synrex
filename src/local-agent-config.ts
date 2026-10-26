@@ -4,11 +4,33 @@ import {
   type LocalAgentProvider,
 } from "./local-agent-profiles.js";
 
+/** Optional declarative runner for new headless CLIs; no TypeScript adapter required. */
+const cliSpecSchema = z.object({
+  command: z.string().trim().min(1),
+  args: z.array(z.string()).optional(),
+  defaultModel: z.string().trim().min(1).optional(),
+  outputFormat: z.enum(["json", "stream-json"]).optional(),
+  promptFlag: z.string().trim().min(1).optional(),
+  modelFlag: z.string().trim().min(1).optional(),
+  effortFlag: z.string().trim().min(1).optional(),
+  sessionFlag: z.string().trim().min(1).optional(),
+  statusField: z.string().trim().min(1).optional(),
+  successStatus: z.string().trim().min(1).optional(),
+  responseField: z.string().trim().min(1).optional(),
+  sessionField: z.string().trim().min(1).optional(),
+  errorField: z.string().trim().min(1).optional(),
+  deniedActionsField: z.string().trim().min(1).optional(),
+  usageField: z.string().trim().min(1).optional(),
+  isolation: z.enum(["none", "antigravity"]).default("none"),
+  timeoutMs: z.number().int().min(1_000).max(600_000).optional(),
+}).strict();
+
 const providerSchema = z.object({
-  id: z.enum(LOCAL_AGENT_PROVIDERS as [LocalAgentProvider, ...LocalAgentProvider[]]),
+  id: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/),
   enabled: z.boolean(),
   model: z.string().trim().min(1).optional(),
   effort: z.string().trim().min(1).optional(),
+  cli: cliSpecSchema.optional(),
 }).strict();
 
 export const subagentsConfigSchema = z.object({
@@ -26,6 +48,18 @@ export const subagentsConfigSchema = z.object({
       });
     }
     seen.add(provider.id);
+    if (!LOCAL_AGENT_PROVIDERS.includes(provider.id) && !provider.cli) {
+      context.addIssue({
+        code: "custom", path: ["providers", index, "cli"],
+        message: `Unknown provider ${provider.id} requires a CLI specification.`,
+      });
+    }
+    if (LOCAL_AGENT_PROVIDERS.includes(provider.id) && provider.cli) {
+      context.addIssue({
+        code: "custom", path: ["providers", index, "cli"],
+        message: `Built-in provider ${provider.id} cannot override its driver through CLI configuration.`,
+      });
+    }
   }
 });
 

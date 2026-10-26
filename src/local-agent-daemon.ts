@@ -40,7 +40,7 @@ import type {
   RunOverrides,
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
-import type { LocalAgentRecord, LocalAgentWorkspaceScope } from "./local-agent-store.js";
+import type { LocalAgentRecord, LocalAgentWorkspaceScope, LocalAgentEvent, LocalAgentStats } from "./local-agent-store.js";
 
 const MAX_REQUEST_BYTES = 512 * 1024;
 const DEFAULT_DAEMON_IDLE_SHUTDOWN_MS = 30_000;
@@ -53,6 +53,8 @@ export interface LocalAgentDaemonManager {
   continue(agentId: string, prompt: string, overrides: RunOverrides | undefined, scope: LocalAgentWorkspaceScope): Promise<Result<LocalAgentRecord, AgentContinueError>>;
   get(agentId: string, scope: LocalAgentWorkspaceScope): Result<LocalAgentRecord, AgentLookupError>;
   list(scope: LocalAgentWorkspaceScope): Result<LocalAgentRecord[], AgentListError>;
+  events(id: string, scope: LocalAgentWorkspaceScope, afterSeq?: number, limit?: number): Result<LocalAgentEvent[], AgentLookupError>;
+  stats(scope: LocalAgentWorkspaceScope): Result<LocalAgentStats, AgentListError>;
   evictIdle(now?: number): Promise<void>;
   close(): Promise<void>;
   readonly activeTurnCount: number;
@@ -307,6 +309,10 @@ export class LocalAgentDaemon {
         return unwrapManagerResult(this.manager.get(request.params.id, request.params.scope));
       case "agent.list":
         return unwrapManagerResult(this.manager.list(request.params));
+      case "agent.events":
+        return unwrapManagerResult(this.manager.events(request.params.id, request.params.scope, request.params.afterSeq, request.params.limit));
+      case "agent.stats":
+        return unwrapManagerResult(this.manager.stats(request.params));
       case "daemon.status":
         return this.status();
       case "daemon.stop":

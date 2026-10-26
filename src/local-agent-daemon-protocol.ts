@@ -1,5 +1,7 @@
 import type {
   LocalAgentRecord,
+  LocalAgentEvent,
+  LocalAgentStats,
   LocalAgentStatus,
   LocalAgentWorkspaceScope,
 } from "./local-agent-store.js";
@@ -16,6 +18,8 @@ export type LocalAgentDaemonMethod =
   | "agent.continue"
   | "agent.get"
   | "agent.list"
+  | "agent.events"
+  | "agent.stats"
   | "daemon.status"
   | "daemon.stop"
   | "daemon.logs";
@@ -26,6 +30,8 @@ export type LocalAgentDaemonRequest =
   | AgentDaemonRequestBase<"agent.continue", { id: string; prompt: string; scope: LocalAgentWorkspaceScope; overrides?: RunOverrides }>
   | AgentDaemonRequestBase<"agent.get", { id: string; scope: LocalAgentWorkspaceScope }>
   | AgentDaemonRequestBase<"agent.list", LocalAgentWorkspaceScope>
+  | AgentDaemonRequestBase<"agent.events", { id: string; scope: LocalAgentWorkspaceScope; afterSeq?: number; limit?: number }>
+  | AgentDaemonRequestBase<"agent.stats", LocalAgentWorkspaceScope>
   | AgentDaemonRequestBase<"daemon.status", Record<string, never>>
   | AgentDaemonRequestBase<"daemon.stop", Record<string, never>>
   | AgentDaemonRequestBase<"daemon.logs", { lines?: number }>;
@@ -133,6 +139,28 @@ export function decodeLocalAgentDaemonRequest(value: unknown): LocalAgentDaemonR
         method,
         params: decodeListScope(params),
       } as LocalAgentDaemonRequest;
+    case "agent.events": {
+      const paramsRecord = asRecord(params);
+      const afterSeq = paramsRecord?.afterSeq;
+      const limit = paramsRecord?.limit;
+      if (afterSeq !== undefined && (!Number.isSafeInteger(afterSeq) || (afterSeq as number) < 0)) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "afterSeq must be a non-negative integer.");
+      }
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 500)) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "limit must be between 1 and 500.");
+      }
+      return {
+        requestId, protocolVersion, authToken, method,
+        params: {
+          id: requiredString(paramsRecord?.id, "id"),
+          scope: decodeWorkspaceScope(paramsRecord?.scope),
+          afterSeq: afterSeq as number | undefined,
+          limit: limit as number | undefined,
+        },
+      };
+    }
+    case "agent.stats":
+      return { requestId, protocolVersion, authToken, method, params: decodeWorkspaceScope(params) };
     case "daemon.logs":
       return {
         requestId,
@@ -200,6 +228,32 @@ export function decodeAgentRecord(value: unknown): LocalAgentRecord {
 export function decodeAgentRecordList(value: unknown): LocalAgentRecord[] {
   if (!Array.isArray(value)) throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid agent list.");
   return value.map(decodeAgentRecord);
+}
+
+export function decodeAgentEvents(value: unknown): LocalAgentEvent[] {
+  if (!Array.isArray(value)) throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Invalid agent event list.");
+  return value.map((value) => {
+    const event = asRecord(value);
+    if (!event) throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Invalid agent event.");
+    return {
+      ...event,
+      seq: requiredInteger(event.seq, "seq"),
+      agentId: requiredString(event.agentId, "agentId"),
+      at: requiredString(event.at, "at"),
+      kind: requiredString(event.kind, "kind"),
+    } as LocalAgentEvent;
+  });
+}
+
+export function decodeAgentStats(value: unknown): LocalAgentStats {
+  const result = asRecord(value);
+  if (!result || !asRecord(result.byProvider)) {
+    throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Invalid agent statistics.");
+  }
+  for (const key of ["sessions", "running", "completed", "failed", "turns", "successfulTurns", "failedTurns", "durationMs"]) {
+    requiredInteger(result[key], key);
+  }
+  return result as unknown as LocalAgentStats;
 }
 
 export function decodeDaemonStatus(value: unknown): LocalAgentDaemonStatus {

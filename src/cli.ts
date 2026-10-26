@@ -291,7 +291,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     }
 
     const currentSubagents = files.config.subagents;
-    const availability = getLocalAgentProviderAvailabilitySnapshot();
+    const availability = getLocalAgentProviderAvailabilitySnapshot(process.env, currentSubagents);
     const configuredProviders = currentSubagents.providers
       .filter((provider) => provider.enabled)
       .map((provider) => provider.id);
@@ -532,7 +532,7 @@ async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
     }
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
-      getLocalAgentProviderAvailabilitySnapshot(),
+      getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
     );
     console.log(`Subagents: ${config.subagents.enabled ? "enabled" : "disabled"}`);
     console.log(`Subagent providers: ${formatLocalAgentProviderStatusSummary(providers)}`);
@@ -1001,6 +1001,15 @@ async function runAgentsCommand(args: string[]): Promise<void> {
     case "show":
       await runAgentsShow(commandArgs, json);
       return;
+    case "events":
+      await runAgentsEvents(commandArgs, json);
+      return;
+    case "stats":
+      await runAgentsStats(commandArgs, json);
+      return;
+    case "watch":
+      await runAgentsWatch(commandArgs, json);
+      return;
     case "targets":
       await runAgentsTargets(commandArgs, json);
       return;
@@ -1025,7 +1034,7 @@ async function runAgentsTargets(args: string[], json: boolean): Promise<void> {
   const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
   const providers = buildLocalAgentProviderStatuses(
     config.subagents,
-    getLocalAgentProviderAvailabilitySnapshot(),
+    getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
   );
   const catalog = buildLocalAgentCatalog(config.subagents, profiles, providers);
   const output = presentAgentTargetCatalog(catalog);
@@ -1066,7 +1075,7 @@ async function runAgentsRun(args: string[], json: boolean): Promise<void> {
     const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
-      getLocalAgentProviderAvailabilitySnapshot(),
+      getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
     );
     target = routeAutoAgent(
       parsed.prompt,
@@ -1133,6 +1142,75 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
   const observation = presentAgentObservation(record);
   if (json) printJson(observation);
   else console.log(formatAgentObservation(observation));
+}
+
+async function runAgentsEvents(args: string[], json: boolean): Promise<void> {
+  const [id, afterRaw, ...extra] = args;
+  if (!id || extra.length > 0 || (afterRaw !== undefined && !/^\d+$/.test(afterRaw))) {
+    throw new Error("Usage: devspace agents events <id> [after-seq] [--json]");
+  }
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const events = presentAgentResult(await client.events(
+    id, resolveCliWorkspaceContext(config.allowedRoots), Number(afterRaw ?? 0), 200,
+  ), json);
+  if (!events) return;
+  if (json) printJson(events);
+  else for (const event of events) console.log(formatAgentEvent(event));
+}
+
+async function runAgentsStats(args: string[], json: boolean): Promise<void> {
+  if (args.length > 0) throw new Error("Usage: devspace agents stats [--json]");
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const stats = presentAgentResult(await client.stats(resolveCliWorkspaceContext(config.allowedRoots)), json);
+  if (!stats) return;
+  if (json) printJson(stats);
+  else console.log(
+    `Sessions: ${stats.sessions} (${stats.running} running, ${stats.completed} idle, ${stats.failed} failed)` +
+    `\nTurns: ${stats.turns} (${stats.successfulTurns} completed, ${stats.failedTurns} failed)` +
+    `\nRuntime: ${stats.durationMs}ms; input/output tokens: ${stats.inputTokens ?? "unreported"}/${stats.outputTokens ?? "unreported"}`,
+  );
+}
+
+function formatAgentEvent(event: { seq: number; at: string; kind: string; label?: string; durationMs?: number }): string {
+  return `${event.seq} ${event.at} ${event.kind}${event.label ? " " + event.label : ""}${event.durationMs === undefined ? "" : ` (${event.durationMs}ms)`}`;
+}
+
+/** Read-only near-real-time CLI tail. All events are persisted before publication. */
+async function runAgentsWatch(args: string[], json: boolean): Promise<void> {
+  const [id, ...extra] = args;
+  if (!id || extra.length > 0) throw new Error("Usage: devspace agents watch <id> [--json]");
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  let afterSeq = 0;
+  const deadline = Date.now() + 30 * 60_000;
+  while (true) {
+    const events = presentAgentResult(await client.events(id, scope, afterSeq, 200), json);
+    if (!events) return;
+    for (const event of events) {
+      afterSeq = event.seq;
+      if (json) printJson(event);
+      else console.log(formatAgentEvent(event));
+    }
+    const agent = presentAgentResult(await client.get(id, scope), json);
+    if (!agent) return;
+    if (agent.status !== "running" && agent.status !== "starting" && events.length < 200) {
+      // A terminal record may become visible a moment before its terminal event.
+      await sleep(150);
+      const finalEvents = presentAgentResult(await client.events(id, scope, afterSeq, 200), json);
+      if (!finalEvents) return;
+      for (const event of finalEvents) {
+        afterSeq = event.seq;
+        if (json) printJson(event);
+        else console.log(formatAgentEvent(event));
+      }
+      return;
+    }
+    if (Date.now() > deadline) throw new Error("Agent watch window expired; execution was not cancelled.");
+    await sleep(500);
+  }
 }
 
 async function runAgentsDaemon(args: string[], json: boolean): Promise<void> {
@@ -1216,6 +1294,9 @@ function printAgentsHelp(): void {
       "  devspace agents run <profile-or-provider|auto> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
       "  devspace agents show <id> [--json]",
+      "  devspace agents events <id> [after-seq] [--json]",
+      "  devspace agents watch <id> [--json]",
+      "  devspace agents stats [--json]",
       "  devspace agents targets [--json]",
       "  devspace agents daemon <status|stop|logs> [--json]",
     ].join("\n"),

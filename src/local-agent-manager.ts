@@ -18,6 +18,10 @@ import {
   resolveLocalAgentTarget,
 } from "./local-agent-targets.js";
 import {
+  type LocalAgentEvent,
+  type LocalAgentEventData,
+  type LocalAgentEventKind,
+  type LocalAgentStats,
   type LocalAgentRecord,
   type LocalAgentStore,
   type LocalAgentWorkspaceScope,
@@ -199,6 +203,18 @@ export class LocalAgentManager {
     ));
   }
 
+  events(agentId: string, scope: LocalAgentWorkspaceScope, afterSeq = 0, limit = 100): BetterResult<LocalAgentEvent[], AgentLookupError> {
+    const existing = this.get(agentId, scope);
+    if (existing.isErr()) return existing;
+    return this.store.listEventsResult(agentId, afterSeq, limit);
+  }
+
+  stats(scope: LocalAgentWorkspaceScope): BetterResult<LocalAgentStats, AgentListError> {
+    return this.authorizeWorkspace(scope.workspaceRoot, scope.workspaceId, "stats").andThen((workspaceRoot) => (
+      this.store.statsResult({ workspaceId: scope.workspaceId, workspaceRoot })
+    ));
+  }
+
   async close(): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.accepting = false;
@@ -256,6 +272,7 @@ export class LocalAgentManager {
       errorRetryable: undefined,
     });
     if (updated.isErr()) return updated;
+    this.recordEvent(record.id, "turn_started", { label: record.provider });
     // Defer invocation until after the tracking entry is visible. This keeps
     // cleanup correct even if runTurn later gains a synchronous completion path.
     const turn = Promise.resolve().then(() => (
@@ -325,6 +342,10 @@ export class LocalAgentManager {
           if (!current.value || current.value.providerSessionId === providerSessionId) return;
           const updated = this.store.updateResult(record.id, { providerSessionId });
           if (updated.isErr()) throw updated.error;
+          this.recordEvent(record.id, "session_saved");
+        },
+        onEvent: (event) => {
+          this.recordEvent(record.id, "progress", { label: event.label, ...event.usage });
         },
       };
       const result = await this.pool.run(driver.value, context, input.value, callbacks);
@@ -345,6 +366,11 @@ export class LocalAgentManager {
         errorRetryable: undefined,
       });
       if (updated.isErr()) throw updated.error;
+      this.recordEvent(record.id, "turn_completed", {
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outputBytes: runResult.outputBytes,
+        ...runResult.usage,
+      });
       this.log("info", "agent_run_completed", {
         provider: updated.value.provider,
         agentId: updated.value.id,
@@ -361,6 +387,10 @@ export class LocalAgentManager {
         error: "Unexpected internal subagent failure.",
         errorCode: "AGENT_INTERNAL_ERROR",
         errorRetryable: false,
+      });
+      this.recordEvent(record.id, "turn_failed", {
+        durationMs: Math.max(0, Date.now() - startedAt),
+        label: "AGENT_INTERNAL_ERROR",
       });
       this.log("error", "agent_run_failed", {
         provider: record.provider,
@@ -388,6 +418,10 @@ export class LocalAgentManager {
       errorCode: error.code,
       errorRetryable: error.retryable,
     });
+    this.recordEvent(record.id, "turn_failed", {
+      durationMs: Math.max(0, Date.now() - startedAt),
+      label: error.code,
+    });
     this.log("error", "agent_run_failed", {
       provider: record.provider,
       agentId: record.id,
@@ -398,6 +432,13 @@ export class LocalAgentManager {
       causeType: safeCauseType("cause" in error ? error.cause : undefined),
       persistenceFailed: persisted.isErr(),
     });
+  }
+
+  private recordEvent(agentId: string, kind: LocalAgentEventKind, data: LocalAgentEventData = {}): void {
+    const result = this.store.appendEventResult(agentId, kind, data);
+    if (result.isErr()) {
+      this.log("warn", "agent_event_write_failed", { agentId, kind, error: result.error.message });
+    }
   }
 
   private buildRunInputResult(
@@ -462,15 +503,6 @@ export class LocalAgentManager {
     operation: string,
     agentId?: string,
   ): BetterResult<LocalAgentDriver, AgentTargetError> {
-    if (!isLocalAgentProvider(provider)) {
-      return Result.err(new AgentTargetError({
-        code: "PROVIDER_NOT_CONFIGURED",
-        target: provider,
-        operation,
-        retryable: false,
-        message: `No local agent driver is configured for provider: ${provider}.`,
-      }));
-    }
     const driver = this.drivers.get(provider);
     if (!driver) {
       return Result.err(new AgentTargetError({
@@ -490,7 +522,6 @@ export class LocalAgentManager {
     target: string,
     operation: string,
   ): BetterResult<void, AgentTargetError> {
-    if (!isLocalAgentProvider(provider)) return Result.ok(undefined);
     if (isSubagentProviderEnabled(this.subagents, provider)) return Result.ok(undefined);
     return Result.err(new AgentTargetError({
       code: "PROVIDER_DISABLED",

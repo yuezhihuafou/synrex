@@ -332,15 +332,7 @@
             "properties": {
               "id": {
                 "type": "string",
-                "enum": [
-                  "codex",
-                  "claude",
-                  "opencode",
-                  "pi",
-                  "cursor",
-                  "copilot",
-                  "grok"
-                ]
+                "pattern": "^[a-z][a-z0-9-]{0,63}$"
               },
               "enabled": {
                 "type": "boolean"
@@ -352,6 +344,93 @@
               "effort": {
                 "type": "string",
                 "minLength": 1
+              },
+              "cli": {
+                "type": "object",
+                "properties": {
+                  "command": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "defaultModel": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "outputFormat": {
+                    "type": "string",
+                    "enum": [
+                      "json",
+                      "stream-json"
+                    ]
+                  },
+                  "promptFlag": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "modelFlag": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "effortFlag": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sessionFlag": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "statusField": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "successStatus": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "responseField": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sessionField": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "errorField": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "deniedActionsField": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "usageField": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "isolation": {
+                    "default": "none",
+                    "type": "string",
+                    "enum": [
+                      "none",
+                      "antigravity"
+                    ]
+                  },
+                  "timeoutMs": {
+                    "type": "integer",
+                    "minimum": 1000,
+                    "maximum": 600000
+                  }
+                },
+                "required": [
+                  "command"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [

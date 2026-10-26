@@ -153,6 +153,9 @@ devspace agents targets --json
 devspace agents run <profile-or-provider> "<prompt>" --json
 devspace agents continue <id> "<prompt>" --json
 devspace agents show <id> --json
+devspace agents events <id> --json
+devspace agents watch <id> --json
+devspace agents stats --json
 ```
 
 `open_workspace` exposes compact profile metadata:
@@ -181,7 +184,9 @@ profile.
 ## Runtime lifecycle
 
 Synrex keeps provider sessions warm while they are active or recently used,
-but persists only the provider session id and durable agent metadata. Native
+and persists provider session IDs, durable metadata, bounded progress events
+and provider-reported usage when available. Antigravity also needs private
+on-disk CLI session state (see `docs/configuration.md`). Native
 sharing follows the provider boundary: Codex uses one app-server across agents,
 OpenCode uses one server across sessions, ACP providers use one process across
 sessions, while Claude and Pi keep one warm runtime per Synrex agent. There is
