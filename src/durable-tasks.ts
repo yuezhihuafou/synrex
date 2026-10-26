@@ -160,6 +160,15 @@ export class DurableTaskManager {
   private readonly runRoot: string;
   private readonly runnerPath: string;
   private readonly launchOverride?: DurableTaskManagerOptions["launchTask"];
+  // A redelivered request may arrive while its first launch is still writing
+  // the request index. Single-flight prevents two commands being spawned for
+  // the same node request within this runner process.
+  private readonly pendingRequestStarts = new Map<string, {
+    command: string;
+    cwd: string;
+    workspaceId?: string;
+    promise: Promise<ProcessSnapshot>;
+  }>();
   private readonly orphanSweepAt = new Map<string, number>();
   private readonly systemdAvailable: () => boolean;
   private readonly stopSystemdUnit: (unitName: string) => Promise<void>;
@@ -183,12 +192,41 @@ export class DurableTaskManager {
 
   async start(input: DurableStartCommandInput, waitMs: number): Promise<ProcessSnapshot> {
     if (!this.available) throw new Error("Durable task runner is unavailable in this build.");
+    if (!input.requestId) return this.startOnce(input, waitMs);
+    const key = `${path.resolve(input.workspaceRoot ?? input.cwd)}\0${input.requestId}`;
+    const pending = this.pendingRequestStarts.get(key);
+    if (pending) {
+      if (pending.command !== input.command || pending.cwd !== path.resolve(input.cwd)
+        || pending.workspaceId !== input.workspaceId) {
+        throw new Error(`Node request ${input.requestId} was reused for a different command.`);
+      }
+      return pending.promise;
+    }
+    const promise = this.startOnce(input, waitMs);
+    this.pendingRequestStarts.set(key, {
+      command: input.command,
+      cwd: path.resolve(input.cwd),
+      workspaceId: input.workspaceId,
+      promise,
+    });
+    try {
+      return await promise;
+    } finally {
+      if (this.pendingRequestStarts.get(key)?.promise === promise) this.pendingRequestStarts.delete(key);
+    }
+  }
+
+  private async startOnce(input: DurableStartCommandInput, waitMs: number): Promise<ProcessSnapshot> {
     if (input.requestId) {
       const existing = await this.findTaskByRequestId(
         input.workspaceRoot ?? input.cwd,
         input.requestId,
       );
       if (existing) {
+        if (existing.command !== input.command || path.resolve(existing.cwd) !== path.resolve(input.cwd)
+          || existing.workspaceId !== input.workspaceId) {
+          throw new Error(`Node request ${input.requestId} was reused for a different command.`);
+        }
         return this.snapshot(await this.reconcileTask(existing));
       }
     }

@@ -53,6 +53,31 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
       const type = String(res.getHeader("content-type") ?? "").toLowerCase();
       return type.includes("text/event-stream") ? "sse" : type.includes("json") ? "json" : "unknown";
     };
+    // Most MCP JSON/SSE responses are chunked and do not set Content-Length.
+    // Count bytes as the response is written, without buffering tool content
+    // or depending on the proxy's transfer encoding.
+    let outputBytes = 0;
+    if (isMcp) {
+      const countChunk = (chunk: unknown, encoding?: unknown) => {
+        if (typeof chunk === "string") {
+          outputBytes += Buffer.byteLength(chunk, typeof encoding === "string" ? encoding as BufferEncoding : "utf8");
+        } else if (chunk instanceof Uint8Array) {
+          outputBytes += chunk.byteLength;
+        }
+      };
+      const originalWrite = res.write;
+      res.write = function (this: typeof res, ...args: Parameters<typeof originalWrite>) {
+        const result = originalWrite.apply(this, args);
+        countChunk(args[0], args[1]);
+        return result;
+      } as typeof res.write;
+      const originalEnd = res.end;
+      res.end = function (this: typeof res, ...args: Parameters<typeof originalEnd>) {
+        const result = originalEnd.apply(this, args);
+        countChunk(args[0], args[1]);
+        return result;
+      } as typeof res.end;
+    }
     const originalWriteHead = res.writeHead;
     res.writeHead = function (this: typeof res, ...args: Parameters<typeof originalWriteHead>) {
       if (isMcp) diagnostics.record("mcp_headers_sent", { ...base, elapsedMs: elapsed(), status: args[0] });

@@ -611,7 +611,9 @@ export class LocalAgentManager {
     event: string,
     fields: Record<string, unknown>,
   ): void {
-    this.logger?.(level, event, fields);
+    // Agent state transitions must not depend on an optional telemetry sink.
+    // In particular, the first run-start log precedes the turn's try/finally.
+    try { this.logger?.(level, event, fields); } catch { /* observational */ }
   }
 }
 

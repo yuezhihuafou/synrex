@@ -312,7 +312,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
     {
       title: "Apply patch",
       description:
-        "Apply one Codex-style patch in a workspace. Supports adding, overwriting, updating, deleting, and moving files. Use this for all file modifications. Paths must be relative to the workspace.",
+        "Apply a Codex patch to workspace files (add/update/delete/move). Use for edits; paths are relative.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         patch: z.string().describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),

@@ -36,6 +36,7 @@ export type DiagnosticEvent =
   | "mailbox_registered" | "mailbox_delivered" | "mailbox_acknowledged" | "mailbox_error" | "learning_error"
   | "conversation_labeled"
   | "conversation_seen"
+  | "workspace_operation_waited"
   | "node_request_timeout"
   | "node_late_completion"
   | "mcp_received"
@@ -214,6 +215,7 @@ export class DiagnosticTrace {
   readonly file: string;
   readonly previousFile: string;
   private warned = false;
+  private directoryReady = false;
 
   constructor(stateDir: string, private readonly fileLimit = DIAGNOSTIC_FILE_LIMIT) {
     this.file = path.join(stateDir, DIAGNOSTIC_DIR, DIAGNOSTIC_FILE);
@@ -225,16 +227,23 @@ export class DiagnosticTrace {
       const entry = sanitizeDiagnostic(event, { ...diagnosticRuntime, ...fields });
       const line = JSON.stringify(entry) + "\n";
       const dir = path.dirname(this.file);
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      chmodSync(dir, 0o700);
+      // The directory and an existing log only need permission correction
+      // once per trace writer. Avoid extra synchronous filesystem calls on
+      // every lifecycle event in the hot MCP request path.
+      if (!this.directoryReady) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        chmodSync(dir, 0o700);
+        if (existsSync(this.file)) chmodSync(this.file, 0o600);
+        this.directoryReady = true;
+      }
       if (existsSync(this.file) && statSync(this.file).size + Buffer.byteLength(line) > this.fileLimit) {
         renameSync(this.file, this.previousFile);
       }
       appendFileSync(this.file, line, { encoding: "utf8", mode: 0o600 });
-      chmodSync(this.file, 0o600);
       this.warned = false;
     } catch (error) {
       // Diagnostics must never break code execution or authenticated requests.
+      this.directoryReady = false;
       if (!this.warned) {
         this.warned = true;
         console.warn("Synrex diagnostic trace unavailable:", error instanceof Error ? error.name : "unknown");

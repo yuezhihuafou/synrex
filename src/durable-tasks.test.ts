@@ -621,6 +621,37 @@ test("node request ids make durable command creation idempotent across manager r
   }
 });
 
+test("concurrent redelivery of one node request starts exactly one durable command", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "synrex-durable-single-flight-"));
+  let launches = 0;
+  let releaseLaunch!: () => void;
+  const launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+  try {
+    const manager = new DurableTaskManager({
+      runRoot: root,
+      runnerPath: "test-runner",
+      launchTask: async () => { launches++; await launchGate; },
+    });
+    const input = {
+      workspaceId: "workspace-single-flight",
+      workspaceRoot: process.cwd(),
+      cwd: process.cwd(),
+      command: "side-effecting-command",
+      requestId: "nrq_33333333-3333-4333-8333-333333333333",
+    };
+    const calls = Array.from({ length: 12 }, () => manager.start(input, 0));
+    await assert.rejects(manager.start({ ...input, command: "different-command" }, 0), /reused for a different command/);
+    releaseLaunch();
+    const snapshots = await Promise.all(calls);
+    assert.equal(launches, 1);
+    assert.equal(new Set(snapshots.map((item) => item.taskId)).size, 1);
+    await assert.rejects(manager.start({ ...input, command: "different-command" }, 0), /reused for a different command/);
+  } finally {
+    releaseLaunch?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("durable runner persists high-volume output without dropping bytes under backpressure", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-durable-output-pressure-"));
   try {

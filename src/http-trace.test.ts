@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import express from "express";
@@ -42,4 +44,31 @@ test("MCP HTTP tracing counts streamed body bytes and retains valid W3C parent c
   assert.equal(completed.outputBytes, Buffer.byteLength("first\nlast\n"));
   assert.equal(completed.responseMode, "sse");
   assert.equal(completed.requestId, response.headers.get("x-synrex-request-id"));
+});
+
+test("MCP response byte count includes chunked string and binary writes without Content-Length", async (t) => {
+  const root = await mkdtemp(path.join(tmpdir(), "synrex-http-trace-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const diagnostics = new DiagnosticTrace(root);
+  const app = express();
+  const config = { logging: { requests: false } } as ServerConfig;
+  app.use(requestTraceMiddleware(config, diagnostics, () => ({})));
+  app.post("/mcp", (_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.write('{"message":"');
+    res.end(Buffer.from('你好"}'));
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/mcp`, { method: "POST" });
+    const body = await response.text();
+    assert.equal(body, '{"message":"你好"}');
+    const finish = diagnostics.read().find((event) => event.event === "mcp_finished");
+    assert.equal(finish?.outputBytes, Buffer.byteLength(body));
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });

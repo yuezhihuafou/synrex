@@ -5,6 +5,7 @@ import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
 import { traceEvent, traceStage, errorCategory } from "./trace-stages.js";
 import { registerSynrexConsole } from "./console-router.js";
 import { watchToolExecution } from "./tool-execution-watch.js";
+import { WorkspaceOperationGate } from "./workspace-operation-gate.js";
 import { hostsDirectory, joinsDirectory } from "./multinode/topology.js";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
@@ -107,6 +108,14 @@ import {
 } from "./tool-surfaces/types.js";
 
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+
+// Shared by all HTTP host sessions and the peer invoker. Detached commands
+// can write outside this gate; use Git worktrees to isolate those workflows.
+const workspaceOperationGate = new WorkspaceOperationGate();
+const GATED_READ_TOOLS = new Set(["read", "semantic_code"]);
+// show_changes also persists a review checkpoint; treat it as a mutation so
+// concurrent reviews cannot race with another checkpoint or source write.
+const GATED_WRITE_TOOLS = new Set(["apply_patch", "semantic_edit", "write", "edit", "show_changes"]);
 
 function mcpServerInfo() {
   return {
@@ -841,7 +850,7 @@ function registerMcpSurface(
     {
       title: "Show changes",
       description:
-        "Show the changes made in this turn for an open workspace. Call this once after the final related file change and before your final response so the user can review the combined diff. Do not call it after each individual file change.",
+        "Review the aggregate workspace diff. Call once after the final edit, before replying.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
       },
@@ -983,10 +992,23 @@ function withTrackedToolHandlers(
             emitDiagnostic: parent?.emitDiagnostic ?? ((event, fields) => diagnostics.record(event, fields)),
           }, async () => {
           const operation = () => traceStage("tool_handler", () => Promise.resolve(handler(...handlerArgs)), { tool: toolName });
+          const coordinatedOperation = async () => {
+            const workspaceId = suppliedInput?.workspaceId;
+            const mode = GATED_READ_TOOLS.has(toolName) ? "read"
+              : GATED_WRITE_TOOLS.has(toolName) ? "write" : undefined;
+            if (!mode || typeof workspaceId !== "string") return operation();
+            // A forwarded peer ID may not be in the owner's local registry.
+            // Only same-root local calls share the physical gate.
+            const workspace = await workspaces.getWorkspace(workspaceId).catch(() => undefined);
+            const key = workspace?.root ?? `workspace:${workspaceId}`;
+            return workspaceOperationGate.run(key, mode, operation, (queuedMs) => {
+              traceEvent("workspace_operation_waited", { tool: toolName, workspaceId, queuedMs });
+            });
+          };
           try {
             const result = trackToolActivity
-              ? await trackToolActivity(operation)
-              : await operation();
+              ? await trackToolActivity(coordinatedOperation)
+              : await coordinatedOperation();
             await traceStage("learning", () => recordLearningToolCall(
               learning,
               workspaces,
@@ -1097,7 +1119,11 @@ async function recordLearningToolCall(
   output?: unknown,
   error?: unknown,
 ): Promise<void> {
-  if (toolName === "open_workspace" || toolName === "project") return;
+  // Polling, workflow bookkeeping and status inspection have dedicated durable
+  // stores and are not evidence of successful engineering work. Skipping them
+  // also avoids unnecessary SQLite writes on high-frequency status checks.
+  if (["open_workspace", "project", "task_get", "task_wait", "process_status",
+    "workflow_open", "workflow_status", "workflow_checkpoint"].includes(toolName)) return;
   // Polling and inspecting stored evidence are meta-operations, not new
   // learning episodes. Recording these would recursively pollute recall and
   // bury the real engineering history behind the agent's own status checks.
@@ -1106,13 +1132,6 @@ async function recordLearningToolCall(
     const command = typeof input?.cmd === "string" ? input.cmd.trim() : "";
     if (/^devspace-project(?:\s|$)|^devspace-log(?:\s|$)|^devspace-task\s+(?:get|wait|final)\s+/i.test(command)) return;
   }
-  if (
-    toolName === "task_get"
-    && output
-    && typeof output === "object"
-    && !Array.isArray(output)
-    && (output as { structuredContent?: { unchanged?: unknown } }).structuredContent?.unchanged === true
-  ) return;
   const input = handlerArgs[0];
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
   const workspaceId = (input as { workspaceId?: unknown }).workspaceId;

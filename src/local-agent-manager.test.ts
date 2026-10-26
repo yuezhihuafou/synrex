@@ -356,6 +356,23 @@ assert.equal(runtimes.get(shuttingDown.id)?.closed, true);
 await closing;
 
 await manager.close();
+const noisyStore = new LocalAgentStore(join(root, "noisy-logger-state"));
+const noisyManager = new LocalAgentManager({
+  store: noisyStore,
+  drivers: [driver],
+  pool: new LocalAgentRuntimePool({ logger: () => { throw new Error("runtime telemetry unavailable"); } }),
+  logger: () => { throw new Error("manager telemetry unavailable"); },
+  loadProfiles: async () => [profile],
+  allowedRoots: [root],
+  subagents,
+});
+const noisyAgent = unwrap(await noisyManager.start({
+  target: "reviewer", prompt: "logger errors should not stop work",
+  workspaceId: scope.workspaceId, workspaceRoot: root,
+}));
+await waitFor(() => unwrap(noisyManager.get(noisyAgent.id, scope)).status === "idle");
+assert.equal(noisyManager.activeTurnCount, 0, "logging failure cannot strand an active agent turn");
+await noisyManager.close();
 await rm(root, { recursive: true, force: true });
 await rm(directRoot, { recursive: true, force: true });
 

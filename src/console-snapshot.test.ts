@@ -6,7 +6,7 @@ import path from "node:path";
 import { openDatabase } from "./db/client.js";
 import { CodingWorkflowStore } from "./coding-workflows.js";
 import { readConsoleSnapshot } from "./console-snapshot.js";
-import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { DIAGNOSTIC_FILE_LIMIT, DiagnosticTrace } from "./diagnostic-trace.js";
 import { LearningStore } from "./learning-store.js";
 
 test("console uses existing database read-only and does not invent process status", async (t) => {
@@ -46,6 +46,8 @@ test("console uses existing database read-only and does not invent process statu
   assert.equal(snapshot.workflows[0]?.title, "Build");
   assert.equal(snapshot.diagnostics.requests[0]?.classification, "rev_http_completed");
   assert.equal(snapshot.service.release, "test-release");
+  assert.equal(snapshot.service.diagnosticsBoundBytes, DIAGNOSTIC_FILE_LIMIT * 2);
+  assert.equal(snapshot.activeTaskProcesses?.length ?? 0, snapshot.activeTaskUnits?.length ?? 0);
   assert.equal(snapshot.tasks.length, 0);
   assert.equal(snapshot.memory.episodes, 0);
 });

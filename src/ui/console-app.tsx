@@ -27,8 +27,15 @@ type Snapshot = {
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; updatedAt: string }>;
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  activeTaskUnits?: string[] | null;
+  activeTaskProcesses?: Array<{unit:string;pid:number|null;memoryBytes:number|null;cpuTimeMs:number|null}> | null;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
-  diagnostics: { count: number; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
+  diagnostics: { count: number; observability?: {coverage:{observedEvents:number;observedRequests:number;tokenUsage:string;hostInference:string};
+    latency:{completed:number;medianMs:number|null;p95Ms:number|null;maximumMs:number|null};
+    lifecycle:{httpCompleted:number;closedEarly:number;handlerFailed:number;toolCompletedWithoutHttp:number;unknown:number};
+    transfer:{observedInputBytes:number;observedOutputBytes:number;approximateInputTokens:number|null;approximateOutputTokens:number|null};
+    capacity?:{inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null} };
+    requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
     conversationTitle?:string; conversationId?:string; runId?:string;
     classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
     traceId?:string; nodeRequestId?:string; callId?:string; taskId?:string; nodeId?:string;
@@ -48,7 +55,7 @@ type Snapshot = {
     network: { tcpConnections?:number; tcpRttP50Ms?:number; tcpRttP95Ms?:number;
       tcpRetransSockets?:number; tcpRetransSegmentsTotal?:number; at?:string };
     collectorHealth: { refusedLogs?:number; refusedMetrics?:number; exporterFailed?:number; at?:string };
-    metrics: Array<{ts:string;name:string;value:number;nodeId?:string;processPid?:number;processName?:string}> };
+metrics: Array<{ts:string;name:string;value:number;nodeId?:string;processPid?:number;processName?:string}> };
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
@@ -98,7 +105,7 @@ function UsagePage(){
     void load();const timer=setInterval(()=>void load(),60000);
     return()=>{live=false;clearInterval(timer);};
   },[]);
-  if(error)return <Blank>{error}</Blank>;
+if(error)return <Blank>{error}</Blank>;
   if(!data||data.status)return <Blank>等待独立统计进程首次生成数据，不在 MCP 主进程中计算。</Blank>;
   const age=Date.now()-Date.parse(data.generatedAt??"");
 const format=(n?:number|null)=>n===undefined||n===null?"未知":n.toLocaleString("zh-CN");
@@ -148,7 +155,7 @@ function Login({ done }: { done:()=>void }) {
   const [password,setPassword]=useState("");
   const [error,setError]=useState("");
   const [busy,setBusy]=useState(false);
-  async function onSubmit(e:FormEvent) {
+async function onSubmit(e:FormEvent) {
     e.preventDefault(); setBusy(true);setError("");
     try {
 await getJson("/console/api/login",{ method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({password}) });
@@ -223,12 +230,25 @@ const current=d.workflows.find(x=>x.id===id)??d.workflows[0];
 }
 function Tasks({d}:{d:Snapshot}) {
   const names=new Map(d.nodes.map(x=>[x.id,x.alias]));
-  return <Panel title="持久任务索引" hint="只显示已登记的执行位置；不能把任务索引误认为实际运行状态">
-    <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>Run ID</th><th>创建时间</th></tr></thead>
-    <tbody>{d.tasks.map(t=><tr key={t.id}><td><code title={t.id}>{t.id.slice(0,23)}…</code></td>
-      <td>{names.get(t.nodeId)??t.nodeId}</td><td><code>{t.runId??"—"}</code></td><td>{time(t.createdAt)}</td></tr>)}</tbody></table></div>
-    {!d.tasks.length&&<Blank>暂无任务索引</Blank>}
-    <p className="footnote">持久任务的实时进程状态与完整输出保存在执行节点上。当前页面不推断任务已完成。</p>
+  const processes=new Map((d.activeTaskProcesses??[]).map(x=>[x.unit,x]));
+  const [showHistory,setShowHistory]=useState(false);
+  const visible=showHistory?d.tasks:d.tasks.filter(t=>t.status==="working"||t.status==="input_required");
+  return <Panel title="持久任务监控" hint="默认展示正在运行的任务；索引状态与真实 systemd 进程分开显示">
+    <p><strong>本机活动任务服务：</strong> {d.activeTaskUnits===undefined||d.activeTaskUnits===null?"无法读取":d.activeTaskUnits.length+" 个"}</p>
+    {d.activeTaskUnits?.map(unit=>{const process=processes.get(unit);return <div className="list-row" key={unit}>
+      <span className="online-dot"/><code>{unit}</code>
+      <small>{process?.pid? `PID ${process.pid}` : "PID 未确认"} ·
+        {process?.memoryBytes===null||process?.memoryBytes===undefined?"内存未知":`${(process.memoryBytes/1024/1024).toFixed(1)} MiB`} ·
+        {process?.cpuTimeMs===null||process?.cpuTimeMs===undefined?"CPU 未知":`CPU ${process.cpuTimeMs} ms`}</small>
+    </div>;})}
+    <p>已登记运行中任务 {visible.filter(t=>t.status==="working"||t.status==="input_required").length} 项（以本机任务状态文件为准） ·
+      <button onClick={()=>setShowHistory(v=>!v)}>{showHistory?"隐藏历史任务":"查看全部索引与历史"}</button></p>
+    <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>状态</th><th>Run ID</th><th>创建时间</th></tr></thead>
+    <tbody>{visible.map(t=><tr key={t.id}><td><code title={t.id}>{t.id.slice(0,23)}…</code></td>
+      <td>{names.get(t.nodeId)??t.nodeId}</td><td>{t.status==="unknown"?"未确认":t.status}</td>
+      <td><code>{t.runId??"—"}</code></td><td>{time(t.createdAt)}</td></tr>)}</tbody></table></div>
+    {!visible.length&&<Blank>{showHistory?"暂无任务索引":"没有登记为运行中的任务"}</Blank>}
+    <p className="footnote">任务记录不是进程存活的证据；实际活动进程以上方 systemd 状态为准。远程节点需单独查询。</p>
   </Panel>;
 }
 function Nodes({d}:{d:Snapshot}) {
@@ -248,7 +268,7 @@ function Diagnostics({d}:{d:Snapshot}) {
     conversationTitle?:string|null;titleSource?:string;
     truncated:boolean;archiveCoverage:string;remoteState?:string}|null>(null);
   const [titleDraft,setTitleDraft]=useState("");
-  const [labelMessage,setLabelMessage]=useState("");
+const [labelMessage,setLabelMessage]=useState("");
   const [history,setHistory]=useState<Snapshot["diagnostics"]["events"]>([]);
   const [filter,setFilter]=useState("");
 const [historyStart,setHistoryStart]=useState("");
@@ -298,7 +318,7 @@ const [historyStart,setHistoryStart]=useState("");
   async function loadHistory(){
     const params=new URLSearchParams();
     if(filter)params.set("event",filter);
-    if(historyStart)params.set("start",new Date(historyStart).toISOString());
+if(historyStart)params.set("start",new Date(historyStart).toISOString());
     if(historyEnd)params.set("end",new Date(historyEnd).toISOString());
     const payload=await getJson<{events:Snapshot["diagnostics"]["events"];stats:{events:number;spans:number;metrics:number;first?:string;last?:string};gatewayHistory:string}>(
 "/console/api/history?"+params);
@@ -335,6 +355,15 @@ const [historyStart,setHistoryStart]=useState("");
   const percentile=(p:number)=>durations.length ? [...durations].sort((a,b)=>a-b)[Math.floor((durations.length-1)*p)]!+" ms" : "—";
   return <div className="stack"><div className="notice"><strong>把卡顿定位到正确层级</strong>
     <p>工具执行结束且 HTTP 200，说明 Synrex 已返回；它无法证明 ChatGPT 模型或界面已经继续。</p></div>
+    {d.diagnostics.observability&&<Panel title="延迟、连接生命周期与传输量" hint="基于已记录的 MCP HTTP 事件；不代表 ChatGPT 内部 Token">
+      <div className="metrics">
+        <Metric label="MCP p50 / p95" value={`${d.diagnostics.observability.latency.medianMs??"—"} / ${d.diagnostics.observability.latency.p95Ms??"—"} ms`} info={`${d.diagnostics.observability.latency.completed} 个有耗时完成请求`} symbol="◷"/>
+        <Metric label="完成 / 提前断开" value={`${d.diagnostics.observability.lifecycle.httpCompleted} / ${d.diagnostics.observability.lifecycle.closedEarly}`} info="Synrex 实际观察" symbol="⌁"/>
+        <Metric label="执行错误 / 未确认" value={`${d.diagnostics.observability.lifecycle.handlerFailed} / ${d.diagnostics.observability.lifecycle.unknown}`} info="日志截断可产生未知" symbol="!"/>
+        <Metric label="输出 p95" value={`${d.diagnostics.observability.capacity?.outputP95?.toLocaleString()??"—"} B`} info="响应体积，不是模型 Token" symbol="⇥"/>
+      </div>
+      <p className="footnote">可见输入 {d.diagnostics.observability.transfer.observedInputBytes.toLocaleString()} B、输出 {d.diagnostics.observability.transfer.observedOutputBytes.toLocaleString()} B；超出本机日志窗口的事件不做推断。</p>
+    </Panel>}
     <div className="metrics"><Metric label="诊断事件" value={d.diagnostics.count} info="当前读取窗口" symbol="⌁"/>
       <Metric label="HTTP p50" value={percentile(.5)} info="近期请求" symbol="◷"/>
       <Metric label="HTTP p95" value={percentile(.95)} info="近期请求" symbol="◷"/>
@@ -348,7 +377,7 @@ const [historyStart,setHistoryStart]=useState("");
           <small>{r.requestId}</small>
           {r.taskId&&<small>Task: {r.taskId}</small>}</div><Badge value={r.classification}/><time>{time(r.lastAt)}</time></button>)}
       {!matched.length&&<Blank>没有匹配的请求记录</Blank>}
-    </Panel>
+</Panel>
     <Panel title="对话标题关联" hint="宿主标题优先；没有宿主元数据时可手动登记准确标题，不根据任务内容推测">
       <p>当前请求：<code>{chosen??"未选择"}</code>。已知标题：<strong>{detail?.conversationTitle??"未知"}</strong>
 {detail?.titleSource&&<small>（{detail.titleSource==="owner"?"手动登记":detail.titleSource==="host"?"宿主提供":"尚未关联"}）</small>}</p>
@@ -398,7 +427,7 @@ const [historyStart,setHistoryStart]=useState("");
         下载浏览器观测扩展（安装需要用户自行确认）
       </a>
       <input type="file" accept=".json,application/json" onChange={e=>{
-        const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
+const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
       }}/>
       {browserError&&<p className="form-error">{browserError}</p>}
 <p className="footnote">扩展 v1.1：在 ChatGPT 标签页打开扩展并点击“测试实际页面网络采集”。
@@ -448,7 +477,7 @@ function Resources({d}:{d:Snapshot}) {
     .sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,30);
   const network=[...latest.values()].filter(e=>e.name.startsWith("system.network"))
     .sort((a,b)=>a.name.localeCompare(b.name)).slice(0,18);
-  const tunnelFailures=d.diagnostics.events.filter(e=>e.event==="tunnel_auth_failed"||e.event==="tunnel_disconnected");
+const tunnelFailures=d.diagnostics.events.filter(e=>e.event==="tunnel_auth_failed"||e.event==="tunnel_disconnected");
   return <div className="stack">
     <div className="notice"><strong>采集范围：可控主机与进程</strong><p>
 Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取（仅尾部窗口）":"尚无本地归档数据"}。
@@ -498,7 +527,7 @@ Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取�
         {!processMetrics.length&&<Blank>尚未收到可识别 PID 的进程指标。</Blank>}
       </Panel>
       <Panel title="网络指标" hint="网络吞吐、错误与连接计数 · 不估计单次请求 RTT">
-        <div className="table-scroll"><table><thead><tr><th>指标</th><th>节点</th><th>值</th></tr></thead>
+<div className="table-scroll"><table><thead><tr><th>指标</th><th>节点</th><th>值</th></tr></thead>
           <tbody>{network.map((e,i)=><tr key={i}><td>{e.name}</td><td>{e.nodeId??"本机"}</td>
             <td>{Math.round(e.value).toLocaleString()}</td></tr>)}</tbody></table></div>
 {!network.length&&<Blank>Collector 网络数据尚不可用。</Blank>}
@@ -548,7 +577,7 @@ function App() {
     let live=true;
     async function measureClock(){
       const start=Date.now();
-      try{
+try{
         const x=await getJson<{serverTimeMs:number}>("/console/api/clock");
         const end=Date.now();
         if(live&&Number.isFinite(x.serverTimeMs)){

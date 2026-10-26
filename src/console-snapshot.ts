@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import Database from "better-sqlite3";
-import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
+import { DIAGNOSTIC_FILE_LIMIT, DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
 import { summarizeConsoleObservability } from "./console-observability.js";
 import { readOtelFileTail, type HostMetricSample } from "./otel-file-reader.js";
 import { readPeerSnapshot } from "./peer-observability.js";
@@ -39,6 +39,7 @@ export interface ConsoleSnapshot {
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits: string[] | null;
+  activeTaskProcesses: Array<{ unit: string; pid: number | null; memoryBytes: number | null; cpuTimeMs: number | null }> | null;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
   diagnostics: {
     count: number;
@@ -114,6 +115,40 @@ function readActiveTaskUnits(): string[] | null {
     return output.split("\n").map(line=>line.trim().split(/\s+/)[0]??"")
       .filter(name=>/^devspace-task-[a-zA-Z0-9_-]+\.service$/.test(name)).slice(0,100);
   } catch {return null;}
+}
+
+/** One bounded systemd query for live runner PID/resource samples. Task route
+ * indices are intentionally not used as proof that a process is alive. */
+function readActiveTaskProcesses(units: string[] | null): ConsoleSnapshot["activeTaskProcesses"] {
+  if (units === null) return null;
+  if (units.length === 0) return [];
+  type ProcessSample = NonNullable<ConsoleSnapshot["activeTaskProcesses"]>[number];
+  const unknown = (unit: string): ProcessSample => ({ unit, pid: null, memoryBytes: null, cpuTimeMs: null });
+  try {
+    const output = execFileSync("systemctl", ["--user", "show", ...units,
+      "--property=Id,MainPID,MemoryCurrent,CPUUsageNSec", "--no-pager"],
+    { encoding: "utf8", timeout: 800, maxBuffer: 64 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+    const samples = new Map<string, ProcessSample>();
+    const asNonnegative = (value: string | undefined): number | null => {
+      if (!value || !/^\d+$/.test(value)) return null;
+      const number = Number(value);
+      return Number.isSafeInteger(number) ? number : null;
+    };
+    for (const group of output.split(/\r?\n\s*\r?\n/)) {
+      const fields = new Map(group.split(/\r?\n/).map(line => {
+        const equals = line.indexOf("=");
+        return equals < 0 ? ["", ""] : [line.slice(0, equals), line.slice(equals + 1)];
+      }));
+      const unit = fields.get("Id");
+      if (!unit || !units.includes(unit)) continue;
+      const pid = asNonnegative(fields.get("MainPID"));
+      const cpuNs = asNonnegative(fields.get("CPUUsageNSec"));
+      samples.set(unit, { unit, pid: pid && pid > 0 ? pid : null,
+        memoryBytes: asNonnegative(fields.get("MemoryCurrent")),
+        cpuTimeMs: cpuNs === null ? null : Math.round(cpuNs / 1_000_000) });
+    }
+    return units.map(unit => samples.get(unit) ?? unknown(unit));
+  } catch { return units.map(unknown); }
 }
 
 export function readConsoleSnapshot(stateDir: string, release: string): ConsoleSnapshot {
@@ -207,10 +242,12 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   const runtime = [...events].reverse().find(e => e.event === "runtime_sampled");
   const network = [...events].reverse().find(e => e.event === "network_sampled");
   const collector = [...events].reverse().find(e => e.event === "collector_sampled");
+  const activeTaskUnits = readActiveTaskUnits();
   return {
     generatedAt: new Date().toISOString(),
-    service: { status: "online", release, diagnosticsBoundBytes: 2 * 8 * 1024 * 1024 },
-    nodes, workflows, tasks, memory, conversationSessions, activeTaskUnits: readActiveTaskUnits(),
+    service: { status: "online", release, diagnosticsBoundBytes: 2 * DIAGNOSTIC_FILE_LIMIT },
+    nodes, workflows, tasks, memory, conversationSessions, activeTaskUnits,
+    activeTaskProcesses: readActiveTaskProcesses(activeTaskUnits),
     diagnostics: { count: events.length,
       observability: summarizeConsoleObservability(events),
       requests, events: events.slice(-200).reverse() },

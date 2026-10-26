@@ -495,7 +495,8 @@ export class LocalAgentRuntimePool {
     event: string,
     fields: Record<string, unknown>,
   ): void {
-    this.logger?.(level, event, fields);
+    // A logger failure during runtime creation must not orphan the provider.
+    try { this.logger?.(level, event, fields); } catch { /* observational */ }
   }
 }
 

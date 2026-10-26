@@ -70,7 +70,7 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_status", {
     title: "Inspect coding workflows",
-    description: "List unfinished workflows belonging to this workspace, or inspect a workflow and recent checkpoints. Use after reconnecting; check saved run/task logs before relying on past GPT summaries.",
+    description: "List or inspect workspace workflows and checkpoints. Verify Git and task logs after reconnecting.",
     inputSchema: {
       workspaceId: z.string().describe(workspaceIdDescription),
       workflowId: workflowId.optional(),
