@@ -32,11 +32,15 @@ type Snapshot = {
   nodes: Array<{ id: string; alias: string; kind: string; health: string; os: string; lastSeenAt: string;
     contract: { matching: number; missing: number; incompatible: number; total: number }; version: string | null }>;
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
-    phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; updatedAt: string }>;
+    phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; checks:string[]; acceptanceCriteria:string[]; updatedAt: string }>;
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
-  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?:number; exitCode?:number|null; statusSource:string }>;
   activeTaskUnits?: string[] | null;
   activeTaskProcesses?: Array<{unit:string;pid:number|null;memoryBytes:number|null;cpuTimeMs:number|null}> | null;
+  execution?: { workflowCompleted:number; workflowBlocked:number; workflowActive:number; workflowCancelled:number;
+    selfReportedCompletionRate:number|null; confirmedTaskSuccesses:number; confirmedTaskFailures:number;
+    failureCategories:Record<string,number>; manualReminders:null; observedWindow:string;taskSourceCoverage:string };
+  timeline?:Array<{at:string;kind:string;taskId?:string;runId?:string;nodeId?:string;errorCategory?:string;exitCode?:number;outcome?:string}>;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
   usage?: { source:{diagnosticFirstAt:string|null;episodeFirstAt:string|null;diagnosticsCapped:boolean;episodesCapped:boolean;
     trafficPersistedFrom:string|null;codePersistedFrom:string|null;codeReviewsCapped:boolean};
@@ -198,6 +202,18 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
       <Metric label="待确认请求" value={d.diagnostics.requests.filter(x=>x.classification!=="rev_http_completed").length}
         info="诊断时间线" symbol="⌁"/>
     </div>
+    {d.execution&&<div className="metrics">
+      <Metric label="工作流自报完成率" value={d.execution.selfReportedCompletionRate===null?"无样本":d.execution.selfReportedCompletionRate+"%"}
+        info="仅限最近保存的终态工作流，不是 GPT 真正成功率" symbol="☷"/>
+      <Metric label="任务退出成功 / 失败" value={`${d.execution.confirmedTaskSuccesses} / ${d.execution.confirmedTaskFailures}`}
+        info="仅已记录的任务终态；不是用户目标完成数" symbol=">_"/>
+      <Metric label="阻塞工作流" value={d.execution.workflowBlocked} info="可从工作流继续" symbol="⌁"/>
+      <Metric label="人工催促次数" value="不可观测" info="MCP 无法读取用户对话消息，不虚构统计" symbol="·"/>
+    </div>}
+    {d.execution&&Object.keys(d.execution.failureCategories).length>0&&<Panel title="可观察失败原因" hint="仅来自工具执行事件中的错误类别，不代表根因或用户目标失败">
+      {Object.entries(d.execution.failureCategories).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>
+        <div key={reason} className="list-row"><strong className="grow">{reason}</strong><span>{count} 次</span></div>)}
+    </Panel>}
     <div className="columns">
       <Panel title="执行节点" hint="主机运行状态" extra={<button className="link" onClick={()=>go("nodes")}>查看全部 →</button>}>
         {d.nodes.map(n=><div className="list-row" key={n.id}><span className="round-symbol">⌘</span>
@@ -231,21 +247,24 @@ const current=d.workflows.find(x=>x.id===id)??d.workflows[0];
     <Panel title="检查点" hint="只读 · 通过 GPT 对话继续执行">
       {current?<div className="checkpoint"><Badge value={current.status}/><h2>{current.title}</h2>
         <p>{current.goal}</p><code className="id-block">{current.id}</code>
+        <div className="checkpoint-block"><small>原始验收条件（需验证）</small><ol>{current.acceptanceCriteria.map((x,i)=><li key={i}>{x}</li>)}</ol></div>
         <div className="checkpoint-block"><small>当前阶段</small><strong>{current.phase||"—"}</strong><p>{current.summary}</p></div>
         <div className="checkpoint-block"><small>下一步</small>{current.nextSteps.length
           ?<ol>{current.nextSteps.map((x,i)=><li key={i}>{x}</li>)}</ol>:<p>没有剩余步骤</p>}</div>
         {current.blockers.length>0&&<div className="checkpoint-block"><small>阻塞事项</small><ul>{current.blockers.map((x,i)=><li key={i}>{x}</li>)}</ul></div>}
+        <div className="checkpoint-block"><small>持久任务 ID</small><p>{current.taskIds.join(", ")||"无"}</p></div>
+        <div className="checkpoint-block"><small>自报验证证据（非独立证明）</small><p>{current.checks.join("；")||"无"}</p></div>
         <p className="footnote">复制工作流 ID，在普通 GPT 对话中要求继续该任务即可。</p>
       </div>:<Blank>选择一个工作流查看</Blank>}
     </Panel>
-  </div>;
+   </div>;
 }
 function Tasks({d}:{d:Snapshot}) {
   const names=new Map(d.nodes.map(x=>[x.id,x.alias]));
   const processes=new Map((d.activeTaskProcesses??[]).map(x=>[x.unit,x]));
   const [showHistory,setShowHistory]=useState(false);
   const visible=showHistory?d.tasks:d.tasks.filter(t=>t.status==="working"||t.status==="input_required");
-  return <Panel title="持久任务监控" hint="默认展示正在运行的任务；索引状态与真实 systemd 进程分开显示">
+  return <div className="stack"><Panel title="持久任务监控" hint="本机任务文件与 systemd 进程分开确认；远程任务仅展示已证实状态">
     <p><strong>本机活动任务服务：</strong> {d.activeTaskUnits===undefined||d.activeTaskUnits===null?"无法读取":d.activeTaskUnits.length+" 个"}</p>
     {d.activeTaskUnits?.map(unit=>{const process=processes.get(unit);return <div className="list-row" key={unit}>
       <span className="online-dot"/><code>{unit}</code>
@@ -255,13 +274,23 @@ function Tasks({d}:{d:Snapshot}) {
     </div>;})}
     <p>已登记运行中任务 {visible.filter(t=>t.status==="working"||t.status==="input_required").length} 项（以本机任务状态文件为准） ·
       <button onClick={()=>setShowHistory(v=>!v)}>{showHistory?"隐藏历史任务":"查看全部索引与历史"}</button></p>
-    <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>状态</th><th>Run ID</th><th>创建时间</th></tr></thead>
+    <div className="table-scroll"><table><thead><tr><th>任务 ID</th><th>执行节点</th><th>状态</th><th>PID / 退出码</th><th>Run ID</th><th>最近输出</th><th>创建时间</th></tr></thead>
     <tbody>{visible.map(t=><tr key={t.id}><td><code title={t.id}>{t.id.slice(0,23)}…</code></td>
-      <td>{names.get(t.nodeId)??t.nodeId}</td><td>{t.status==="unknown"?"未确认":t.status}</td>
-      <td><code>{t.runId??"—"}</code></td><td>{time(t.createdAt)}</td></tr>)}</tbody></table></div>
+      <td>{names.get(t.nodeId)??t.nodeId}</td><td>{t.status==="unknown"?"未确认":t.status==="remote_unverified"?"远程待核验":t.status==="stale_unverified"?"心跳过期 / 待核验":t.status}</td>
+      <td>{t.childPid??(t.exitCode!==undefined?`exit ${t.exitCode}`:"—")}</td>
+      <td><code>{t.runId??"—"}</code></td><td>{time(t.lastActivityAt)}</td><td>{time(t.createdAt)}</td></tr>)}</tbody></table></div>
     {!visible.length&&<Blank>{showHistory?"暂无任务索引":"没有登记为运行中的任务"}</Blank>}
     <p className="footnote">任务记录不是进程存活的证据；实际活动进程以上方 systemd 状态为准。远程节点需单独查询。</p>
-  </Panel>;
+  </Panel>
+   <Panel title="执行事件时间线" hint="只读诊断事件，按记录时间倒序；点击 Run ID 可到诊断中心查日志">
+    {(d.timeline??[]).slice(0,45).map((event,i)=><div className="list-row" key={event.at+"-"+i}>
+      <span className="round-symbol">⌁</span><div className="grow">
+        <strong>{event.kind}</strong>
+        <small>{event.taskId??event.runId??event.nodeId??"无任务关联"} · {time(event.at)}</small>
+      </div><small>{event.errorCategory??event.outcome??(event.exitCode!==undefined?`exit ${event.exitCode}`:"—")}</small>
+    </div>)}
+    {!d.timeline?.length&&<Blank>暂无带时间戳的执行事件</Blank>}
+   </Panel></div>;
 }
 function Nodes({d}:{d:Snapshot}) {
   return <div className="node-grid">{d.nodes.map(n=><article key={n.id} className="node-card">

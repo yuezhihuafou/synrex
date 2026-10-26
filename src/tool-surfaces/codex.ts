@@ -6,6 +6,7 @@ import { waitForTaskChange } from "../durable-task-wait.js";
 import type { TaskWaitResult } from "../durable-task-wait.js";
 import { finalBarrierReceipt } from "../task-final-barrier.js";
 import { EXECUTION_OUTCOME_LOOP, FAILURE_CONTINUATION_HINT } from "../execution-outcome-loop.js";
+import { assessFailure, failureGuidance } from "../execution-failures.js";
 import { ArchitectureModelManager } from "../architecture-model.js";
 import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
@@ -213,7 +214,9 @@ function processIsError(snapshot: ProcessSnapshot): boolean {
 
 function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) {
   const failed = processIsError(snapshot);
-  const result = processResult(snapshot) + (failed ? `\n${FAILURE_CONTINUATION_HINT}` : "");
+  const classification = failed ? assessFailure({ exitCode: snapshot.exitCode, error: snapshot.output }) : undefined;
+  const result = processResult(snapshot)
+    + (failed ? `\n${FAILURE_CONTINUATION_HINT} ${failureGuidance(classification!)}` : "");
   const isTask = Boolean(snapshot.taskId && snapshot.running);
   const content = [textBlock(result)];
   const terminal = !snapshot.running;
@@ -234,6 +237,7 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
       ...(terminal && snapshot.exitCode !== undefined ? { exitCode: snapshot.exitCode } : {}),
+      ...(classification ? { failure: classification } : {}),
       ...(terminal && snapshot.signal ? { signal: snapshot.signal } : {}),
       ...(snapshot.running && !isTask ? { nextPollMs: recommendedPollMs(snapshot) } : {}),
       ...(snapshot.outputTruncated ? { outputTruncated: true } : {}),
@@ -262,11 +266,12 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
     : view.status;
   const terminalExit = view.result?.exitCode;
   const failed = view.status === "failed" || view.result?.isError === true;
+  const classification = failed ? assessFailure({ exitCode: view.result?.exitCode }) : undefined;
   const result = `task=${view.taskId} ${state} rev=${view.revision}`
     + (view.pollIntervalMs ? ` poll=${view.pollIntervalMs}ms` : "")
     + (terminalExit !== null && terminalExit !== undefined ? ` exit=${terminalExit}` : "")
     + ` log=${view.runId}`
-    + (failed ? `\n${FAILURE_CONTINUATION_HINT}` : "");
+    + (failed ? `\n${FAILURE_CONTINUATION_HINT} ${failureGuidance(classification!)}` : "");
   return {
     content: [textBlock(result)],
     isError: failed,
@@ -284,6 +289,7 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
         ...(view.result.signal ? { signal: view.result.signal } : {}),
       } : {}),
       ...(view.error ? { error: { code: view.error.code, message: view.error.message } } : {}),
+      ...(classification ? { failure: classification } : {}),
       ...(options.detail ? { detail: view } : {}),
     },
   };

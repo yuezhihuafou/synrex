@@ -229,6 +229,9 @@ export class CodingWorkflowStore {
       if (input.status === "completed" && input.checkpoint.checks.length === 0) {
         throw new Error("Cannot mark workflow completed without a recorded verification check. A checkpoint or partial result is not proof that acceptance criteria passed.");
       }
+      if (input.status === "completed" && (input.checkpoint.nextSteps.length || input.checkpoint.blockers.length || input.checkpoint.taskIds.length)) {
+        throw new Error("Cannot complete workflow with pending steps, blockers, or unresolved task IDs. Verify the original goal first.");
+      }
       const revision = current.revision + 1;
       const now = new Date().toISOString();
       const payload = JSON.stringify(input.checkpoint);

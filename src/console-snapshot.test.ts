@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { openDatabase } from "./db/client.js";
@@ -50,6 +51,73 @@ test("console uses existing database read-only and does not invent process statu
   assert.equal(snapshot.activeTaskProcesses?.length ?? 0, snapshot.activeTaskUnits?.length ?? 0);
   assert.equal(snapshot.tasks.length, 0);
   assert.equal(snapshot.memory.episodes, 0);
+  assert.equal(snapshot.execution.manualReminders, null, "cannot count ChatGPT user interventions from server telemetry");
+  assert.equal(snapshot.execution.selfReportedCompletionRate, null, "no terminal workflow denominator");
+  assert.equal(snapshot.workflows[0]?.acceptanceCriteria[0], "All tests pass");
+});
+
+test("console reports observed failure timeline and never calls remote tasks running without owner evidence", async(t) => {
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-evidence-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const db=openDatabase(dir);
+  try{
+    for(const [id,kind] of [["node_local","local"],["node_gateway","remote"]] as const){
+      db.sqlite.prepare(`insert into execution_nodes
+        (id,kind,alias,protocol_major,protocol_minor,health,platform_json,capabilities_json,created_at,last_seen_at)
+        values (?,?,?,?,?,?,?,?,?,?)`).run(id,kind,kind,1,1,"online",'{"os":"linux","arch":"x64"}',
+          '{"toolMode":"codex","features":[]}',"2026-10-26T00:00:00Z","2026-10-26T00:00:00Z");
+    }
+    db.sqlite.prepare(`insert into workspace_routes(workspace_id,node_id,local_workspace_id,created_at,last_used_at)
+      values ('ws_rem','node_gateway','ws_local','2026-10-26','2026-10-26')`).run();
+    db.sqlite.prepare(`insert into task_routes(task_id,node_id,workspace_id,local_task_id,run_id,created_at,last_used_at)
+      values ('task_remote','node_gateway','ws_rem','task_local','run_20261026123456_aaaa','2026-10-26','2026-10-26')`).run();
+  } finally{db.close();}
+  const events=new DiagnosticTrace(dir);
+  events.record("task_finished",{ taskId:"task_id",runId:"run_20261026123456_aaaa",exitCode:7 });
+  events.record("tool_execution_finished",{requestId:"r_1",tool:"exec_command",outcome:"error",errorCategory:"command_exit",exitCode:7});
+  const snapshot=readConsoleSnapshot(dir,"release");
+  assert.equal(snapshot.tasks[0]?.status,"remote_unverified");
+  assert.equal(snapshot.tasks[0]?.statusSource,"unavailable");
+  assert.equal(snapshot.execution.confirmedTaskFailures,1);
+  assert.equal(snapshot.execution.confirmedTaskSuccesses,0);
+  assert.equal(snapshot.execution.failureCategories.command_exit,1);
+  assert.ok(snapshot.timeline.some(e=>e.kind==="task_finished"&&e.exitCode===7));
+  assert.equal(snapshot.execution.manualReminders,null);
+});
+
+test("console exposes local task output time and PID only from a verified local task file", async(t)=>{
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-local-task-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const id="run_20261026123456_abcd";
+  const runRoot=path.join(dir,"runs");
+  const runDir=path.join(runRoot,"2026-10-26",id);
+  await mkdir(runDir,{recursive:true});
+  const now=new Date().toISOString();
+  const lastActivity=new Date(Date.now()-5000).toISOString();
+  await writeFile(path.join(runDir,"task.json"),JSON.stringify({status:"working",
+    lastUpdatedAt:now,lastActivityAt:lastActivity,childPid:43210,exitCode:null}));
+  const previous=process.env.DEVSPACE_COMPACT_RUN_ROOT;
+  process.env.DEVSPACE_COMPACT_RUN_ROOT=runRoot;
+  t.after(()=>{if(previous===undefined)delete process.env.DEVSPACE_COMPACT_RUN_ROOT;
+    else process.env.DEVSPACE_COMPACT_RUN_ROOT=previous;});
+  const db=openDatabase(dir);
+  try{
+    db.sqlite.prepare(`insert into execution_nodes
+      (id,kind,alias,protocol_major,protocol_minor,health,platform_json,capabilities_json,created_at,last_seen_at)
+      values (?,?,?,?,?,?,?,?,?,?)`).run("node_local","local","swy1",1,1,"online",
+        '{"os":"linux","arch":"x64"}','{"toolMode":"codex","features":[]}',now,now);
+    db.sqlite.prepare(`insert into workspace_routes(workspace_id,node_id,local_workspace_id,created_at,last_used_at)
+      values ('ws_local','node_local','ws_local',?,?)`).run(now,now);
+    db.sqlite.prepare(`insert into task_routes(task_id,node_id,workspace_id,local_task_id,run_id,created_at,last_used_at)
+      values ('task_local','node_local','ws_local','task_local',?,?,?)`).run(id,now,now);
+  }finally{db.close();}
+  const snapshot=readConsoleSnapshot(dir,"local");
+  const task=snapshot.tasks[0]!;
+  assert.equal(task.status,"working");
+  assert.equal(task.statusSource,"local_file");
+  assert.equal(task.childPid,43210);
+  assert.equal(task.lastActivityAt,lastActivity);
+  assert.equal(task.lastUpdatedAt,now);
 });
 
 test("console distinguishes historical detached dispatch receipts from verified success", async (t) => {

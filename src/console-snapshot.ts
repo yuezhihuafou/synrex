@@ -19,7 +19,7 @@ interface NodeRow {
 }
 interface WorkflowRow {
   workflow_id: string; workspace_root: string; title: string; goal: string;
-  status: string; revision: number; checkpoint_json: string; updated_at: string;
+  status: string; revision: number; checkpoint_json: string; acceptance_json: string; updated_at: string;
 }
 interface TaskRow {
   task_id: string; node_id: string; workspace_id: string; run_id: string | null; created_at: string;
@@ -36,12 +36,19 @@ export interface ConsoleSnapshot {
   workflows: Array<{
     id: string; title: string; goal: string; workspace: string; status: string;
     revision: number; phase: string; summary: string; nextSteps: string[]; blockers: string[];
-    taskIds: string[]; updatedAt: string;
+    taskIds: string[]; checks: string[]; acceptanceCriteria: string[]; updatedAt: string;
   }>;
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
-  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
+  tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?: number; exitCode?: number | null; statusSource: "local_file" | "unavailable" }>;
   activeTaskUnits: string[] | null;
   activeTaskProcesses: Array<{ unit: string; pid: number | null; memoryBytes: number | null; cpuTimeMs: number | null }> | null;
+  execution: {
+    workflowCompleted: number; workflowBlocked: number; workflowActive: number; workflowCancelled: number;
+    selfReportedCompletionRate: number | null; confirmedTaskSuccesses: number; confirmedTaskFailures: number;
+    failureCategories: Record<string, number>; manualReminders: null;
+    observedWindow: "recent_diagnostic_events"; taskSourceCoverage: "local_only";
+  };
+  timeline: Array<{at:string;kind:string;taskId?:string;runId?:string;nodeId?:string;errorCategory?:string;exitCode?:number;outcome?:string}>;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
   usage: ReturnType<typeof summarizeConsoleUsage>;
   diagnostics: {
@@ -94,20 +101,23 @@ function strings(value: unknown, max = 8): string[] {
 function count(db: Database.Database, statement: string): number {
   return Number((db.prepare(statement).get() as { n: number }).n);
 }
-function localTaskStatus(runId: string | null): { status: string; lastUpdatedAt?: string } {
-  if (!runId || !/^run_[0-9]{14}_[a-z0-9]+$/.test(runId)) return { status: "unknown" };
+function localTaskStatus(runId: string | null): { status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?: number; exitCode?: number | null; statusSource: "local_file" | "unavailable" } {
+  if (!runId || !/^run_[0-9]{14}_[a-z0-9]+$/.test(runId)) return { status: "unknown", statusSource: "unavailable" };
   const root = process.env.DEVSPACE_COMPACT_RUN_ROOT || path.join(homedir(), ".local", "share", "devspace", "runs");
   const day = runId.slice(4,8)+"-"+runId.slice(8,10)+"-"+runId.slice(10,12);
   try {
     const file = path.join(root,day,runId,"task.json");
-    if (!existsSync(file)) return { status: "unknown" };
-    const state = JSON.parse(readFileSync(file,"utf8")) as {status?:string;lastUpdatedAt?:string};
-    if (!["working","input_required","completed","failed","cancelled"].includes(state.status??"")) return {status:"unknown"};
+    if (!existsSync(file)) return { status: "unknown", statusSource: "unavailable" };
+    const state = JSON.parse(readFileSync(file,"utf8")) as {status?:string;lastUpdatedAt?:string;lastActivityAt?:string;childPid?:number;exitCode?:number|null};
+    if (!["working","input_required","completed","failed","cancelled"].includes(state.status??"")) return {status:"unknown",statusSource:"unavailable"};
+    const evidence = {statusSource:"local_file" as const, lastUpdatedAt:state.lastUpdatedAt, lastActivityAt:state.lastActivityAt,
+      ...(Number.isSafeInteger(state.childPid) && state.childPid!>0 ? { childPid:state.childPid } : {}),
+      ...(typeof state.exitCode==="number" ? {exitCode:state.exitCode} : {})};
     if (state.status==="working" && (!state.lastUpdatedAt || Date.now()-Date.parse(state.lastUpdatedAt)>120000)) {
-      return {status:"stale_unverified",lastUpdatedAt:state.lastUpdatedAt};
+      return {status:"stale_unverified", ...evidence};
     }
-    return {status:state.status!,lastUpdatedAt:state.lastUpdatedAt};
-  } catch { return {status:"unknown"}; }
+    return {status:state.status!,...evidence};
+  } catch { return {status:"unknown",statusSource:"unavailable"}; }
 }
 function readActiveTaskUnits(): string[] | null {
   if (process.platform !== "linux") return null;
@@ -186,10 +196,12 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
           fingerprint: asText(runtime.buildFingerprint) || null,
         };
       }),
-      tasks: (db.prepare("select task_id, node_id, workspace_id, run_id, created_at from task_routes order by created_at desc limit 30").all() as TaskRow[])
+      tasks: (db.prepare("select task_id, node_id, workspace_id, run_id, created_at from task_routes order by created_at desc limit 100").all() as TaskRow[])
         .map((row) => ({
           id: row.task_id, nodeId: row.node_id, workspaceId: row.workspace_id,
-          runId: row.run_id, createdAt: row.created_at, ...localTaskStatus(row.run_id),
+          runId: row.run_id, createdAt: row.created_at,
+          ...((rows.find(n=>n.id===row.node_id)?.kind==="local")
+            ? localTaskStatus(row.run_id) : {status:"remote_unverified",statusSource:"unavailable" as const}),
         })),
       memory: {
         episodes: count(db, "select count(*) as n from learning_episodes"),
@@ -210,7 +222,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
     };
   });
   const workflows = readOnly(workflowDb, [] as ConsoleSnapshot["workflows"], (db) =>
-    (db.prepare("select workflow_id, workspace_root, title, goal, status, revision, checkpoint_json, updated_at from coding_workflows order by updated_at desc limit 40").all() as WorkflowRow[])
+    (db.prepare("select workflow_id, workspace_root, title, goal, status, revision, checkpoint_json, acceptance_json, updated_at from coding_workflows order by updated_at desc limit 40").all() as WorkflowRow[])
       .map((row) => {
         const checkpoint = parseObject(row.checkpoint_json);
         return {
@@ -219,7 +231,9 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
           revision: row.revision, phase: asText(checkpoint.phase),
           summary: asText(checkpoint.summary),
           nextSteps: strings(checkpoint.nextSteps), blockers: strings(checkpoint.blockers),
-          taskIds: strings(checkpoint.taskIds), updatedAt: row.updated_at,
+          taskIds: strings(checkpoint.taskIds), checks: strings(checkpoint.checks, 6),
+          acceptanceCriteria: strings(JSON.parse(row.acceptance_json), 12),
+          updatedAt: row.updated_at,
         };
       }),
   );
@@ -253,6 +267,23 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       state:runningTasks?"task_running":Date.now()-Date.parse(recent.lastAt)<30000?"recent_mcp_activity":"no_recent_mcp_activity",
       requests:ordered.slice(0,80).map(r=>({requestId:r.requestId,tool:r.tool,lastAt:r.lastAt,taskId:r.taskId,runId:r.runId,classification:r.classification}))};
   }).sort((a,b)=>b.lastAt.localeCompare(a.lastAt)).slice(0,40);
+  const workflowCompleted=workflows.filter(w=>w.status==="completed").length;
+  const workflowBlocked=workflows.filter(w=>w.status==="blocked").length;
+  const workflowActive=workflows.filter(w=>w.status==="active").length;
+  const workflowCancelled=workflows.filter(w=>w.status==="cancelled").length;
+  const terminalWorkflows=workflowCompleted+workflowCancelled;
+  const finishedTasks=events.filter(e=>e.event==="task_finished" && typeof e.exitCode==="number");
+  const failureCategories:Record<string,number>={};
+  for(const event of events.filter(e=>e.event==="tool_execution_finished" && e.outcome==="error")){
+    const kind=event.errorCategory??"unknown";
+    failureCategories[kind]=(failureCategories[kind]??0)+1;
+  }
+  const timeline=events.filter(e=>["task_created","task_spawned","task_first_output","task_finished",
+    "node_request_timeout","node_late_completion","mcp_closed_early","tool_execution_finished"].includes(e.event))
+    .slice(-180).reverse().map(e=>({at:e.ts,kind:e.event,...(e.taskId?{taskId:e.taskId}:{}),
+      ...(e.runId?{runId:e.runId}:{}),...(e.nodeId?{nodeId:e.nodeId}:{}),
+      ...(e.errorCategory?{errorCategory:e.errorCategory}:{}),
+      ...(e.exitCode!==undefined?{exitCode:e.exitCode}:{}),...(e.outcome?{outcome:e.outcome}:{})}));
   const runtime = [...events].reverse().find(e => e.event === "runtime_sampled");
   const network = [...events].reverse().find(e => e.event === "network_sampled");
   const collector = [...events].reverse().find(e => e.event === "collector_sampled");
@@ -261,6 +292,12 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
     generatedAt: new Date().toISOString(),
     service: { status: "online", release, diagnosticsBoundBytes: 2 * DIAGNOSTIC_FILE_LIMIT },
     nodes, workflows, tasks, memory, conversationSessions, activeTaskUnits,
+    execution: { workflowCompleted, workflowBlocked, workflowActive, workflowCancelled,
+      selfReportedCompletionRate:terminalWorkflows?Math.round(workflowCompleted/terminalWorkflows*100):null,
+      confirmedTaskSuccesses:finishedTasks.filter(e=>e.exitCode===0).length,
+      confirmedTaskFailures:finishedTasks.filter(e=>e.exitCode!==0).length,
+      failureCategories, manualReminders:null,observedWindow:"recent_diagnostic_events", taskSourceCoverage:"local_only" },
+    timeline,
     activeTaskProcesses: readActiveTaskProcesses(activeTaskUnits),
     usage: summarizeConsoleUsage(allEvents, usageEpisodes, Date.now(), {
       diagnostics: allEvents.length >= 20000,

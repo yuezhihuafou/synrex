@@ -6,6 +6,7 @@ import { withCodingWorkflowStore, type CodingWorkflowCheckpoint } from "./coding
 import { LearningStore } from "./learning-store.js";
 import { textBlock } from "./tool-surfaces/shared.js";
 import { workspaceIdDescription } from "./tool-surfaces/types.js";
+import { workflowHandoffText } from "./workflow-handoff.js";
 
 const workflowId = z.string().regex(/^wf_[a-f0-9]{24}$/);
 const shortText = z.string().trim().min(1).max(4000);
@@ -63,7 +64,7 @@ export function registerCodingWorkflowTools(input: {
       });
     });
     return {
-      content: [textBlock(`Workflow ${result.workflowId} (${result.status}, revision ${result.revision}). Goal: ${result.goal}. Acceptance: ${result.acceptanceCriteria.join("; ")}. Current: ${result.checkpoint.summary}. Next: ${result.checkpoint.nextSteps.join("; ") || "inspect and plan"}.`) ],
+      content: [textBlock(workflowHandoffText(result, null))],
       structuredContent: { ...result },
     };
   });
@@ -102,8 +103,8 @@ export function registerCodingWorkflowTools(input: {
     })() : undefined;
     return {
       content: [textBlock(handoff && workflow
-        ? `Workflow handoff: ${workflow.workflowId} revision ${workflow.revision}. Goal: ${workflow.goal}. Acceptance: ${workflow.acceptanceCriteria.join("; ")}. Git matches saved checkpoint: ${String(handoff.checkpointGitMatchesCurrent)}. Inspect ${handoff.taskIdsToInspect.length} referenced task receipt(s) before retrying; checkpoint checks are self-reported. Next: ${workflow.checkpoint.nextSteps.join("; ") || "none"}.`
-        : JSON.stringify(result))],
+        ? workflowHandoffText(workflow, handoff.checkpointGitMatchesCurrent)
+        : ("workflows" in result ? result.workflows?.map(w=>`${w.workflowId} ${w.status} rev=${w.revision}: ${w.goal.slice(0, 100)}; next=${(w.checkpoint.nextSteps[0]??"inspect original goal").slice(0, 100)}; tasks=${w.checkpoint.taskIds.slice(0,3).join(",")}`).join("\n") || "No unfinished workflows." : JSON.stringify(result)))],
       structuredContent: { ...result, ...(handoff ? { handoff } : {}) },
     };
   });

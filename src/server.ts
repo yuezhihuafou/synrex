@@ -557,7 +557,7 @@ function registerMcpSurface(
           title: workflow.title,
           status: workflow.status as "active" | "blocked",
           revision: workflow.revision,
-          summary: workflow.checkpoint.summary,
+          summary: `${workflow.checkpoint.summary.slice(0, 100)}; next=${(workflow.checkpoint.nextSteps[0] ?? "inspect acceptance").slice(0, 95)}; tasks=${workflow.checkpoint.taskIds.slice(0, 3).join(",") || "none"}`,
         })),
       );
       const preloadSubagents = config.subagents.enabled
@@ -661,7 +661,7 @@ function registerMcpSurface(
               ? `Currently ACTIVE durable commands (${allActiveTasks.length}): ${allActiveTasks.slice(0, 8).map((task) => `${task.taskId}=${task.status}`).join(", ")}. Inspect these handles before retrying or cancelling work.`
               : undefined,
             resumableWorkflows.length > 0
-              ? `Resumable coding workflows: ${resumableWorkflows.map((item) => `${item.workflowId}(${item.status},rev=${item.revision}): ${item.title}`).join("; ")}. Use workflow_open with workflowId to resume, and check actual code and test evidence.`
+              ? `Resumable coding workflows: ${resumableWorkflows.map((item) => `${item.workflowId}(${item.status},rev=${item.revision}): ${item.title.slice(0, 48)}; ${item.summary}`).join("; ")}. Resume by workflowId; verify original goal, tasks, current Git and test evidence before acting.`
               : undefined,
             instruction,
           ].filter(Boolean).join("\n"),

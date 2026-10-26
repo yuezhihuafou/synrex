@@ -300,6 +300,25 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
   assert.match(changedHandoff.liveGit.gitStatus ?? "", /changed-after-checkpoint.txt/);
 });
 
+test("workflow listing uses bounded concise model text with full structured evidence retained", async(t)=>{
+  const context=await fixture(t,{toolMode:"codex",git:true});
+  const workspaceId=structuredContent(await callOpen(context.client,context.project)).workspaceId as string;
+  for(let i=0;i<8;i++){
+    const created=await context.client.callTool({name:"workflow_open",arguments:{
+      workspaceId, title:`Task ${i}`,goal:`Implement ${i} ${"specific requirement ".repeat(15)}`,
+      acceptanceCriteria:["real output validated","regression passed"],constraints:["no unsafe retries"]
+    }});
+    assert.notEqual(created.isError,true);
+  }
+  const listed=await context.client.callTool({name:"workflow_status",arguments:{workspaceId}});
+  const full=JSON.stringify(structuredContent(listed));
+  const preview=contentText(listed);
+  assert.match(preview,/next=/);
+  assert.ok(Buffer.byteLength(preview)<Buffer.byteLength(full)/2,
+    "model-facing response must be substantially smaller than full persisted records");
+  assert.equal((structuredContent(listed).workflows as unknown[]).length,8);
+});
+
 test("project tool exposes a typed stable schema while retaining legacy args", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const tools = await context.client.listTools();

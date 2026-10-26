@@ -69,6 +69,11 @@ test("coding workflow survives store re-open, records evidence and rejects stale
     checkpoint: { ...resumed.checkpoint, summary: "Claimed success without evidence", nextSteps: [], blockers: [], taskIds: [], checks: [] },
   }), /without a recorded verification check/);
   assert.equal(store.getRequired(created.workflowId, project).revision, 1, "a rejected completion must leave workflow state untouched");
+  assert.throws(() => store.checkpoint(project, {
+    workflowId: created.workflowId, expectedRevision: 1, status: "completed",
+    checkpoint: { ...resumed.checkpoint, checks: ["pnpm typecheck: exit 0"] },
+  }), /pending steps, blockers, or unresolved task IDs/);
+  assert.equal(store.getRequired(created.workflowId, project).revision, 1);
   const done = store.checkpoint(project, {
     workflowId: created.workflowId,
     expectedRevision: 1,
