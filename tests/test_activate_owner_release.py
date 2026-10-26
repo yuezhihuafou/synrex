@@ -76,6 +76,12 @@ class ActivationTests(unittest.TestCase):
             self.assertIn("already running", result.stderr)
         self.assertFalse(self.calls.exists())
 
+    def test_configured_but_missing_ingress_control_blocks_before_restart(self):
+        result = self.activate(SYNREX_INGRESS_CONTROL_SOCKET=str(self.root / "not-running.sock"))
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("controller is unavailable", result.stderr)
+        self.assertFalse(self.calls.exists())
+
     def test_failed_activation_restores_previous_dropin(self):
         dropin = self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf"
         dropin.parent.mkdir(parents=True)
