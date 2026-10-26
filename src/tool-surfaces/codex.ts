@@ -5,7 +5,7 @@ import { compactPreview } from "../compact-runtime/output-policy.js";
 import { waitForTaskChange } from "../durable-task-wait.js";
 import type { TaskWaitResult } from "../durable-task-wait.js";
 import { finalBarrierReceipt } from "../task-final-barrier.js";
-import { EXECUTION_OUTCOME_LOOP } from "../execution-outcome-loop.js";
+import { EXECUTION_OUTCOME_LOOP, FAILURE_CONTINUATION_HINT } from "../execution-outcome-loop.js";
 import { ArchitectureModelManager } from "../architecture-model.js";
 import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
@@ -212,13 +212,14 @@ function processIsError(snapshot: ProcessSnapshot): boolean {
 }
 
 function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) {
-  const result = processResult(snapshot);
+  const failed = processIsError(snapshot);
+  const result = processResult(snapshot) + (failed ? `\n${FAILURE_CONTINUATION_HINT}` : "");
   const isTask = Boolean(snapshot.taskId && snapshot.running);
   const content = [textBlock(result)];
   const terminal = !snapshot.running;
   return {
     content,
-    isError: processIsError(snapshot),
+    isError: failed,
     structuredContent: {
       result,
       ...(snapshot.sessionId !== undefined ? { sessionId: snapshot.sessionId } : {}),
@@ -260,13 +261,15 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
     ? `completed${view.result?.isError ? " error" : ""}`
     : view.status;
   const terminalExit = view.result?.exitCode;
+  const failed = view.status === "failed" || view.result?.isError === true;
   const result = `task=${view.taskId} ${state} rev=${view.revision}`
     + (view.pollIntervalMs ? ` poll=${view.pollIntervalMs}ms` : "")
     + (terminalExit !== null && terminalExit !== undefined ? ` exit=${terminalExit}` : "")
-    + ` log=${view.runId}`;
+    + ` log=${view.runId}`
+    + (failed ? `\n${FAILURE_CONTINUATION_HINT}` : "");
   return {
     content: [textBlock(result)],
-    isError: view.status === "failed",
+    isError: failed,
     structuredContent: {
       result,
       taskId: view.taskId,

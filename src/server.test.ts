@@ -24,6 +24,7 @@ import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 import { expectedToolNames } from "./tool-surface-manifest.js";
 import { EXECUTION_OUTCOME_LOOP } from "./execution-outcome-loop.js";
+import { FAILURE_CONTINUATION_HINT } from "./execution-outcome-loop.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,9 +45,9 @@ test("real MCP initialize delivers the goal-completion rule in both tool modes",
       const instruction = context.client.getInstructions() ?? "";
       assert.ok(instruction.includes(EXECUTION_OUTCOME_LOOP), `${mode} MCP initialize must deliver the rule`);
       assert.equal(instruction.split(EXECUTION_OUTCOME_LOOP).length, 2, "avoid duplicated instructions");
-      assert.match(instruction, /If unmet, inspect the actual failure/);
+      assert.match(instruction, /default to the NEXT authorized action/);
       assert.match(instruction, /concrete external blocker or missing authority/);
-      assert.match(instruction, /A completed tool call.*is not goal completion/);
+      assert.match(instruction, /stop condition is the original observable acceptance criteria/);
     });
   }
 });
@@ -285,6 +286,27 @@ test("codex process failures expose MCP error state and exit code", async (t) =>
   assert.equal(response.isError, true);
   assert.equal(structuredContent(response).exitCode, 7);
   assert.match(contentText(response), /expected-error/);
+  assert.match(contentText(response), /goal is still open/);
+  assert.equal(structuredContent(response).result, contentText(response));
+});
+
+test("failed durable command is surfaced as error with a repair-next hint", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const launched = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "sleep 2; printf 'expected-build-error\\n'; exit 13" },
+  });
+  const taskId = structuredContent(launched).taskId as string;
+  assert.match(taskId, /^task_[a-f0-9]{16}$/);
+  const terminal = await context.client.callTool({ name: "task_wait", arguments: { workspaceId, taskId, final: true } });
+  assert.equal(structuredContent(terminal).status, "completed");
+  assert.equal(structuredContent(terminal).exitCode, 13);
+  assert.equal(terminal.isError, true, "completed shell task with nonzero exit must not look successful");
+  assert.match(contentText(terminal), /goal is still open/);
+  assert.match(contentText(terminal), /fix or alternative/);
+  const observed = await context.client.callTool({ name: "task_get", arguments: { workspaceId, taskId } });
+  assert.equal(observed.isError, true);
+  assert.ok(contentText(observed).includes(FAILURE_CONTINUATION_HINT));
 });
 
 test("codex process tools keep wait and output budgets server-managed", async (t) => {
