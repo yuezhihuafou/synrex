@@ -44,7 +44,7 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_open", {
     title: "Open coding workflow",
-    description: "Create a persistent GPT-led coding workflow from a goal and acceptance criteria, or resume it by workflowId in a later conversation. Stores intent and progress locally; does not invoke Codex/API models.",
+    description: "Create a persistent GPT-led coding workflow from a goal and acceptance criteria, or resume it by workflowId in a later conversation. The goal, not a checkpoint or tool call, defines completion. Stores intent and progress locally; does not invoke Codex/API models.",
     inputSchema: openInput,
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, async ({ workspaceId, workflowId: requestedId, requestKey, title, goal, acceptanceCriteria, constraints }) => {
@@ -62,7 +62,7 @@ export function registerCodingWorkflowTools(input: {
       });
     });
     return {
-      content: [textBlock(`Workflow ${result.workflowId} (${result.status}, revision ${result.revision}). Goal: ${result.goal}. Current: ${result.checkpoint.summary}. Next: ${result.checkpoint.nextSteps.join("; ") || "inspect and plan"}.`) ],
+      content: [textBlock(`Workflow ${result.workflowId} (${result.status}, revision ${result.revision}). Goal: ${result.goal}. Acceptance: ${result.acceptanceCriteria.join("; ")}. Current: ${result.checkpoint.summary}. Next: ${result.checkpoint.nextSteps.join("; ") || "inspect and plan"}.`) ],
       structuredContent: { ...result },
     };
   });
@@ -101,7 +101,7 @@ export function registerCodingWorkflowTools(input: {
     })() : undefined;
     return {
       content: [textBlock(handoff && workflow
-        ? `Workflow handoff: ${workflow.workflowId} revision ${workflow.revision}. Git matches saved checkpoint: ${String(handoff.checkpointGitMatchesCurrent)}. Inspect ${handoff.taskIdsToInspect.length} referenced task receipt(s) before retrying; checkpoint checks are self-reported. Next: ${workflow.checkpoint.nextSteps.join("; ") || "none"}.`
+        ? `Workflow handoff: ${workflow.workflowId} revision ${workflow.revision}. Goal: ${workflow.goal}. Acceptance: ${workflow.acceptanceCriteria.join("; ")}. Git matches saved checkpoint: ${String(handoff.checkpointGitMatchesCurrent)}. Inspect ${handoff.taskIdsToInspect.length} referenced task receipt(s) before retrying; checkpoint checks are self-reported. Next: ${workflow.checkpoint.nextSteps.join("; ") || "none"}.`
         : JSON.stringify(result))],
       structuredContent: { ...result, ...(handoff ? { handoff } : {}) },
     };
@@ -109,7 +109,7 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_checkpoint", {
     title: "Save coding workflow checkpoint",
-    description: "Persist a verified milestone, self-reported test evidence, pending durable task IDs and next steps. Use after significant coding phases and before ending an unfinished turn. expectedRevision rejects stale-conversation overwrites. Does not execute model turns.",
+    description: "Save progress and checks for a long-running workflow. Complete only after original acceptance criteria pass: at least one check, no pending work. Checks are self-reported. Use before handing off unfinished work; expectedRevision prevents stale overwrites.",
     inputSchema: {
       workspaceId: z.string().describe(workspaceIdDescription),
       workflowId,

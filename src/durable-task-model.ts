@@ -62,6 +62,8 @@ export interface DurableTaskView {
   statusMessage?: string;
   createdAt: string;
   lastUpdatedAt: string;
+  /** Last child stdout/stderr activity, distinct from runner state heartbeats. */
+  lastActivityAt?: string;
   ttlMs: number | null;
   pollIntervalMs?: number;
   inputRequests?: Record<string, unknown>;
@@ -96,6 +98,7 @@ export function durableTaskView(state: DurableTaskState): DurableTaskView {
     statusMessage: state.statusMessage,
     createdAt: state.createdAt,
     lastUpdatedAt: state.lastUpdatedAt,
+    lastActivityAt: state.lastActivityAt,
     ttlMs: state.ttlMs,
     pollIntervalMs: taskPollIntervalMs(state),
     inputRequests: state.inputRequests,

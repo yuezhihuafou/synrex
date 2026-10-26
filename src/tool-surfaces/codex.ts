@@ -5,6 +5,7 @@ import { compactPreview } from "../compact-runtime/output-policy.js";
 import { waitForTaskChange } from "../durable-task-wait.js";
 import type { TaskWaitResult } from "../durable-task-wait.js";
 import { finalBarrierReceipt } from "../task-final-barrier.js";
+import { EXECUTION_OUTCOME_LOOP } from "../execution-outcome-loop.js";
 import { ArchitectureModelManager } from "../architecture-model.js";
 import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
@@ -35,7 +36,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs/checkpoint, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. Six-tool clients can inspect project memory/architecture read-only with 'devspace-project learn-suggest', 'devspace-project learn-recall QUERY', 'devspace-project learn-stats', and 'devspace-project arch-validate'; never claim memory promotion or architectural approval from these reads. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. ${EXECUTION_OUTCOME_LOOP} Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs and recover if stalled, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. Six-tool clients can inspect project memory/architecture read-only with 'devspace-project learn-suggest', 'devspace-project learn-recall QUERY', 'devspace-project learn-stats', and 'devspace-project arch-validate'; never claim memory promotion or architectural approval from these reads. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -763,12 +764,12 @@ async function finalWaitResponse(waited: TaskWaitResult, taskId: string) {
     }
   }
   const hint = barrier.stage === "investigate"
-    ? `Final dependency ${taskId} still running for ${Math.ceil(barrier.elapsedMs / 1000)}s; inspect devspace-log tail/grep ${barrier.runId}, validate task/peer health and checkpoint unresolved work. Never repeat the command automatically.`
+    ? `Final dependency ${taskId} still running for ${Math.ceil(barrier.elapsedMs / 1000)}s; no new stdout/stderr for ${Math.ceil(barrier.idleMs / 1000)}s (not proof of a stall). Inspect devspace-log tail/grep ${barrier.runId} and task/peer health. If stalled, diagnose and try a feasible alternative; if progressing, continue waiting or independent work. Elapsed time or a checkpoint alone is not grounds to cancel or abandon the user's goal. Never blindly replay the command.`
     : barrier.stage === "waiting"
       ? `Final dependency pending; next suggested check after ~${barrier.nextCheckMs}ms, or continue independent work.`
       : barrier.stage === "input_required"
         ? `Final dependency ${taskId} requests input; inspect the request or cancel instead of polling.`
-        : `Final dependency is ${waited.view.status}; verify logs and objective before completion.`;
+      : `Final dependency is ${waited.view.status}; verify the user's original acceptance criteria, not just this command's status. If unmet, diagnose, repair or try another feasible approach before ending.`;
   return {
     ...response,
     content: [...response.content, textBlock(hint)],

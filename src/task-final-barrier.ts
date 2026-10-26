@@ -11,7 +11,7 @@ export interface FinalBarrierReceipt {
   outputBytes: number;
   outputLines: number;
   idleMs: number;
-  action: "wait_or_do_independent_work" | "inspect_logs_or_checkpoint"
+  action: "wait_or_do_independent_work" | "inspect_logs_and_continue"
     | "request_input_or_cancel" | "verify_result";
 }
 
@@ -21,13 +21,15 @@ export interface FinalBarrierReceipt {
  */
 export function finalBarrierReceipt(view: DurableTaskView, now = Date.now()): FinalBarrierReceipt {
   const createdAt = Date.parse(view.createdAt);
-  const updatedAt = Date.parse(view.lastUpdatedAt);
+  // Heartbeats update lastUpdatedAt even if the process has no output.
+  const updatedAt = Date.parse(view.lastActivityAt ?? view.lastUpdatedAt);
   const elapsedMs = Number.isFinite(createdAt) ? Math.max(0, now - createdAt) : 0;
   const idleMs = Number.isFinite(updatedAt) ? Math.max(0, now - updatedAt) : 0;
   const terminal = view.status === "completed" || view.status === "failed"
     || view.status === "cancelled";
   const stage = view.status === "input_required" ? "input_required"
-    : terminal ? "terminal" : elapsedMs >= ESCALATE_AFTER_MS ? "investigate" : "waiting";
+    : terminal ? "terminal"
+      : elapsedMs >= ESCALATE_AFTER_MS && idleMs >= ESCALATE_AFTER_MS ? "investigate" : "waiting";
   // Exponential backoff with a fixed bound: approximately 2, 4, 8 and 16 s
   // in successive 15-second periods; not an independent scheduling engine.
   const exponent = Math.min(5, Math.floor(elapsedMs / 15_000));
@@ -42,7 +44,7 @@ export function finalBarrierReceipt(view: DurableTaskView, now = Date.now()): Fi
     outputLines: view.outputLines,
     action: stage === "terminal" ? "verify_result"
       : stage === "input_required" ? "request_input_or_cancel"
-      : stage === "investigate" ? "inspect_logs_or_checkpoint"
+      : stage === "investigate" ? "inspect_logs_and_continue"
       : "wait_or_do_independent_work",
   };
 }

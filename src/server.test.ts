@@ -23,6 +23,7 @@ import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 import { expectedToolNames } from "./tool-surface-manifest.js";
+import { EXECUTION_OUTCOME_LOOP } from "./execution-outcome-loop.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -34,6 +35,36 @@ test("MCP initialization identifies Synrex and preserves the coding tool surface
   assert.match(server?.description ?? "", /self-hosted, GPT-first coding and execution harness/);
   const tools = await context.client.listTools();
   assert.ok(tools.tools.some((tool) => tool.name === "open_workspace"));
+});
+
+test("real MCP initialize delivers the goal-completion rule in both tool modes", async (t) => {
+  for (const mode of ["codex", "claude"] as const) {
+    await t.test(mode, async (nested) => {
+      const context = await fixture(nested, { toolMode: mode, uiEnabled: false });
+      const instruction = context.client.getInstructions() ?? "";
+      assert.ok(instruction.includes(EXECUTION_OUTCOME_LOOP), `${mode} MCP initialize must deliver the rule`);
+      assert.equal(instruction.split(EXECUTION_OUTCOME_LOOP).length, 2, "avoid duplicated instructions");
+      assert.match(instruction, /If unmet, inspect the actual failure/);
+      assert.match(instruction, /concrete external blocker or missing authority/);
+      assert.match(instruction, /A completed tool call.*is not goal completion/);
+    });
+  }
+});
+
+test("MCP supports a controlled failed command -> repair -> verified goal sequence", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true, uiEnabled: false });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const cmd = "test -f recovered.txt && grep -qx recovered recovered.txt";
+  const failed = await context.client.callTool({ name: "exec_command", arguments: { workspaceId, cmd } });
+  assert.equal(failed.isError, true, "initial command must actually fail");
+  assert.notEqual(structuredContent(failed).exitCode, 0);
+  const repaired = await context.client.callTool({ name: "apply_patch", arguments: {
+    workspaceId, patch: "*** Begin Patch\n*** Add File: recovered.txt\n+recovered\n*** End Patch",
+  } });
+  assert.notEqual(repaired.isError, true, "repair must be applied through the normal tool");
+  const verified = await context.client.callTool({ name: "exec_command", arguments: { workspaceId, cmd } });
+  assert.notEqual(verified.isError, true, "the original acceptance command should now pass");
+  assert.equal(structuredContent(verified).exitCode, 0);
 });
 
 test("batch read preserves separate file ranges and existing single-file reads", async (t) => {
@@ -112,6 +143,7 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
   });
   assert.notEqual(newWorkflow.isError, true);
   const created = structuredContent(newWorkflow);
+  assert.match(contentText(newWorkflow), /Acceptance: Tests pass/);
   const workflowId = created.workflowId as string;
   assert.match(workflowId, /^wf_[a-f0-9]{24}$/);
   const replayedCreate = await context.client.callTool({
@@ -123,6 +155,16 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
     },
   });
   assert.equal(structuredContent(replayedCreate).workflowId, workflowId);
+  const unjustifiedCompletion = await context.client.callTool({
+    name: "workflow_checkpoint",
+    arguments: {
+      workspaceId, workflowId, expectedRevision: 0, status: "completed",
+      phase: "done", summary: "Claimed without verification",
+      completedSteps: [], nextSteps: [], blockers: [], checks: [], taskIds: [],
+    },
+  });
+  assert.equal(unjustifiedCompletion.isError, true);
+  assert.match(contentText(unjustifiedCompletion), /without a recorded verification check/);
   const checkpoint = await context.client.callTool({
     name: "workflow_checkpoint",
     arguments: {
@@ -158,6 +200,8 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
     name: "workflow_status",
     arguments: { workspaceId: reopened.workspaceId, workflowId },
   });
+  assert.match(contentText(inspection), /Goal: Build and verify a code change/);
+  assert.match(contentText(inspection), /Acceptance: Tests pass/);
   assert.equal((structuredContent(inspection).history as unknown[]).length, 1);
   const handoff = structuredContent(inspection).handoff as {
     workspaceRoot: string;
@@ -256,6 +300,27 @@ test("codex process tools keep wait and output budgets server-managed", async (t
   }
 });
 
+test("MCP task_get distinguishes output silence from runner heartbeat", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const launched = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "printf 'begin\\n'; sleep 8; printf 'end\\n'" },
+  });
+  const taskId = structuredContent(launched).taskId as string;
+  assert.match(taskId, /^task_[a-f0-9]{16}$/);
+  await new Promise((resolve) => setTimeout(resolve, 5_400));
+  const observed = await context.client.callTool({ name: "task_get", arguments: { workspaceId, taskId, detail: true } });
+  const state = structuredContent(observed);
+  assert.equal(state.status, "working");
+  const detail = state.detail as { lastActivityAt?: string; lastUpdatedAt?: string };
+  assert.equal(typeof detail.lastActivityAt, "string");
+  assert.ok(Date.parse(detail.lastUpdatedAt as string) - Date.parse(detail.lastActivityAt as string) > 3_000,
+    "task heartbeat should not reset time since stdout/stderr activity");
+  const terminal = await context.client.callTool({ name: "task_wait", arguments: { workspaceId, taskId, final: true } });
+  assert.equal(structuredContent(terminal).status, "completed");
+  assert.equal(structuredContent(terminal).exitCode, 0);
+});
+
 test("completion mailbox relays a finished background job only in the originating chat scope", async (t) => {
   const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
   const firstScope = "mailbox-chat-a";
@@ -336,7 +401,7 @@ test("legacy final task command waits and reports a terminal final barrier recei
   assert.equal(result.status, "completed");
   assert.equal((result.finalBarrier as { stage: string; nextCheckMs: number }).stage, "terminal");
   assert.equal((result.finalBarrier as { nextCheckMs: number }).nextCheckMs, 0);
-  assert.match(contentText(settled), /verify logs and objective before completion/);
+  assert.match(contentText(settled), /verify the user's original acceptance criteria/);
 });
 
 test("codex tool surface stays compact without dropping capabilities", async (t) => {

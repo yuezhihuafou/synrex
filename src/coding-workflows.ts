@@ -226,6 +226,9 @@ export class CodingWorkflowStore {
       if (current.status === "completed" || current.status === "cancelled") {
         throw new Error(`Workflow ${input.workflowId} is ${current.status} and cannot be changed.`);
       }
+      if (input.status === "completed" && input.checkpoint.checks.length === 0) {
+        throw new Error("Cannot mark workflow completed without a recorded verification check. A checkpoint or partial result is not proof that acceptance criteria passed.");
+      }
       const revision = current.revision + 1;
       const now = new Date().toISOString();
       const payload = JSON.stringify(input.checkpoint);

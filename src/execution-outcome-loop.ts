@@ -1,0 +1,5 @@
+/** Shared, advisory goal-completion rule for GPT-facing tool instructions.
+ * Synrex executes commands; it does not decide whether the user's goal is met
+ * or autonomously restart a ChatGPT turn.
+ */
+export const EXECUTION_OUTCOME_LOOP = "Use the user's requested outcome and observable acceptance criteria as the stop condition. If unmet, inspect the actual failure or missing evidence, pursue an authorized feasible fix or alternative, and verify again. A completed tool call, finished substep, saved checkpoint, slow/running job, or partial report is not goal completion or by itself a reason to stop or cancel. Do not cancel a progressing task solely for elapsed time, and never blindly replay uncertain side effects. Stop with unmet criteria only when the user stops or a concrete external blocker or missing authority cannot be resolved with current access; state exactly what remains, the observed evidence, and any resumable task IDs. No extra workflow or approval ceremony for ordinary fixes.";
