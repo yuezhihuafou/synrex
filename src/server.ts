@@ -1,6 +1,8 @@
 import { registerOAuthRecovery } from "./oauth-recovery.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { startRuntimeSampler } from "./runtime-sampler.js";
+import { DIAGNOSTIC_FILE_LIMIT } from "./diagnostic-trace.js";
+import { UsageTrafficRecorder } from "./usage-ledger.js";
 import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
 import { traceEvent, traceStage, errorCategory } from "./trace-stages.js";
 import { registerSynrexConsole } from "./console-router.js";
@@ -398,6 +400,7 @@ function registerMcpSurface(
   trackToolActivity?: TrackToolActivity,
   durableTasks?: DurableTaskManager,
   semantic?: SerenaSemanticManager,
+  usageRecorder?: UsageTrafficRecorder,
 ): void {
   const learning = new LearningStore(config.stateDir);
   const registrationTarget = withTrackedToolHandlers(
@@ -407,6 +410,7 @@ function registerMcpSurface(
     learning,
     workspaces,
     durableTasks,
+    usageRecorder,
   );
   const toolSurface = getToolSurface(config.toolMode);
 
@@ -943,8 +947,9 @@ function withTrackedToolHandlers(
   learning: LearningStore,
   workspaces: WorkspaceRegistry,
   durableTasks?: DurableTaskManager,
+  usageRecorder?: UsageTrafficRecorder,
 ): McpRegistrationTarget {
-  const diagnostics = new DiagnosticTrace(config.stateDir);
+  const diagnostics = new DiagnosticTrace(config.stateDir, DIAGNOSTIC_FILE_LIMIT, entry => usageRecorder?.record(entry));
   const mailbox = new CompletionMailbox(config.stateDir);
   return {
     registerTool: ((...args: unknown[]) => {
@@ -1167,7 +1172,8 @@ export function createServer(
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
   const app = express();
-  const diagnostics = new DiagnosticTrace(config.stateDir);
+  const usageRecorder = new UsageTrafficRecorder(config.stateDir);
+  const diagnostics = new DiagnosticTrace(config.stateDir, DIAGNOSTIC_FILE_LIMIT, entry => usageRecorder.record(entry));
   app.use(requestTraceMiddleware(config, diagnostics, requestLogFields));
   app.use(createMcpExpressApp({
     host: config.host,
@@ -1257,6 +1263,7 @@ export function createServer(
       toolActivities.track,
       durableTasks,
       semantic,
+      usageRecorder,
     );
   });
   const toolInvoker = new ToolInvoker();
@@ -1443,6 +1450,7 @@ export function createServer(
         processSessions.shutdown();
         await semantic.close();
         controlPlaneStore.close();
+        usageRecorder.close();
         oauthProvider.close();
         workspaceStore.close?.();
       })();

@@ -37,6 +37,28 @@ review. These are **not** a standalone browser Console. Reuse build tooling,
 design tokens, view models and safe utilities where sensible, but keep the
 host-embedded cards and management application as independent entrypoints.
 
+### Usage & Productivity Console candidate (2026-10-26)
+
+An isolated source candidate adds a read-only Usage & Productivity page to the
+standalone Console with 24h / 7d / 30d selection, UTC usage trends, tool ranking,
+workspace-specific Git review totals, and client-side CSV export. It reuses
+the owner-authenticated `/console/api/snapshot` route. A best-effort in-process
+observer batches **hourly MCP traffic counters** into supplemental tables in
+the existing owner SQLite database (without changing the versioned core DB
+migration chain); a separate table retains verified `show_changes` Git review
+snapshots and deduplicates `(workspace_root, review_ref)`. No new service, port,
+database, agent or OAuth authority is introduced. The feature cannot see
+ChatGPT's model identity, inference tokens or hidden conversation context.
+Only observed MCP payload byte counts are converted to an explicitly labeled
+rough text-token equivalent; missing content lengths remain unknown. Historical
+data before recording began can be incomplete, hourly 24h windows are only
+approximate, and Git review deltas measure snapshots, not validated task wins.
+
+**Delivery status:** source candidate, unit + authenticated HTTP snapshot tests,
+typecheck, and frontend build passed. No pinned-production promotion or real
+browser acceptance has yet occurred; the running Console must not be labeled
+updated until those gates pass.
+
 ## Revised execution order
 
 ### R0. Reproducible baseline and product boundaries (must precede releases)

@@ -10,6 +10,8 @@ import { readPeerSnapshot } from "./peer-observability.js";
 import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
 import { readConversationLabels } from "./conversation-labels.js";
+import { summarizeConsoleUsage, type UsageEpisode } from "./console-usage.js";
+import { readStoredUsage } from "./usage-ledger.js";
 
 interface NodeRow {
   id: string; kind: string; alias: string | null; health: string;
@@ -41,6 +43,7 @@ export interface ConsoleSnapshot {
   activeTaskUnits: string[] | null;
   activeTaskProcesses: Array<{ unit: string; pid: number | null; memoryBytes: number | null; cpuTimeMs: number | null }> | null;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
+  usage: ReturnType<typeof summarizeConsoleUsage>;
   diagnostics: {
     count: number;
     observability: ReturnType<typeof summarizeConsoleObservability>;
@@ -154,9 +157,11 @@ function readActiveTaskProcesses(units: string[] | null): ConsoleSnapshot["activ
 export function readConsoleSnapshot(stateDir: string, release: string): ConsoleSnapshot {
   const mainDb = path.join(stateDir, "devspace.sqlite");
   const workflowDb = path.join(stateDir, "coding-workflows.sqlite");
-  const { nodes, tasks, memory } = readOnly(mainDb, {
+  const { nodes, tasks, memory, usageEpisodes, usageEpisodesCapped, storedUsage } = readOnly(mainDb, {
     nodes: [] as ConsoleSnapshot["nodes"], tasks: [] as ConsoleSnapshot["tasks"],
     memory: { episodes: 0, successful: 0, notes: 0, candidates: 0, promoted: 0 },
+    usageEpisodes: [] as UsageEpisode[], usageEpisodesCapped: false,
+    storedUsage: { hourly: [], reviews: [] } as ReturnType<typeof readStoredUsage>,
   }, (db) => {
     const rows = db.prepare("select id, kind, alias, health, platform_json, capabilities_json, last_seen_at from execution_nodes order by last_seen_at desc limit 30").all() as NodeRow[];
     const allCapabilities = rows.map((row) => parseObject(row.capabilities_json));
@@ -194,6 +199,14 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         candidates: count(db, "select count(*) as n from learning_candidates"),
         promoted: count(db, "select count(*) as n from learning_candidates where status = 'promoted'"),
       },
+      ...(() => {
+        const rows = db.prepare(`select workspace_root, tool, output_summary, success, created_at
+          from learning_episodes where created_at >= ? and tool in
+          ('show_changes', 'apply_patch', 'semantic_edit', 'write', 'edit')
+          order by created_at desc limit 5001`).all(new Date(Date.now() - 30 * 86400000).toISOString()) as UsageEpisode[];
+        return { usageEpisodes: rows.slice(0, 5000), usageEpisodesCapped: rows.length > 5000 };
+      })(),
+      storedUsage: readStoredUsage(db),
     };
   });
   const workflows = readOnly(workflowDb, [] as ConsoleSnapshot["workflows"], (db) =>
@@ -224,6 +237,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   const requests=allRequests.slice(-300).reverse().map(r=>({...r,
     ...(ownerLabels.has(r.requestId)?{conversationTitle:ownerLabels.get(r.requestId)}:{}),
   }));
+  const allEvents = new DiagnosticTrace(stateDir).read({ minutes: 30 * 24 * 60, limit: 20000 });
   const byConversation = new Map<string, typeof requests>();
   for (const request of requests) {
     if (!request.conversationId) continue;
@@ -248,6 +262,10 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
     service: { status: "online", release, diagnosticsBoundBytes: 2 * DIAGNOSTIC_FILE_LIMIT },
     nodes, workflows, tasks, memory, conversationSessions, activeTaskUnits,
     activeTaskProcesses: readActiveTaskProcesses(activeTaskUnits),
+    usage: summarizeConsoleUsage(allEvents, usageEpisodes, Date.now(), {
+      diagnostics: allEvents.length >= 20000,
+      episodes: usageEpisodesCapped,
+    }, storedUsage),
     diagnostics: { count: events.length,
       observability: summarizeConsoleObservability(events),
       requests, events: events.slice(-200).reverse() },

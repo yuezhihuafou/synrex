@@ -217,7 +217,8 @@ export class DiagnosticTrace {
   private warned = false;
   private directoryReady = false;
 
-  constructor(stateDir: string, private readonly fileLimit = DIAGNOSTIC_FILE_LIMIT) {
+  constructor(stateDir: string, private readonly fileLimit = DIAGNOSTIC_FILE_LIMIT,
+    private readonly onRecord?: (entry: DiagnosticEntry) => void) {
     this.file = path.join(stateDir, DIAGNOSTIC_DIR, DIAGNOSTIC_FILE);
     this.previousFile = this.file + ".1";
   }
@@ -241,6 +242,7 @@ export class DiagnosticTrace {
       }
       appendFileSync(this.file, line, { encoding: "utf8", mode: 0o600 });
       this.warned = false;
+      try { this.onRecord?.(entry); } catch { /* Best-effort metrics only. */ }
     } catch (error) {
       // Diagnostics must never break code execution or authenticated requests.
       this.directoryReady = false;
@@ -252,7 +254,7 @@ export class DiagnosticTrace {
   }
 
   read(input: { minutes?: number; limit?: number; requestId?: string; conversationId?: string; title?: string } = {}): DiagnosticEntry[] {
-    const minutes = Math.min(Math.max(input.minutes ?? 30, 1), 24 * 60);
+    const minutes = Math.min(Math.max(input.minutes ?? 30, 1), 30 * 24 * 60);
     const limit = Math.min(Math.max(input.limit ?? 70, 1), 20_000);
     const cutoff = Date.now() - minutes * 60_000;
     const entries: DiagnosticEntry[] = [];

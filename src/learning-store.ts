@@ -1,7 +1,9 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { openDatabase } from "./db/client.js";
+import { gitUsage } from "./console-usage.js";
+import { recordCodeReview } from "./usage-ledger.js";
 
 // Additive, lazy table creation deliberately does not advance the shared
 // strict migration version. Older pinned releases must remain able to open
@@ -145,7 +147,7 @@ export class LearningStore {
         inputSummary: summarizeInput(input.tool, input.toolInput),
         outputSummary: input.error
           ? truncate(redactSecrets(errorMessage(input.error)), MAX_OUTPUT_CHARS)
-          : summarizeOutput(input.toolOutput),
+          : summarizeOutput(input.toolOutput, input.tool),
         success: input.error === undefined && !responseIsError(input.toolOutput),
         createdAt: new Date().toISOString(),
       };
@@ -173,6 +175,14 @@ export class LearningStore {
           limit ?
         )
       `).run(input.workspaceRoot, input.workspaceRoot, MAX_EPISODES_PER_WORKSPACE);
+      if (episode.tool === "show_changes" && episode.success) {
+        const review = gitUsage(episode.outputSummary);
+        if (review) recordCodeReview(database.sqlite, {
+          workspace_root: episode.workspaceRoot, review_ref: review.reviewRef, created_at: episode.createdAt,
+          files: review.files, additions: review.additions, removals: review.removals,
+          path_hashes_json: JSON.stringify(review.pathHashes), paths_complete: review.pathsComplete ? 1 : 0,
+        });
+      }
     } finally {
       database.close();
     }
@@ -753,7 +763,7 @@ function summarizeInput(tool: string, value: unknown): string {
   return truncate(redactSecrets(JSON.stringify(summary)), MAX_INPUT_CHARS);
 }
 
-function summarizeOutput(value: unknown): string {
+function summarizeOutput(value: unknown, tool?: string): string {
   const result = recordValue(value);
   const structured = recordValue(result.structuredContent);
   const primary = typeof structured.result === "string"
@@ -761,6 +771,22 @@ function summarizeOutput(value: unknown): string {
     : Array.isArray(result.content)
       ? result.content.map((item) => recordValue(item).text).filter((item): item is string => typeof item === "string").join("\n")
       : JSON.stringify(structured);
+  if (tool === "show_changes" && typeof structured.reviewRef === "string" && /^[a-f0-9]{40,64}$/.test(structured.reviewRef)) {
+    const card = recordValue(recordValue(result._meta).card);
+    const summary = recordValue(card.summary);
+    const numbers = [summary.files, summary.additions, summary.removals];
+    if (numbers.every((v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v < 10_000_000)) {
+      const files = Array.isArray(card.files) ? card.files : [];
+      const paths = files.slice(0, 50).map((f) => recordValue(f).path)
+        .filter((v): v is string => typeof v === "string" && v.length > 0 && v.length < 4096)
+        .map((p) => createHash("sha256").update(p).digest("hex").slice(0, 20));
+      const usage = { reviewRef: structured.reviewRef, files: numbers[0], additions: numbers[1], removals: numbers[2],
+        pathHashes: paths, pathsComplete: files.length === numbers[0] && paths.length === files.length && files.length <= 50 };
+      // Only numeric Git counts and hashed filenames are retained; never the patch body.
+      // This is a snapshot of reviewed changes, not a claim of successful task completion.
+      return truncate(redactSecrets(`${primary.slice(0, 160)}\n@@synrex-usage:${JSON.stringify(usage)}`), MAX_OUTPUT_CHARS);
+    }
+  }
   return truncate(redactSecrets(primary || "ok"), MAX_OUTPUT_CHARS);
 }
 

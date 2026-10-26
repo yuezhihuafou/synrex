@@ -75,3 +75,32 @@ test("console distinguishes historical detached dispatch receipts from verified 
   assert.equal(snapshot.memory.successful, 1);
   assert.equal(snapshot.memory.notes, 1);
 });
+
+test("console usage reads numeric Git review evidence from existing learning store", async (t) => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "synrex-console-usage-"));
+  t.after(() => rm(stateDir, { force: true, recursive: true }));
+  const learning = new LearningStore(stateDir);
+  const toolOutput = {
+    structuredContent: { reviewRef: "a".repeat(40), result: "2 files changed" },
+    _meta: { card: { summary: { files: 2, additions: 20, removals: 4 },
+      files: [{ path: "src/one.ts" }, { path: "src/two.ts" }],
+      payload: { patch: "secret code should not be persisted" } } },
+  };
+  learning.recordToolCall({ workspaceRoot: "/tmp/usage-project", tool: "show_changes",
+    toolInput: { workspaceId: "ws_1" }, toolOutput });
+  learning.recordToolCall({ workspaceRoot: "/tmp/usage-project", tool: "show_changes",
+    toolInput: { workspaceId: "ws_1" }, toolOutput });
+  const snapshot = readConsoleSnapshot(stateDir, "candidate");
+  const usage = snapshot.usage.periods["24h"];
+  assert.equal(usage.gitReviews, 1);
+  assert.equal(usage.reviewedFileTouches, 2);
+  assert.equal(usage.addedLines, 20);
+  assert.equal(usage.removedLines, 4);
+  assert.equal(usage.distinctReviewedFiles, 2);
+  const db = openDatabase(stateDir);
+  try {
+    const text = (db.sqlite.prepare("select output_summary from learning_episodes limit 1")
+      .get() as { output_summary: string }).output_summary;
+    assert.doesNotMatch(text, /src\/one\.ts|secret code/);
+  } finally { db.close(); }
+});

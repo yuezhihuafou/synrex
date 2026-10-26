@@ -17,6 +17,14 @@ type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"h
   reason:string;tabId?:number;flowId?:string;endpointGroup?:string;requestType?:string;
   durationMs?:number;status?:number;errorCategory?:string;netError?:string;startedAt?:string;
   host?:string;conversationTitle?:string};
+type UsagePeriod = "24h" | "7d" | "30d";
+type UsageTotals = { requests:number; completed:number; toolExecutions:number; inputBytes:number; outputBytes:number;
+  measuredInput:number;measuredOutput:number;
+  payloadTokenEquivalentInput:number;payloadTokenEquivalentOutput:number;gitReviews:number;reviewedFileTouches:number;
+  distinctReviewedFiles:number;distinctFileCountComplete:boolean;addedLines:number;removedLines:number;otherEditOperations:number;
+  projects:Array<{id:string;name:string;reviews:number;fileTouches:number;uniqueFiles:number;addedLines:number;removedLines:number;editOperations:number}>;
+  topTools:Array<{tool:string;calls:number}>;
+  trends:Array<{day:string;requests:number;toolExecutions:number;addedLines:number;removedLines:number}> };
 type Snapshot = {
   generatedAt: string;
   snapshotStale?: boolean;
@@ -30,6 +38,10 @@ type Snapshot = {
   activeTaskUnits?: string[] | null;
   activeTaskProcesses?: Array<{unit:string;pid:number|null;memoryBytes:number|null;cpuTimeMs:number|null}> | null;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
+  usage?: { source:{diagnosticFirstAt:string|null;episodeFirstAt:string|null;diagnosticsCapped:boolean;episodesCapped:boolean;
+    trafficPersistedFrom:string|null;codePersistedFrom:string|null;codeReviewsCapped:boolean};
+    periods:Record<UsagePeriod,UsageTotals>;
+    inference:{inputTokens:null;outputTokens:null;model:null;explanation:string} };
   diagnostics: { count: number; observability?: {coverage:{observedEvents:number;observedRequests:number;tokenUsage:string;hostInference:string};
     latency:{completed:number;medianMs:number|null;p95Ms:number|null;maximumMs:number|null};
     lifecycle:{httpCompleted:number;closedEarly:number;handlerFailed:number;toolCompletedWithoutHttp:number;unknown:number};
@@ -59,7 +71,7 @@ metrics: Array<{ts:string;name:string;value:number;nodeId?:string;processPid?:nu
 };
 const menus: Array<{ id: View; title: string; symbol: string; caption: string }> = [
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
-  { id: "usage", title: "效能统计", symbol: "▤", caption: "离线统计与对照" },
+  { id: "usage", title: "用量与产出", symbol: "▤", caption: "MCP 用量与 Git 产出" },
   { id: "workflows", title: "工作流", symbol: "☷", caption: "任务与检查点" },
   { id: "tasks", title: "执行索引", symbol: ">_", caption: "持久任务位置" },
   { id: "nodes", title: "主机节点", symbol: "⌘", caption: "版本与契约" },
@@ -535,6 +547,103 @@ Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取�
     </div>
   </div>;
 }
+function Usage({d}:{d:Snapshot}) {
+  const [period,setPeriod]=useState<UsagePeriod>("7d");
+  const [trend,setTrend]=useState<"requests"|"toolExecutions"|"changes">("requests");
+  const [projectId,setProjectId]=useState("all");
+  if(!d.usage)return <Blank>当前服务版本尚未提供用量快照。</Blank>;
+  const totals=d.usage.periods[period];
+  const selected=totals.projects.find(p=>p.id===projectId);
+  const observedReviews=totals.gitReviews>0;
+  const totalBytes=(bytes:number)=>bytes>=1024*1024?`${(bytes/1024/1024).toFixed(2)} MiB`:`${(bytes/1024).toFixed(1)} KiB`;
+  const format=(n:number)=>n.toLocaleString("zh-CN");
+  const trendValue=(item:UsageTotals["trends"][number])=>trend==="changes"?item.addedLines+item.removedLines:item[trend];
+  const maxCalls=Math.max(1,...totals.trends.map(trendValue));
+  const coverage=d.usage.source;
+  const csv=(value:string|number)=>{
+    const safe=String(value).replace(/\r|\n/g," ");
+    return `"${/^[=+@\-]/.test(safe)?"'":""}${safe.replace(/"/g,'""')}\"`;
+  };
+  function exportCsv(){
+    const rows:[string,...Array<string|number>][]=[
+      ["kind","date_or_project","requests","tool_calls","git_reviews","file_touches","added_lines","removed_lines"],
+      ...totals.trends.map(x=>["daily",x.day,x.requests,x.toolExecutions,"","",x.addedLines,x.removedLines] as [string,...Array<string|number>]),
+      ...totals.projects.filter(p=>!selected||p.id===selected.id)
+        .map(p=>["project",p.name,"","",p.reviews,p.fileTouches,p.addedLines,p.removedLines] as [string,...Array<string|number>]),
+    ];
+    const blob=new Blob(["\uFEFF",rows.map(row=>row.map(csv).join(",")).join("\r\n")],{type:"text/csv;charset=utf-8"});
+    const url=URL.createObjectURL(blob);
+    const link=document.createElement("a");link.href=url;link.download=`synrex-usage-${period}.csv`;
+    link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
+  }
+  return <div className="stack">
+    <Panel title="用量区间" hint="只读 · 已留存的 MCP 诊断和 Git 审阅记录；时间窗可能不完整"
+      extra={<div className="usage-actions"><div className="usage-range" role="group" aria-label="统计周期">
+        {(["24h","7d","30d"] as const).map(p=><button key={p} type="button" className={period===p?"selected":""}
+          aria-pressed={period===p} onClick={()=>setPeriod(p)}>{p==="24h"?"24 小时":p==="7d"?"7 天":"30 天"}</button>)}
+      </div><button type="button" className="refresh" onClick={exportCsv} aria-label="导出当前统计 CSV">导出 CSV ↓</button></div>}>
+      <div className="usage-source-line">
+        <span>流量：{coverage.trafficPersistedFrom?"小时汇总 + 历史补充":"诊断日志（非持久化历史）"}</span>
+        <span>代码：{coverage.codePersistedFrom?"Git 审阅账本":"可用的学习记录"}</span>
+        <span>推理 Token：不可观测</span>
+      </div>
+      <div className="metrics usage-metrics">
+        <Metric symbol="⌁" label="MCP 请求" value={format(totals.requests)} info={`完成 ${format(totals.completed)} · 不等于模型调用`}/>
+        <Metric symbol="↳" label="工具执行" value={format(totals.toolExecutions)} info="仅统计记录到的工具开始事件"/>
+        <Metric symbol="↓" label="MCP 输入" value={totals.measuredInput?totalBytes(totals.inputBytes):"—"}
+          info={totals.measuredInput?`测量 ${totals.measuredInput}/${totals.requests} 个请求 · 约 ${format(totals.payloadTokenEquivalentInput)} Token 当量`:"缺少 HTTP 输入体积记录"}/>
+        <Metric symbol="↑" label="MCP 输出" value={totals.measuredOutput?totalBytes(totals.outputBytes):"—"}
+          info={totals.measuredOutput?`测量 ${totals.measuredOutput}/${totals.completed} 个完成请求 · 约 ${format(totals.payloadTokenEquivalentOutput)} Token 当量`:"缺少 HTTP 输出体积记录"}/>
+        <Metric symbol="▤" label="Git 审阅文件次数" value={observedReviews?format(totals.reviewedFileTouches):"—"} info={`来自 ${totals.gitReviews} 次不重复的 Git 审阅`}/>
+        <Metric symbol="≡" label="不同文件（可识别）" value={observedReviews?`${totals.distinctFileCountComplete?"":"≥ "}${format(totals.distinctReviewedFiles)}`:"—"} info="工作区内路径指纹去重，可能不完整"/>
+        <Metric symbol="+" label="新增代码行" value={observedReviews?`+${format(totals.addedLines)}`:"—"} info="Git 审阅区间内的新增行，不是历史总净增"/>
+        <Metric symbol="−" label="删除代码行" value={observedReviews?`−${format(totals.removedLines)}`:"—"} info="Git 审阅区间内的删除行"/>
+      </div>
+      <p className="footnote">文件与行数来自后续产生的 <code>show_changes</code> Git 差异，历史未携带结构化统计的审阅不能追溯计算。其他被记录的编辑操作 {format(totals.otherEditOperations)} 次，不能直接折算为文件数或代码行；相同文件可能在多个审阅窗口反复变化。</p>
+    </Panel>
+    <div className="columns">
+      <Panel title="用量与代码产出趋势" hint="UTC 日期 · 缺失日期不代表零调用"
+        extra={<div className="usage-range" role="group" aria-label="图表指标">
+          {([{id:"requests",text:"请求"},{id:"toolExecutions",text:"工具"},{id:"changes",text:"代码行"}] as const)
+            .map(x=><button key={x.id} type="button" className={trend===x.id?"selected":""}
+              aria-pressed={trend===x.id} onClick={()=>setTrend(x.id)}>{x.text}</button>)}
+        </div>}>
+        {totals.trends.length?<div className="usage-bars" role="img" aria-label="按日统计的 Synrex 用量">
+          {totals.trends.slice(-30).map(x=><div className="usage-bar-col" key={x.day}
+            title={`${x.day} UTC · 请求 ${x.requests} · 工具 ${x.toolExecutions} · 新增 ${x.addedLines} · 删除 ${x.removedLines}`}>
+            <small>{format(trendValue(x))}</small><div className="usage-bar-track"><span style={{height:`${Math.max(trendValue(x)?5:0,Math.round(trendValue(x)/maxCalls*100))}%`}}/></div>
+            <span>{x.day.slice(5)}</span>
+          </div>)}
+        </div>:<Blank>该时间段暂无可用的 MCP 记录。</Blank>}
+      </Panel>
+      <Panel title="工具调用排行" hint="来自执行开始事件，而不是大模型提供的 usage 报表">
+        {totals.topTools.map(t=><div className="list-row" key={t.tool}><span className="round-symbol">&gt;_</span>
+          <div className="grow"><strong>{t.tool}</strong><small>已观测到的调用次数</small></div><strong>{format(t.calls)}</strong></div>)}
+        {!totals.topTools.length&&<Blank>该时间段尚无工具执行开始事件。</Blank>}
+      </Panel>
+    </div>
+    <Panel title="项目代码产出" hint="按工作区分组；全局 MCP 流量无法可靠归因到各项目"
+      extra={<select className="filter" aria-label="筛选代码产出项目" value={selected?selected.id:"all"}
+        onChange={e=>setProjectId(e.target.value)}><option value="all">所有工作区</option>
+        {totals.projects.map(p=><option value={p.id} key={p.id}>{p.name} · {p.id.slice(0,6)}</option>)}</select>}>
+      {totals.projects.length?<div className="table-scroll"><table className="usage-project-table">
+        <thead><tr><th>工作区</th><th>审阅</th><th>涉及文件次数</th><th>不同文件（可识别）</th><th>新增</th><th>删除</th><th>其他编辑</th></tr></thead>
+        <tbody>{totals.projects.filter(p=>!selected||p.id===selected.id).map(p=><tr key={p.id}>
+          <td><strong>{p.name}</strong><small> {p.id.slice(0,6)}</small></td>
+          <td>{format(p.reviews)}</td><td>{format(p.fileTouches)}</td><td>≥ {format(p.uniqueFiles)}</td>
+          <td>+{format(p.addedLines)}</td><td>−{format(p.removedLines)}</td><td>{format(p.editOperations)}</td>
+        </tr>)}</tbody></table></div>:<Blank>此区间没有可识别的项目代码审阅或编辑记录。</Blank>}
+      <p className="footnote">同一工作区同一 Git 审阅引用只计一次；未经过 <code>show_changes</code> 的文件写入无法提供可信行数。这里统计的是审阅快照，不是最终合入代码量。</p>
+    </Panel>
+    <Panel title="模型用量与效率比较" hint="遵循真实证据；不同模型必须使用可比任务和已知模型身份">
+      <div className="usage-limit"><strong>ChatGPT 模型输入 / 输出 / 推理 Token：不可观测</strong>
+        <p>Synrex 只接收 MCP 工具请求与响应，不能直接看到 ChatGPT 推理上下文、隐藏推理 Token、缓存命中或真实模型身份。上面的 Token 当量只是 MCP HTTP 字节数 ÷ 4 的粗略文本换算，不是模型 Token，也不能用于费用计算或不同模型的效率排名。</p>
+        <p>要进行正式模型 A/B 对比，需另行记录已验证的模型身份、同一任务基线、测试通过情况与独立可获得的模型用量数据；无法取得的字段保留为“未知”。</p>
+      </div>
+      <p className="footnote">小时汇总起点：{time(coverage.trafficPersistedFrom??undefined)}；Git 账本起点：{time(coverage.codePersistedFrom??undefined)}；最早可见 MCP 诊断：{time(coverage.diagnosticFirstAt??undefined)}。{coverage.diagnosticsCapped||coverage.episodesCapped||coverage.codeReviewsCapped?"部分历史查询达到上限，数据可能遗漏。":"旧数据可能因历史轮转或采集启用时间而缺失。"} 小时汇总边界可能有最多约 1 小时误差。统计来自当前 Console 所在节点的可见 MCP 流量与本地代码记录，远端 Worker 独立执行的数据可能缺失；此页面不是计费账本。</p>
+    </Panel>
+  </div>;
+}
 function Memory({d}:{d:Snapshot}) {
   return <div className="stack"><div className="metrics">
     <Metric symbol="◇" label="学习记录" value={d.memory.episodes} info="历史执行事件"/>
@@ -616,7 +725,7 @@ try{
     {stale&&<div className="error-banner" role="alert">Console 快照已过期。当前为历史数据，不代表实时进程状态；请检查独立快照服务。</div>}
     {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh()}>重试</button></div>}
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
-      {view==="usage"&&<UsagePage/>}
+      {view==="usage"&&<Usage d={data}/>}
       {view==="workflows"&&<Workflows d={data}/>}
       {view==="tasks"&&<Tasks d={data}/>}
       {view==="nodes"&&<Nodes d={data}/>}

@@ -9,6 +9,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import type { ServerConfig } from "./config.js";
+import { openDatabase } from "./db/client.js";
+import { UsageTrafficRecorder } from "./usage-ledger.js";
 
 test("owner console session is signed, expiring and isolated from another secret", () => {
   const now = Date.now();
@@ -77,4 +79,28 @@ test("explicit title binding requires authenticated, same-origin request and kno
   const detail=await trace.json() as {conversationTitle:string;titleSource:string};
   assert.equal(detail.conversationTitle,"评估全链路日志");
   assert.equal(detail.titleSource,"owner");
+});
+
+test("owner-only HTTP snapshot exposes usage while unauthenticated clients are rejected", async t => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "synrex-console-http-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const db = openDatabase(stateDir); db.close();
+  const recorder = new UsageTrafficRecorder(stateDir);
+  recorder.record({ event: "mcp_received", ts: new Date().toISOString(), requestId: "r1", inputBytes: 250 });
+  assert.ok(recorder.flush()); recorder.close();
+  const app=express();
+  const ownerToken="test-owner-secret";
+  const config={stateDir,publicBaseUrl:"http://127.0.0.1:12345",oauth:{ownerToken}} as ServerConfig;
+  registerSynrexConsole(app,config);
+  const server=app.listen(0,"127.0.0.1");
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  await new Promise<void>(resolve => server.once("listening",()=>resolve()));
+  const port=(server.address() as {port:number}).port;
+  const endpoint=`http://127.0.0.1:${port}/console/api/snapshot`;
+  assert.equal((await fetch(endpoint)).status,401);
+  const response=await fetch(endpoint,{headers:{cookie:`rev_console=${createConsoleSession(ownerToken)}`}});
+  assert.equal(response.status,200);
+  const snapshot=await response.json() as {usage:{periods:{"24h":{requests:number;inputBytes:number}}}};
+  assert.equal(snapshot.usage.periods["24h"].requests,1);
+  assert.equal(snapshot.usage.periods["24h"].inputBytes,250);
 });
