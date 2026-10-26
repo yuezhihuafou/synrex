@@ -772,7 +772,9 @@ async function finalWaitResponse(waited: TaskWaitResult, taskId: string) {
       ? `Final dependency pending; next suggested check after ~${barrier.nextCheckMs}ms, or continue independent work.`
       : barrier.stage === "input_required"
         ? `Final dependency ${taskId} requests input; inspect the request or cancel instead of polling.`
-      : `Final dependency is ${waited.view.status}; verify the user's original acceptance criteria, not just this command's status. If unmet, diagnose, repair or try another feasible approach before ending.`;
+      : waited.view.result?.isError || waited.view.status === "failed"
+        ? `Final command failed (exit ${waited.view.result?.exitCode ?? "unknown"}). Process termination does not complete the user's goal; fix the cause or use a feasible alternative, then verify the original acceptance criteria.`
+        : `Final dependency is ${waited.view.status}; verify the user's original acceptance criteria, not just this command's status. If unmet, diagnose, repair or try another feasible approach before ending.`;
   return {
     ...response,
     content: [...response.content, textBlock(hint)],

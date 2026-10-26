@@ -304,6 +304,8 @@ test("failed durable command is surfaced as error with a repair-next hint", asyn
   assert.equal(terminal.isError, true, "completed shell task with nonzero exit must not look successful");
   assert.match(contentText(terminal), /goal is still open/);
   assert.match(contentText(terminal), /fix or alternative/);
+  assert.match(contentText(terminal), /Final command failed \(exit 13\)/);
+  assert.doesNotMatch(contentText(terminal), /Final dependency is completed/);
   const observed = await context.client.callTool({ name: "task_get", arguments: { workspaceId, taskId } });
   assert.equal(observed.isError, true);
   assert.ok(contentText(observed).includes(FAILURE_CONTINUATION_HINT));
