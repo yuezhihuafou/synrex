@@ -642,7 +642,14 @@ async function handleProjectCompatCommand(command: string, root: string, stateDi
   const learning = new LearningStore(stateDir);
   let result: string;
   if (!action || action === "help") {
-    result = "Read-only six-tool project commands: devspace-project learn-suggest | learn-recall QUERY | learn-stats | arch-validate. Use the project tool for explicit architecture changes or verified learning promotion when available.";
+    result = "Read-only six-tool project commands: devspace-project learn-review | learn-suggest | learn-recall QUERY | learn-stats | arch-validate. Use the project tool for recording retrospectives or verified Skill promotion when available.";
+  } else if (action === "learn-review") {
+    const review = learning.review(root);
+    result = [
+      ...review.notes.slice(0, 5).map((note) => `note=${note.id} [${note.outcome}] ${note.title}: ${note.summary.slice(0, 150)}`),
+      ...review.failures.slice(0, 5).map((ep) => `failure=${ep.id} ${ep.tool}: ${ep.outputSummary.slice(0, 150)}`),
+      ...review.verifiedChecks.map((entry) => `verified-check=${entry.command} count=${entry.occurrences}`),
+    ].join("\n") || "No retrospective notes or relevant recent failures/checks.";
   } else if (action === "learn-suggest") {
     const suggestions = learning.suggestVerifiedProcedures(root, 5);
     result = suggestions.length ? suggestions.map((entry) => (
@@ -650,12 +657,13 @@ async function handleProjectCompatCommand(command: string, root: string, stateDi
     )).join("\n") : "No recent repeated verified checks. No skill was created or promoted.";
   } else if (action === "learn-stats") {
     const stats = learning.stats(root);
-    result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.candidates} candidates, ${stats.promoted} promoted.`;
+    result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.notes} retrospectives, ${stats.candidates} candidates, ${stats.promoted} promoted.`;
   } else if (action.startsWith("learn-recall ")) {
     const query = action.slice("learn-recall ".length).trim();
     if (!query || query.length > 140) throw new Error("learn-recall query must contain 1-140 characters.");
     const recalled = learning.recall(root, query, 5);
     const lines = [
+      ...recalled.notes.map((note) => `note=${note.id} [${note.outcome}] ${note.title} summary=${note.summary.slice(0, 150)} lesson=${note.lessons.join("; ").slice(0, 130)}`),
       ...recalled.candidates.map((candidate) => `candidate=${candidate.id} status=${candidate.status} title=${candidate.title.slice(0, 100)}`),
       ...recalled.episodes.map((episode) => `episode=${episode.id} ${episode.success ? "ok" : "failed"} tool=${episode.tool} input=${episode.inputSummary.slice(0, 135)} output=${episode.outputSummary.slice(0, 135)}`),
     ];

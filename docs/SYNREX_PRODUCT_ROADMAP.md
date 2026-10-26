@@ -316,6 +316,18 @@ The read-only `project learn_suggest` action lists repeated successful check
 commands and their supporting episode IDs, without creating or promoting
 skills. Suggestions are not proof of end-to-end productivity or correctness.
 
+**2026-10-26 source candidate (not a production-delivery claim):** Task-level
+retrospectives now have a project-scoped SQLite note index. Workflow checkpoints
+update a self-reported retrospective idempotently; GPT can call `project
+learn_review` and `learn_record` to preserve root causes, resolution steps,
+lessons, checks and evidence references. Recall includes notes alongside tool
+episodes and Skill candidates, including a read-only six-tool fallback.
+`learn_distill(noteId)` can draft a candidate from a retrospective when
+successful episode IDs are cited, but only the existing independently verified
+`learn_promote` can write a project Skill. See
+`docs/DEVELOPMENT_LEARNING.md`. Real-client deployment, semantic quality and
+reuse-versus-baseline improvement remain separate acceptance gates.
+
 **UI1: guarded owner operations**
 
 - Add task cancel/details, node drain/reconnect and memory candidate

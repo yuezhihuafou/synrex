@@ -55,6 +55,8 @@ test("console distinguishes historical detached dispatch receipts from verified 
   t.after(() => rm(stateDir, { force: true, recursive: true }));
   const learning = new LearningStore(stateDir);
   const workspaceRoot = path.join(stateDir, "project");
+  learning.recordNote({ workspaceRoot, taskKey: "incident-1", source: "reflection",
+    title: "Test recovery", outcome: "completed", summary: "Recovered test." });
   learning.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
     toolOutput: { structuredContent: { result: "run=run_verified exit=0" } } });
   learning.recordToolCall({ workspaceRoot, tool: "exec_command", toolInput: { cmd: "pnpm test" },
@@ -69,4 +71,5 @@ test("console distinguishes historical detached dispatch receipts from verified 
   const snapshot = readConsoleSnapshot(stateDir, "test-release");
   assert.equal(snapshot.memory.episodes, 2);
   assert.equal(snapshot.memory.successful, 1);
+  assert.equal(snapshot.memory.notes, 1);
 });
