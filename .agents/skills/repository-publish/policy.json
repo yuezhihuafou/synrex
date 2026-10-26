@@ -1,0 +1,6 @@
+{
+  "project": "Synrex",
+  "canonical_origin": "https://github.com/yuezhihuafou/synrex.git",
+  "default_branch": "main",
+  "production_service": "devspace.service"
+}

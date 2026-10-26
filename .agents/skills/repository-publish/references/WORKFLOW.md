@@ -1,0 +1,9 @@
+# Synrex Git and release authority
+
+- **Canonical integration:** `https://github.com/yuezhihuafou/synrex.git`, `main`. Push ordinary finished work there without manufacturing a remote branch. Do not treat the upstream Waishnav/devspace repository as a push target.
+- **Development:** swy1 and gateway are independent peers. The current checked-out worktree can be a feature branch, detached Git worktree, or dirty. Inspect both when asked for "latest". Commit timestamps are not version ordering.
+- **Production:** swy1's active `devspace.service` uses a pinned, immutable build under `/home/swy/services/devspace/releases/`. The actual `systemctl --user show devspace.service -p ExecStart` plus `release-manifest.json` is authoritative. The running source revision need not be an ancestor of `main`; do not silently replace or label it as deployed when only code was pushed.
+- **Release versioning:** after verification, create an annotated `vMAJOR.MINOR.PATCH` tag against the exact released source commit; if a version already exists, do not move it. Production activation remains a separate audited, rollback-safe task. Historical `release/*` branches are not a naming convention to perpetuate.
+- **Integration from another branch:** in a clean checkout of main, `git fetch origin main`, `git merge --ff-only origin/main`, select relevant commits via `git cherry-pick`, test, then run `publish.py push-main`. Do not cherry-pick a full gateway history when only a tiny scoped change was requested. For substantial divergence prefer an explicit PR.
+- **Cross-host authentication:** run authenticated GitHub push on a trusted host with access; do not copy token secrets to gateway or commit credentials. Verification of remote refs is mandatory.
+- **Evidence:** report GitHub target URL, local and remote SHA, dirty-exclusion count, production SHA (if applicable), and actual test results. A clean push does not change deployed binaries.

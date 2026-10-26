@@ -1,5 +1,7 @@
 # Synrex — concise agent entrypoint
 
+**For Git commit, push, branch integration, tag, or release requests, follow `.agents/skills/repository-publish/SKILL.md` and its canonical-`main` preflight script.** A successful Git push never implies production deployment.
+
 **Before substantive product changes, read `docs/PRODUCT_CHARTER.md` (normative intent) and consult `docs/SYNREX_PRODUCT_ROADMAP.md` (verified delivery status).** Source, the pinned release, and tests establish actual behavior. Ordinary fixes do not need extra process. Read `docs/SYNREX_AGENT_PLAYBOOK.md` for changes involving security, release, multi-node routing, data/architecture contracts, UI, PRs, or production operations; it preserves the full engineering rules and paths without loading them for every simple task.
 
 ## Product and authority

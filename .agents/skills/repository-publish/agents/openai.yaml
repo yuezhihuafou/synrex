@@ -1,0 +1,3 @@
+interface:
+  display_name: Repository Publish
+  short_description: Consistent GitHub main pushes and release provenance
