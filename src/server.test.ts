@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -86,6 +87,33 @@ test("batch read preserves separate file ranges and existing single-file reads",
   const original = await context.client.callTool({ name: "read", arguments: { workspaceId, path: "a.ts" } });
   assert.notEqual(original.isError, true);
   assert.match(String(structuredContent(original).result), /alpha/);
+});
+
+test("MCP read delivers bounded visual evidence and preserves image blocks across batch reads", async t => {
+  const context = await fixture(t);
+  await copyFile(fileURLToPath(new URL("../docs/assets/v11-review-ui-before.png", import.meta.url)),
+    join(context.project, "screenshot.png"));
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const single = await context.client.callTool({ name: "read", arguments: { workspaceId, path: "screenshot.png" } });
+  assert.notEqual(single.isError, true);
+  const image = (single.content as Array<{ type: string; data?: string; mimeType?: string }>)
+    .find(item => item.type === "image");
+  assert.ok(image && typeof image.data === "string");
+  assert.equal(image.mimeType, "image/jpeg");
+  assert.ok(Buffer.from(image.data, "base64").length <= 120_000);
+  const meta = structuredContent(single).observation as { source: { kind: string; workspaceId: string }; previewOnly: boolean; imageCount: number };
+  assert.equal(meta.source.kind, "file.image");
+  assert.equal(meta.source.workspaceId, workspaceId);
+  assert.equal(meta.previewOnly, true);
+  assert.equal(meta.imageCount, 1);
+  const batch = await context.client.callTool({
+    name: "read", arguments: { workspaceId, files: [{ path: "screenshot.png" }] },
+  });
+  assert.notEqual(batch.isError, true);
+  assert.equal((batch.content as Array<{ type: string }>).filter(item => item.type === "image").length, 1);
+  const batchMeta = structuredContent(batch) as { observations: Array<{ path: string }> };
+  assert.equal(batchMeta.observations[0]?.path, "screenshot.png");
+  assert.ok(!JSON.stringify(structuredContent(batch)).includes(image.data));
 });
 
 test("MCP open_workspace records an actual chat title against a pseudonymous session", async (t) => {

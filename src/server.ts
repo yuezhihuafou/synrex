@@ -44,6 +44,10 @@ import {
   runWithRequestLogContext,
 } from "./logger.js";
 import { readFileTool } from "./pi-tools.js";
+import { isImagePath, readBoundedImagePreview } from "./image-preview.js";
+import { isVideoPath, parseVideoReadPath, readVideoFrames } from "./media-read.js";
+import { readRosImage } from "./ros2-camera-read.js";
+import { captureObservation, withObservationEvidence } from "./observation/evidence.js";
 import { readBatch, validateBatchFiles } from "./batch-read.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import {
@@ -734,7 +738,7 @@ function registerMcpSurface(
     toolNames.read,
     {
       title: "Read file",
-      description: "Read path or up to 8 file ranges via files, concurrently; full text and errors, not summaries. Read nested AGENTS and matching skills from open_workspace first. Advertised skill paths may be outside workspace.",
+      description: "Read text/images, sampled video frames, a ROS2 image topic, or up to 8 text/image files. Media is returned as real image blocks. Read applicable AGENTS and skills first.",
       inputSchema: {
         workspaceId: z
           .string()
@@ -758,6 +762,11 @@ function registerMcpSurface(
           .max(500)
           .optional()
           .describe("1-500 lines; default 250."),
+        frames: z.number().int().min(1).max(6).optional().describe("Video preview: 1-6 frames."),
+        startSeconds: z.number().min(0).optional().describe("Video interval start in seconds."),
+        endSeconds: z.number().positive().optional().describe("Video interval end in seconds."),
+        compare: z.boolean().optional().describe("Video: include a pixel difference preview."),
+        rosTopic: z.string().max(160).optional().describe("Read-only single snapshot from an ROS2 image topic on the workspace node."),
         files: z.array(z.object({
           path: z.string().min(1),
           offset: z.number().int().positive().optional(),
@@ -770,25 +779,92 @@ function registerMcpSurface(
       const startedAt = performance.now();
       const workspace = await workspaces.getWorkspace(workspaceId);
       if (input.files !== undefined) {
-        if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined) {
+        if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined
+          || input.frames !== undefined || input.startSeconds !== undefined
+          || input.endSeconds !== undefined || input.compare !== undefined || input.rosTopic !== undefined) {
           throw new Error("Use read.path or read.files, not both.");
         }
         const response = await readBatch(validateBatchFiles(input.files), async (file) => {
+          if (isVideoPath(file.path)) throw new Error("Read videos individually using read.path.");
           const readPath = workspaces.resolveReadPath(workspace, file.path);
-          const result = await readFileTool({ ...file, path: readPath.absolutePath }, {
+          const preview = isImagePath(file.path) ? await readBoundedImagePreview(readPath.absolutePath) : undefined;
+          const result = preview ?? await readFileTool({ ...file, path: readPath.absolutePath }, {
             cwd: workspace.root, root: workspace.root, readRoots: readPath.readRoots,
           });
-          return { ...result, structuredContent: { result: contentText(result.content) } };
+          const originalStructured = "structuredContent" in result ? result.structuredContent : undefined;
+          const normalized = { ...result, structuredContent: {
+            ...originalStructured, result: originalStructured?.result ?? contentText(result.content),
+          } };
+          const observed = isImagePath(file.path) && !("isError" in result && result.isError === true)
+            ? withObservationEvidence(normalized, {
+              kind: "file.image", locator: file.path, workspaceId,
+            }, { previewOnly: preview !== undefined }) : normalized;
+          return observed;
         });
         logToolCall(config, { tool: toolNames.read, workspaceId,
           success: response.structuredContent.errorCount === 0,
           durationMs: Math.round(performance.now() - startedAt) });
         return response;
       }
-      if (typeof input.path !== "string" || !input.path.trim()) {
-        throw new Error("read.path is required when read.files is not supplied.");
+      const legacyRosTopic = input.path?.startsWith("ros2://") ? input.path.slice("ros2://".length) : undefined;
+      if (input.rosTopic !== undefined || legacyRosTopic !== undefined) {
+        if ((input.path !== undefined && input.path !== `ros2://${legacyRosTopic}`)
+          || (input.rosTopic !== undefined && legacyRosTopic !== undefined)
+          || input.offset !== undefined || input.limit !== undefined || input.frames !== undefined
+          || input.startSeconds !== undefined || input.endSeconds !== undefined || input.compare !== undefined) {
+          throw new Error("ROS2 snapshot uses rosTopic or ros2://path without other read options.");
+        }
+        const topic = input.rosTopic ?? legacyRosTopic!;
+        const response = await captureObservation({ capture: () => readRosImage(topic) }, {
+          kind: "ros2.image", locator: topic, workspaceId,
+        }, { previewOnly: true });
+        logToolCall(config, { tool: toolNames.read, workspaceId,
+          success: true, durationMs: Math.round(performance.now() - startedAt) });
+        return response;
       }
-      const readPath = workspaces.resolveReadPath(workspace, input.path);
+      if (typeof input.path !== "string" || !input.path.trim()) {
+        throw new Error("read.path or read.rosTopic is required when read.files is not supplied.");
+      }
+      const parsedVideo = parseVideoReadPath(input.path);
+      const readPath = workspaces.resolveReadPath(workspace, parsedVideo.path);
+      if (isVideoPath(parsedVideo.path)) {
+        if (input.offset !== undefined || input.limit !== undefined) {
+          throw new Error("Video does not use text line offsets; select frames and timestamps.");
+        }
+        if (parsedVideo.selection && (input.startSeconds !== undefined || input.endSeconds !== undefined || input.compare !== undefined)) {
+          throw new Error("Use video path suffix or explicit time selection, not both.");
+        }
+        const response = await captureObservation({ capture: () => readVideoFrames(readPath.absolutePath, {
+          frames: input.frames, startSeconds: input.startSeconds ?? parsedVideo.selection?.startSeconds,
+          endSeconds: input.endSeconds ?? parsedVideo.selection?.endSeconds,
+          compare: input.compare ?? parsedVideo.selection?.compare,
+        }) }, { kind: "file.video", locator: parsedVideo.path, workspaceId }, { previewOnly: true });
+        logToolCall(config, { tool: toolNames.read, workspaceId, path: input.path,
+          success: true, durationMs: Math.round(performance.now() - startedAt) });
+        return response;
+      }
+      if (input.frames !== undefined || input.startSeconds !== undefined
+        || input.endSeconds !== undefined || input.compare !== undefined) {
+        throw new Error("Video selection arguments require a video file.");
+      }
+      if (isImagePath(parsedVideo.path)) {
+        const preview = await readBoundedImagePreview(readPath.absolutePath);
+        const response = preview ?? await readFileTool({
+          ...input, path: readPath.absolutePath, limit: input.limit ?? 250,
+        }, { cwd: workspace.root, root: workspace.root, readRoots: readPath.readRoots });
+        if ("isError" in response && response.isError === true) {
+          logFailedToolResponse(config, { tool: toolNames.read, workspaceId, path: input.path }, response.content, startedAt);
+          return response;
+        }
+        logToolCall(config, { tool: toolNames.read, workspaceId, path: input.path,
+          success: true, durationMs: Math.round(performance.now() - startedAt) });
+        const originalStructured = "structuredContent" in response ? response.structuredContent : undefined;
+        return withObservationEvidence({
+          ...response, structuredContent: {
+            ...originalStructured, result: originalStructured?.result ?? contentText(response.content),
+          },
+        }, { kind: "file.image", locator: parsedVideo.path, workspaceId }, { previewOnly: preview !== undefined });
+      }
       const response = await readFileTool(
         { ...input, path: readPath.absolutePath, limit: input.limit ?? 250 },
         {

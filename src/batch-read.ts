@@ -14,8 +14,8 @@ export interface BatchReadResult {
 }
 
 export interface ReadResponseLike {
-  content?: Array<{ type: string; text?: string }>;
-  structuredContent?: { result?: unknown };
+  content?: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+  structuredContent?: { result?: unknown; observation?: unknown };
   isError?: boolean;
 }
 
@@ -42,6 +42,8 @@ export async function readBatch(
 ) {
   if (files.length < 1 || files.length > 8) throw new Error("Expected 1 to 8 ranges.");
   const results = new Array<BatchReadResult>(files.length);
+  const media = new Array<Array<{ type: "image"; data: string; mimeType: string }>>(files.length);
+  const observations = new Array<{ path: string; observation: unknown } | undefined>(files.length);
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(files.length, Math.max(1, Math.min(4, Math.floor(concurrency)))) }, async () => {
     while (next < files.length) {
@@ -49,6 +51,11 @@ export async function readBatch(
       const file = files[index]!;
       try {
         const response = await readOne(file);
+        media[index] = (response.content ?? []).filter((part): part is { type: "image"; data: string; mimeType: string } =>
+          part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string");
+        if (response.structuredContent?.observation) {
+          observations[index] = { path: file.path, observation: response.structuredContent.observation };
+        }
         const structuredText = response.structuredContent?.result;
         const result = typeof structuredText === "string" ? structuredText
           : response.content?.filter((part) => part.type === "text").map((part) => part.text ?? "").join("\n") ?? "";
@@ -60,11 +67,18 @@ export async function readBatch(
     }
   }));
   const errorCount = results.filter((entry) => entry.isError).length;
+  const images = results.flatMap((entry, index) => (media[index] ?? []).flatMap((block, imageIndex) => [
+    { type: "text" as const, text: `Image ${imageIndex + 1} from [${index + 1}/${results.length}] ${JSON.stringify(entry.path)}` },
+    block,
+  ]));
   return {
     content: [{ type: "text" as const, text: results.map((entry, index) =>
       `[${index + 1}/${results.length}] ${JSON.stringify(entry.path)}${entry.offset ? ` line ${entry.offset}` : ""}\n${entry.isError ? "ERROR: " : ""}${entry.result}`,
-    ).join("\n\n") }],
-    structuredContent: { files: results, fileCount: results.length, errorCount },
+    ).join("\n\n") }, ...images],
+    structuredContent: {
+      files: results, fileCount: results.length, errorCount,
+      observations: observations.filter((item): item is { path: string; observation: unknown } => item !== undefined),
+    },
     isError: errorCount > 0,
   };
 }

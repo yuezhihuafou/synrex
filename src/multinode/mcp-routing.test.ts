@@ -55,6 +55,14 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
           },
         };
       }
+      if (call.name === "read" && call.arguments.path === "media.png") {
+        return {
+          content: [{ type: "text", text: "remote preview" },
+            { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }],
+          structuredContent: { result: "remote preview",
+            observation: { observationId: "obs_remote", source: { kind: "file.image", workspaceId: "ws_remote" } } },
+        };
+      }
       return { structuredContent: { result: "remote-read" } };
     },
   };
@@ -106,6 +114,23 @@ test("MCP routing sends selected workspace to a remote node and keeps later tool
   assert.equal(calls[2]?.args.path, "a.ts");
   assert.equal(calls[3]?.args.path, "b.ts");
   assert.equal(calls[3]?.args.files, undefined);
+
+  const remoteImage = await handlers.get("read")!({ workspaceId, path: "media.png" }, {}) as {
+    content: Array<{ type: string; data?: string }>;
+    structuredContent: { observation: { observationId: string; source: { workspaceId: string } } };
+  };
+  assert.equal(remoteImage.content.find(item => item.type === "image")?.data, "iVBORw0KGgo=");
+  assert.equal(remoteImage.structuredContent.observation.observationId, "obs_remote");
+  assert.equal(remoteImage.structuredContent.observation.source.workspaceId, workspaceId);
+  const mixedBatch = await handlers.get("read")!({ workspaceId, files: [
+    { path: "media.png" }, { path: "b.ts" },
+  ] }, {}) as {
+    content: Array<{ type: string; data?: string }>;
+    structuredContent: { observations: Array<{ path: string; observation: { source: { workspaceId: string } } }> };
+  };
+  assert.equal(mixedBatch.content.find(item => item.type === "image")?.data, "iVBORw0KGgo=");
+  assert.equal(mixedBatch.structuredContent.observations[0]?.path, "media.png");
+  assert.equal(mixedBatch.structuredContent.observations[0]?.observation.source.workspaceId, workspaceId);
 
   const started = await handlers.get("exec_command")!({ workspaceId, cmd: "sleep 5" }, {}) as Record<string, unknown>;
   const globalTaskId = (started.structuredContent as Record<string, unknown>).taskId as string;

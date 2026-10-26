@@ -116,14 +116,16 @@ export function withMultiNodeRouting(
         // Fan out on the coordinator so legacy peers still only receive
         // their existing single-file read v1 contract.
         if (name === "read" && input.files !== undefined) {
-          if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined) {
+          if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined
+            || input.frames !== undefined || input.startSeconds !== undefined || input.endSeconds !== undefined
+            || input.compare !== undefined || input.rosTopic !== undefined) {
             throw new Error("Use read.path or read.files, not both.");
           }
-          return readBatch(validateBatchFiles(input.files), (file) =>
-            options.router.callWorkspaceTool({
+          return readBatch(validateBatchFiles(input.files), async (file) =>
+            rewriteOpaqueId(await options.router.callWorkspaceTool({
               workspaceId, name: "read", arguments: { workspaceId, ...file },
               meta: asMeta(extra._meta),
-            }),
+            }), route.localWorkspaceId, workspaceId),
           );
         }
         if (name === "exec_command" && isCompatTaskWait(name, input)) {
