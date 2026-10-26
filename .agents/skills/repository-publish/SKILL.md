@@ -9,6 +9,14 @@ Use existing `git`, `gh`, and repository-specific release scripts. This skill ad
 
 ## Routine commit / push
 
+For Synrex concurrent-chat work, run `python3 scripts/synrex-p0.py worktrees
+--base origin/main` and use `integration-plan --candidate <commit>` for each
+selected source before staging. The plan is read-only and identifies possible
+changed-file overlap; preserve dirty peers and unknown refs. Read
+`docs/platform/SYNREX_P0_CONTINUITY_INTEGRATION.md` before modifying the
+public ingress or doing a production service cutover. Gateway is not the
+mandatory development host.
+
 1. Determine the actual project, host, checkout/worktree, dirty status, `HEAD`, configured origin, remote default branch, and production release (when relevant). Run `python3 scripts/publish.py inspect` from the intended repository, using the skill script's full path. Do not guess newest by time, branch name, or host. Never stage all dirty files from another task.
 2. Scope and review edits, check for secrets, run relevant tests; stage exact files/hunks and make one coherent commit. Preserve unrelated work.
 3. **Default destination is canonical `origin/main`.** If working on another branch/detached worktree, integrate *selected* tested commits into a clean local `main` checkout based on fetched `origin/main` using fast-forward/cherry-pick as appropriate. Do not push the source branch merely because it is checked out. Resolve conflicts explicitly; do not force a merge of unrelated histories.

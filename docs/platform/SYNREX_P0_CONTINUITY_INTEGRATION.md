@@ -1,0 +1,170 @@
+# Synrex P0 — parallel development, ingress continuity and network ownership
+
+**Decision date:** 2026-10-26. **Source of truth:** the actual service, release
+manifest, Git commits and test results, not this document's snapshot.
+
+## Objective and constraints
+
+Multiple ordinary ChatGPT conversations may edit different aspects of the same
+repository concurrently, including Synrex itself, while robotics/research
+conversations rely on swy1's live Synrex MCP. Developing, testing and releasing
+Synrex must not casually interrupt other conversations or replay robot actions.
+
+- **swy1** owns the sole public HTTPS MCP/OAuth issuer and production SQLite;
+  robot device operations stay bound to their actual swy1 workspace.
+- **gateway** is an optional, independently running execution/compute peer,
+  **not** the mandatory Synrex development machine. It may take expensive
+  build/benchmark/ML tasks when useful; its outage cannot break swy1 local work.
+- **Git + independent Worktrees** are code-version authority. Neither a
+  conversation, a review snapshot nor a mutable checkout is a released build.
+- Reuse existing workspace IDs, durable task/run IDs, workflow checkpoints,
+  LearningStore, Console telemetry, systemd, SSH and Cloudflare; do not create a
+  second OAuth issuer, orchestration service, task database or autonomous LLM.
+- Ordinary code edits do not require approvals or synchronous global locks.
+  Only integration commits and production version changes are serialized.
+- The Research Harness remains a separate caller, not a Synrex product module.
+
+## Actual baseline, not an instruction to overwrite hosts
+
+At inspection, swy1 production was `20261026-synrex-learning-agy-c148b6a`
+with source `c148b6a`, while `origin/main` was `d510ba8` (diverged Git
+histories). The independent gateway peer reported `4daea81`; a gateway QA
+worktree also contained `4351ab2` with task redelivery/diagnostics changes.
+Gateway's mutable checkout had tracked and untracked edits. **Do not reset,
+prune or blindly cherry-pick those trees.** A Git review snapshot is not a
+verified release. Preserve all unique source changes until reviewed.
+
+The inspected network was:
+
+| Host | Bound address/port | Component | Responsibility |
+| --- | --- | --- | --- |
+| swy1 | 127.0.0.1:7676 | `devspace.service` | public-authoritative MCP/OAuth Core |
+| swy1 | 127.0.0.1:20241 | `cloudflared-devspace.service` | Cloudflare local metrics; public ingress managed separately |
+| swy1 | 127.0.0.1:3001/18960 | `memhub.service`/`memhub-core.service` | optional memory |
+| swy1 | 127.0.0.1:11435 | `devspace-qwen-tunnel.service` | SSH local forwarding to gateway Qwen |
+| gateway | 127.0.0.1:7676 | `devspace.service` | independent peer Core, **not** swy1 production |
+| gateway | 127.0.0.1:7678 | `devspace-swy1-lan-tunnel.service` | SSH forward to swy1:7676 |
+| gateway | 127.0.0.1:3001 | `memhub-swy1-tunnel.service` | SSH forward to swy1 MemHub |
+| gateway | 127.0.0.1:11435 | `devspace-local-operator.service` | local model |
+| gateway | 127.0.0.1:1089 | `synrex-agy-socks.service` | optional AGY SOCKS |
+
+The gateway Cloudflare public tunnel is **disabled** while swy1 owns ingress.
+Do not disable the working private SSH relay because it looks redundant. Old
+benchmark/diagnostic listeners on swy1 (observed 8769, 8771, 8783) must be
+identified before retirement, never killed blindly. Cloudflare runs with a
+token and its remotely configured ingress mapping was not verified locally.
+
+## P0 implementation and commands
+
+### 0. Inventory all local worktrees and candidate commits
+
+```sh
+python3 scripts/synrex-p0.py worktrees --repo . --base origin/main
+python3 scripts/synrex-p0.py integration-plan --repo . --base origin/main --candidate HEAD
+```
+
+Run inventory independently on each peer or from its own workspace; the CLI
+does **not** guess that the same path on different hosts is the same checkout.
+The report flags non-pruned untracked edits, detached commits and divergence.
+`integration-plan` uses merge bases and changed-path overlap as conservative
+**review hints**, not as proof of a textual/semantic conflict; no cherry-picks
+or pushes are performed. When planning cross-host work, first make its exact
+Git object reachable through a deliberately reviewed transfer, not SSH-copy a
+dirty working directory. Never clean up all inactive Worktrees merely to make
+the report look green.
+
+### 1. Observe local network ownership and active production tasks
+
+```sh
+python3 scripts/synrex-p0.py network --node swy1 --probe
+# On gateway, against a matching checked-out copy of this source:
+python3 scripts/synrex-p0.py network --node gateway --probe
+python3 scripts/synrex-p0.py release-check --node swy1
+```
+
+`config/ops/network-topology.json` records **expected** port owners, tunnel
+edges and critical production services. The CLI compares user-systemd state,
+listening IP:port, process cgroup owner and optional local loopback HTTP
+health. It flags unexpectedly wide binds, missing ports, unexpected services,
+static port conflicts and unknown states. Remote Cloudflare ingress and the
+actual ChatGPT client connection must be checked separately. Never log Tunnel
+tokens, OAuth credentials or request bodies. Additional QA listeners should
+use ephemeral loopback ports rather than permanent global assignments.
+
+`release-check` blocks a **known-busy** `devspace.service` restart if there are
+live durable-task units or a failed production Core/public Tunnel. Optional
+Qwen/MemHub service health is diagnostic, not a mandatory release gate. This
+tool **cannot measure ordinary in-flight MCP requests** on the 2026-10-26
+running Core and must not claim zero-interruption safety.
+
+### 2. Serialize privileged release activation
+
+`deploy/activate-owner-release.sh` now takes a machine-local `flock` in the
+owner's state directory and runs the release-check **before** changing the
+systemd pinned-release drop-in. A competing ChatGPT release or a known live
+task causes exit code `75`, with a read-only JSON preflight receipt. No task
+is canceled to make a deployment pass. The original pin and state backup are
+preserved. A failed systemd activation explicitly restores the old drop-in and
+returns a failure exit code (previously this exit code was unreliable).
+
+These protections only take effect **when this new candidate's activation
+script is used**. The currently running pinned Core has not been changed by
+an isolated source edit; operator or other scripts invoking `systemctl restart`
+directly remain outside this guard.
+
+### 3. Isolate and validate the stable ingress prototype
+
+`scripts/ingress-gate.mjs` is a small optional loopback-only HTTP forwarder
+using Node's standard library. In isolated tests it preserves Host, path,
+method, request body and response; it has a user-owner UNIX control socket
+(`0600`) for `STATUS`, bounded `PAUSE` and `RESUME`. While Core is unavailable,
+it bounds pending requests and reconnects **only before dispatch**. It never
+automatically retries a request once forwarded to Core, because a lost
+response does not prove the tool had no side effects.
+
+**It is NOT installed on production.** A future controlled migration would:
+
+1. Verify the Cloudflare remote ingress mapping and current service owner.
+2. Run the ingress on disposable QA ports against a fresh isolated Core/OAuth
+   state; compare GET, authenticated POST, streaming, cancellation and refresh.
+3. Prove a bounded pause/drain/switch/resume/rollback flow and prevent two
+   independent Core processes from writing the owner SQLite/OAuth state.
+4. Arrange the **one-time** public `:7676` ownership cutover from Core to
+   stable ingress. This cutover itself may cause a short interruption; do not
+   market it as zero downtime without observing actual ChatGPT clients.
+5. For subsequent releases, check active requests and preserve task IDs,
+   waiting only a bounded period. If a Core exits mid-request, return an
+   explicit unknown outcome and recover from saved run receipts, never replay
+   a shell write or physical robot action blindly.
+
+The proxy's prototype control socket is not yet connected to the production
+release script. Implement and test that handshake **before** a public port
+cutover. Socket permissions are one layer of local owner authority; they do
+not replace production OAuth.
+
+## P0 acceptance and remaining work
+
+| Scenario | Required evidence | Current status |
+| --- | --- | --- |
+| Concurrent Console/Mem/Subagent development | 3 independent Worktrees, no overwritten dirty files, selected commits integrated once | inventory and static integration plan implemented; full convergence pending |
+| Concurrent release requests | second operation refused without modifying unit/drop-in | isolated mocked systemd test |
+| Upgrade during durable robot simulation | restart refused while task is running, run ID survives reconnect | known-busy guard tested; real-client restart test pending |
+| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | isolated proxy tests; **not live deployed** |
+| Cloudflare/SSH/GPU peer | swy1 works with gateway offline; no duplicate public OAuth, no port conflict | live inventory partial; fault injection pending |
+| Console observability | actual process/port/tunnel + request/task/run causal timeline, unknowns labeled | core historical diagnostics exist; P0 inventory not yet wired to UI |
+| LayerFS | meaningful measured advantage versus Git Worktree | deliberately deferred |
+
+### Test commands
+
+```sh
+python3 -m unittest discover -s tests -p 'test_synrex_p0.py' -v
+python3 -m unittest discover -s tests -p 'test_activate_owner_release.py' -v
+node --test scripts/ingress-gate.test.mjs
+pnpm typecheck && pnpm build
+```
+
+**Promotion rule:** no public Tunnel/port migration, OAuth migration or swy1
+restart solely because these source and QA tests pass. First reconcile the
+canonical `main` versus the actual pinned production source and the retained
+gateway unique commits, preserve the owner-state backup, and exercise the
+actual authenticated MCP host path. A Git push and a deployment are distinct.
