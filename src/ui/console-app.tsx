@@ -642,6 +642,7 @@ function Usage({d}:{d:Snapshot}) {
       </div>
       <p className="footnote">小时汇总起点：{time(coverage.trafficPersistedFrom??undefined)}；Git 账本起点：{time(coverage.codePersistedFrom??undefined)}；最早可见 MCP 诊断：{time(coverage.diagnosticFirstAt??undefined)}。{coverage.diagnosticsCapped||coverage.episodesCapped||coverage.codeReviewsCapped?"部分历史查询达到上限，数据可能遗漏。":"旧数据可能因历史轮转或采集启用时间而缺失。"} 小时汇总边界可能有最多约 1 小时误差。统计来自当前 Console 所在节点的可见 MCP 流量与本地代码记录，远端 Worker 独立执行的数据可能缺失；此页面不是计费账本。</p>
     </Panel>
+    <details className="usage-legacy"><summary>原有七天离线统计（独立采集）</summary><UsagePage/></details>
   </div>;
 }
 function Memory({d}:{d:Snapshot}) {
