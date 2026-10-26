@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { createIngressGate } from './ingress-gate.mjs';
+import { sendIngressCommand } from './ingress-ctl.mjs';
 
 async function backend(handler) {
   const server = createServer(handler);
@@ -57,6 +58,7 @@ test('ingress preserves OAuth paths, host, POST body and response without rewrit
   assert.equal(result.status, 201);
   assert.equal(result.body, 'POST /mcp?probe=1 synrex.example.test action=read');
   assert.deepEqual(await control(socket, 'STATUS'), { paused: false, active: 0, pending: 0, upstreamPort: original.port });
+  assert.equal((await sendIngressCommand(socket, 'STATUS')).active, 0);
 });
 
 test('PAUSE queues new request and does not create another writable backend', async (t) => {

@@ -117,7 +117,15 @@ directly remain outside this guard.
 `scripts/ingress-gate.mjs` is a small optional loopback-only HTTP forwarder
 using Node's standard library. In isolated tests it preserves Host, path,
 method, request body and response; it has a user-owner UNIX control socket
-(`0600`) for `STATUS`, bounded `PAUSE` and `RESUME`. While Core is unavailable,
+(`0600`) for `STATUS`, bounded `PAUSE` and `RESUME`. `scripts/ingress-ctl.mjs`
+is the read-only/status and guarded pause/resume CLI client. When an actual
+stable gate is installed and `SYNREX_INGRESS_CONTROL_SOCKET` explicitly points
+to it, the release script pauses new requests, checks for zero accepted active
+responses before restart, and always resumes after success or rollback. An
+unavailable controller blocks a requested controlled cutover before restart.
+Without this environment variable, the older ingress path remains in use and
+the script reports that active MCP requests cannot be fully observed.
+While Core is unavailable,
 it bounds pending requests and reconnects **only before dispatch**. It never
 automatically retries a request once forwarded to Core, because a lost
 response does not prove the tool had no side effects.
@@ -137,10 +145,11 @@ response does not prove the tool had no side effects.
    explicit unknown outcome and recover from saved run receipts, never replay
    a shell write or physical robot action blindly.
 
-The proxy's prototype control socket is not yet connected to the production
-release script. Implement and test that handshake **before** a public port
-cutover. Socket permissions are one layer of local owner authority; they do
-not replace production OAuth.
+This controller handshake is tested with the local fake Core and mocked
+activation logic, **not** deployed to the public swy1 endpoint. Verify the
+one-time ingress port cutover, exact systemd environment and authenticated
+client behavior before relying on it. Socket permissions are one layer of
+local owner authority; they do not replace production OAuth.
 
 ## P0 acceptance and remaining work
 
