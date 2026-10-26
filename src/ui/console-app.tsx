@@ -16,7 +16,7 @@ type Snapshot = {
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits?: string[] | null;
-  memory: { episodes: number; successful: number; candidates: number; promoted: number };
+  memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
   diagnostics: { count: number; observability?: { coverage: { observedEvents:number; observedRequests:number; tokenUsage:string; hostInference:string }; latency: { completed:number; medianMs:number|null; p95Ms:number|null; maximumMs:number|null }; lifecycle: { httpCompleted:number; closedEarly:number; handlerFailed:number; toolCompletedWithoutHttp:number; unknown:number }; transfer: { observedInputBytes:number; observedOutputBytes:number; approximateInputTokens:number|null; approximateOutputTokens:number|null }; capacity?: {inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null} }; requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string; runId?: string;
     classification: string; status?: number }> };
 };
@@ -332,12 +332,13 @@ function Memory({d}:{d:Snapshot}) {
   return <div className="stack"><div className="metrics">
     <Metric symbol="◇" label="学习记录" value={d.memory.episodes} info="历史执行事件"/>
     <Metric symbol="✓" label="成功记录" value={d.memory.successful} info="不等于验证过的知识"/>
+    <Metric symbol="≡" label="开发复盘" value={d.memory.notes} info="任务总结与纠错经验"/>
     <Metric symbol="☷" label="候选经验" value={d.memory.candidates} info="待审核"/>
     <Metric symbol="⬡" label="已晋升经验" value={d.memory.promoted} info="需保留证据"/>
   </div><Panel title="记忆与项目约束" hint="一个执行平台，一份真实来源">
     <div className="memory-intro"><span className="round-symbol large">◇</span><div><h2>让经验有来源、有验证。</h2>
       <p>Synrex 复用 AGENTS.md、项目架构约束、LearningStore 和工作流检查点。原始运行日志不等于长期知识；
-      后续将支持提炼、审核、关系浏览和来源追踪，不重复建设另一套记忆服务。</p>
+      现已支持开发复盘、按需检索和经验证的 Skill 晋升；复盘本身不等于经过验证的事实，不重复建设另一套记忆服务。</p>
       <div className="tags"><span>Architecture</span><span>LearningStore</span><span>Evidence</span><span>Git</span></div></div></div>
     <p className="footnote">仅展示现有统计数据。不伪造知识关系，也不自动推广未经验证的操作经验。</p>
   </Panel></div>;

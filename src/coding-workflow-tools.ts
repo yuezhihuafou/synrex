@@ -3,6 +3,7 @@ import * as z from "zod/v4";
 import type { McpRegistrationTarget } from "./mcp-modern-server.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
 import { withCodingWorkflowStore, type CodingWorkflowCheckpoint } from "./coding-workflows.js";
+import { LearningStore } from "./learning-store.js";
 import { textBlock } from "./tool-surfaces/shared.js";
 import { workspaceIdDescription } from "./tool-surfaces/types.js";
 
@@ -137,6 +138,24 @@ export function registerCodingWorkflowTools(input: {
     const result = withCodingWorkflowStore(stateDir, (store) => store.checkpoint(workspace.root, {
       workflowId: id, expectedRevision, status, checkpoint,
     }));
+    // Learning is best-effort and observational. A checkpoint is self-reported
+    // context, not an independent test receipt or a verified Skill.
+    try {
+      new LearningStore(stateDir).recordNote({
+        workspaceRoot: workspace.root,
+        taskKey: `workflow:${result.workflowId}`,
+        source: "workflow",
+        title: result.title,
+        outcome: result.status,
+        summary: result.checkpoint.summary,
+        resolution: result.checkpoint.completedSteps,
+        checks: result.checkpoint.checks,
+        nextSteps: [...result.checkpoint.nextSteps, ...result.checkpoint.blockers],
+      });
+    } catch {
+      // Never fail an already-persisted workflow checkpoint because an
+      // optional retrospective index could not be updated.
+    }
     return {
       content: [textBlock(`Saved ${result.workflowId} revision ${result.revision}, status ${result.status}. Next: ${result.checkpoint.nextSteps.join("; ") || "none"}.`) ],
       structuredContent: { ...result },

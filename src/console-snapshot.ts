@@ -36,7 +36,7 @@ export interface ConsoleSnapshot {
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string }>;
   activeTaskUnits: string[] | null;
-  memory: { episodes: number; successful: number; candidates: number; promoted: number };
+  memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
   diagnostics: {
     count: number;
     observability: ReturnType<typeof summarizeConsoleObservability>;
@@ -97,7 +97,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   const workflowDb = path.join(stateDir, "coding-workflows.sqlite");
   const { nodes, tasks, memory } = readOnly(mainDb, {
     nodes: [] as ConsoleSnapshot["nodes"], tasks: [] as ConsoleSnapshot["tasks"],
-    memory: { episodes: 0, successful: 0, candidates: 0, promoted: 0 },
+    memory: { episodes: 0, successful: 0, notes: 0, candidates: 0, promoted: 0 },
   }, (db) => {
     const rows = db.prepare("select id, kind, alias, health, platform_json, capabilities_json, last_seen_at from execution_nodes order by last_seen_at desc limit 30").all() as NodeRow[];
     const allCapabilities = rows.map((row) => parseObject(row.capabilities_json));
@@ -130,6 +130,8 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       memory: {
         episodes: count(db, "select count(*) as n from learning_episodes"),
         successful: count(db, `select count(*) as n from learning_episodes where success = 1 and not ${LEGACY_UNVERIFIED_DISPATCH_SQL}`),
+        notes: db.prepare("select 1 from sqlite_master where type = 'table' and name = 'learning_notes'").get()
+          ? count(db, "select count(*) as n from learning_notes") : 0,
         candidates: count(db, "select count(*) as n from learning_candidates"),
         promoted: count(db, "select count(*) as n from learning_candidates where status = 'promoted'"),
       },

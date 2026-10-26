@@ -16,6 +16,7 @@ import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { DurableTaskManager } from "./durable-tasks.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { LearningStore } from "./learning-store.js";
 import { runDurableTask } from "./durable-task-runner.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { createMcpServer, createServer } from "./server.js";
@@ -178,6 +179,79 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
   });
   assert.notEqual(checkpoint.isError, true);
   assert.equal(structuredContent(checkpoint).revision, 1);
+  const learning = new LearningStore(join(context.project, "..", ".state"));
+  const retrospective = learning.listNotes(context.project);
+  assert.equal(retrospective.length, 1, "workflow checkpoint creates a durable retrospective");
+  assert.equal(retrospective[0]?.outcome, "active");
+  assert.match(retrospective[0]?.summary ?? "", /starting tests/);
+  assert.deepEqual(retrospective[0]?.checks, ["pnpm typecheck: not run yet"]);
+  const review = await context.client.callTool({
+    name: "project", arguments: { workspaceId, action: "learn_review" },
+  });
+  assert.notEqual(review.isError, true);
+  assert.match(contentText(review), /P2 resume test/);
+  const captured = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_record",
+      args: { taskKey: "wait-for-test", title: "Avoid premature task completion",
+        summary: "Pending commands do not prove a passing test.", outcome: "partial",
+        rootCause: "Task handle only", lessons: ["Inspect terminal results."] },
+    },
+  });
+  assert.notEqual(captured.isError, true, contentText(captured));
+  assert.equal(learning.listNotes(context.project).length, 2);
+  const noteId = structuredContent(captured).noteId as string;
+  const noEvidence = await context.client.callTool({
+    name: "project", arguments: { workspaceId, action: "learn_distill", args: { noteId } },
+  });
+  assert.equal(noEvidence.isError, true, "retrospective text alone is not a verified Skill");
+  learning.recordToolCall({
+    workspaceRoot: context.project, tool: "exec_command",
+    toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { running: false, exitCode: 0, result: "passed" } },
+  });
+  const passed = learning.recall(context.project, "pnpm test").episodes.find((ep) => ep.success);
+  assert.ok(passed);
+  const refined = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_record", args: {
+        taskKey: "wait-for-test", title: "Avoid premature task completion",
+        summary: "Wait for a terminal command receipt.",
+        outcome: "completed", rootCause: "Task handle only",
+        resolution: ["Wait until the command finishes."],
+        lessons: ["Inspect terminal results."],
+        checks: ["pnpm test"],
+        evidenceEpisodeIds: [passed.id],
+      },
+    },
+  });
+  assert.notEqual(refined.isError, true, contentText(refined));
+  assert.equal(structuredContent(refined).noteId, noteId, "reflection updates are idempotent");
+  const distilled = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_distill", args: { noteId },
+    },
+  });
+  assert.notEqual(distilled.isError, true, contentText(distilled));
+  const candidateId = structuredContent(distilled).candidateId as string;
+  const promoted = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_promote", args: {
+        candidateId, validationNote: "pnpm test passed in the selected workspace.",
+      },
+    },
+  });
+  assert.notEqual(promoted.isError, true, contentText(promoted));
+  assert.match(contentText(promoted), /promoted to \.agents\/skills\//);
+  // This test also asserts a clean Git handoff snapshot below. Verify the
+  // materialized Skill, then remove only the test-created file.
+  const skillPath = structuredContent(promoted).skillPath as string;
+  await access(join(context.project, skillPath));
+  await rm(join(context.project, skillPath));
+  const restored = await context.client.callTool({
+    name: "project", arguments: { workspaceId, action: "learn_recall", args: { query: "premature" } },
+  });
+  assert.match(contentText(restored), /Avoid premature task completion/);
   const stale = await context.client.callTool({
     name: "workflow_checkpoint",
     arguments: {
