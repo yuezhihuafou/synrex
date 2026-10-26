@@ -228,3 +228,32 @@ test('exceptional ingress shutdown is bounded even if a stream never ends', asyn
   assert.ok(Date.now() - before < 4500, 'shutdown may not hang on an endless SSE stream');
   assert.notEqual(await result, 'complete');
 });
+
+test('peer POST long polls finish naturally after PAUSE, and replacement poll remains queued', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
+  let calls = 0;
+  const upstream = await backend((_req, res) => {
+    calls++;
+    setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"request":null}'); }, 220);
+  });
+  const socket = join(tmp, 'control.sock');
+  const ingress = createIngressGate({ upstreamPort: upstream.port, controlSocket: socket });
+  t.after(async () => { await ingress.close(); await upstream.close(); await rm(tmp, { recursive: true, force: true }); });
+  const port = await ingress.start();
+  const first = http(port, '/_devspace/node/v1/poll', '{}');
+  await sleep(35);
+  const before = await control(socket, 'STATUS');
+  assert.equal(before.active, 1);
+  assert.equal(before.activeRequests[0].method, 'POST');
+  assert.equal(before.activeRequests[0].route, 'other');
+  await control(socket, 'PAUSE');
+  const queued = http(port, '/_devspace/node/v1/poll', '{}');
+  await sleep(50);
+  assert.equal((await control(socket, 'STATUS')).pending, 1);
+  assert.equal((await first).status, 200, 'current peer poll must be allowed to finish');
+  assert.equal((await control(socket, 'STATUS')).active, 0);
+  assert.equal(calls, 1, 'replacement poll cannot reach Core during release');
+  await control(socket, 'RESUME');
+  assert.equal((await queued).status, 200);
+  assert.equal(calls, 2);
+});

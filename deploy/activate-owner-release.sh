@@ -142,13 +142,18 @@ if test -n "$ingress_socket"; then
     exit 75
   fi
   paused=true
+  # Gateway peers hold /_devspace/node/v1/poll for 25 seconds and immediately
+  # re-poll. The old six-second drain ALWAYS conflicted with normal peer
+  # traffic. PAUSE blocks the *next* poll; the current one must be allowed to
+  # finish naturally. Keep a bound below the ingress 75s pause lease.
   idle=false
-  for _ in $(seq 1 60); do
+  drain_deadline=$((SECONDS + 40))
+  while test "$SECONDS" -lt "$drain_deadline"; do
     if node "$ingress_ctl" --socket "$ingress_socket" --command STATUS --idle >/dev/null 2>&1; then
       idle=true
       break
     fi
-    sleep 0.1
+    sleep 0.4
   done
   if test "$idle" != true; then
     resume_ingress || true

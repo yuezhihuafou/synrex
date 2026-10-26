@@ -262,6 +262,18 @@ header, payload or credential is recorded. Dedicated tests simulate a
 half-written SSE stream and assert that the connection and activity count
 both terminate.
 
+**Live root-cause confirmation after installing the diagnostic ingress:**
+four constantly renewing `POST /_devspace/node/v1/poll` requests were
+identified from gateway. Actual Core logs showed each successful poll holds
+the connection for **25,000–25,002 ms** before returning HTTP 200 and
+immediately re-polling. They are normal peer infrastructure traffic, not
+unfinished user tool actions. The six-second `PAUSE` drain deadline therefore
+could not reliably reach zero. The updated activation and explicit rollback
+now bound their drain to **40 seconds**, which permits an in-progress peer
+poll to return while the gate queues its replacement. This does not abort
+side-effecting MCP POSTs or systemd durable tasks; an uncompleted request
+still blocks promotion after the deadline, with a recorded refusal.
+
 Upgrading the *stable ingress code itself* is exceptional, not part of routine
 Core deployments. `deploy/request-ingress-upgrade.sh <verified-main-release>`
 starts an independent user-systemd job with a pinned unit backup, preflight

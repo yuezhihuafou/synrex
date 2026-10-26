@@ -103,11 +103,14 @@ trap 'exit 143' TERM
 node "$ctl" --socket "$socket" --command PAUSE >/dev/null
 paused=true
 idle=false
-for _ in $(seq 1 60); do
+# The four gateway peer poll requests complete after up to 25s. The previous
+# 6s drain caused false busy blocks even when no user tool was executing.
+drain_deadline=$((SECONDS + 40))
+while test "$SECONDS" -lt "$drain_deadline"; do
   if node "$ctl" --socket "$socket" --command STATUS --idle >/dev/null 2>&1; then
     idle=true; break
   fi
-  sleep 0.1
+  sleep 0.4
 done
 if test "$idle" != true; then
   echo 'ROLLBACK_BLOCKED in-flight requests cannot safely drain' >&2
