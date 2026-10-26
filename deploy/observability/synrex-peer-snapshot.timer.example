@@ -1,0 +1,10 @@
+[Unit]
+Description=Sample optional Synrex gateway diagnostic metadata every minute
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=60
+Persistent=true
+
+[Install]
+WantedBy=timers.target

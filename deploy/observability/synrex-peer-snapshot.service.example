@@ -1,0 +1,12 @@
+[Unit]
+Description=Synrex optional gateway observability mirror (read-only)
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/synrex-observability/collector.env
+ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node %h/.local/share/synrex-observability/peer-snapshot.mjs
+NoNewPrivileges=yes
+TimeoutStartSec=20
+MemoryMax=96M
+CPUQuota=20%
+UMask=0077

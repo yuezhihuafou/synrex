@@ -6,6 +6,7 @@ import type { NodeLinkRequest } from "./link-hub.js";
 import type { ToolInvoker } from "../tool-invoker.js";
 import { runWithRequestLogContext } from "../logger.js";
 import { traceEvent, traceStage, errorCategory } from "../trace-stages.js";
+import { newSpanId, validOtelContext } from "../otel-context.js";
 import type { DiagnosticEvent } from "../diagnostic-trace.js";
 
 export interface NodeWorkerClientOptions {
@@ -134,7 +135,8 @@ export class NodeWorkerClient {
   // their workspace. Preserve delivery order without serializing other projects.
   private schedule(request: NodeLinkRequest): Promise<void> {
     const receivedAt = performance.now();
-    const fields = { requestId: request.id, nodeRequestId: request.id, traceId: request.call.meta?.["devspace/traceId"], nodeId: this.options.node.id, tool: request.call.name };
+    const fields = { requestId: request.id, nodeRequestId: request.id, traceId: request.call.meta?.["devspace/traceId"],
+      otelTraceId: request.call.meta?.["devspace/otelTraceId"], nodeId: this.options.node.id, tool: request.call.name };
     try { this.options.onDiagnostic?.("node_peer_received", fields); } catch { /* Observational. */ }
     const execute = () => {
       try { this.options.onDiagnostic?.("node_peer_started", { ...fields, queuedMs: Math.round(performance.now() - receivedAt) }); } catch { /* Observational. */ }
@@ -173,8 +175,12 @@ export class NodeWorkerClient {
     try {
       const parent = request.call.meta?.["devspace/parentRequestId"];
       const trace = request.call.meta?.["devspace/traceId"];
+      const otelTraceId = request.call.meta?.["devspace/otelTraceId"];
+      const otelParentSpanId = request.call.meta?.["devspace/otelParentSpanId"];
+      const otel = validOtelContext({ otelTraceId, otelSpanId: newSpanId(), otelParentSpanId });
       await runWithRequestLogContext({ requestId: typeof parent === "string" ? parent : request.id,
         traceId: typeof trace === "string" ? trace : request.id, nodeRequestId: request.id, path: "peer",
+        ...(otel ?? {}),
         emitDiagnostic: this.options.onDiagnostic,
       }, () => traceStage("peer_execute", () => this.executeWithReceipt(request), { nodeId: this.options.node.id, tool: request.call.name }));
     } finally {

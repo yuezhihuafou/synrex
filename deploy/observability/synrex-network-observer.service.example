@@ -1,0 +1,18 @@
+[Unit]
+Description=Synrex network diagnostics observer (metadata only)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/synrex-observability/collector.env
+ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node %h/.local/share/synrex-observability/network-observer.mjs
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+MemoryMax=96M
+CPUQuota=15%
+TasksMax=16
+UMask=0077
+
+[Install]
+WantedBy=default.target

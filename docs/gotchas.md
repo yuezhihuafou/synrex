@@ -255,7 +255,7 @@ instructions instead.
 For a Coding Agent, install the Synrex skill directly from its GitHub repository:
 
 ```bash
-npx skills add yuezhihuafou/devspace-verge --skill subagents --global
+npx skills add yuezhihuafou/synrex --skill subagents --global
 ```
 
 The Skills CLI handles agent discovery and installation. Synrex setup does

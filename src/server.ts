@@ -1,5 +1,6 @@
 import { registerOAuthRecovery } from "./oauth-recovery.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { startRuntimeSampler } from "./runtime-sampler.js";
 import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
 import { traceEvent, traceStage, errorCategory } from "./trace-stages.js";
 import { registerSynrexConsole } from "./console-router.js";
@@ -130,6 +131,7 @@ type TrackToolActivity = <T>(operation: () => Promise<T>) => Promise<T>;
 
 class ToolActivityTracker {
   private readonly active = new Set<Promise<unknown>>();
+  get activeCount(): number { return this.active.size; }
 
   readonly track: TrackToolActivity = <T>(operation: () => Promise<T>): Promise<T> => {
     const promise = operation();
@@ -949,7 +951,12 @@ function withTrackedToolHandlers(
             ? safeConversationTitle((suppliedInput as { conversationTitle?: unknown } | undefined)?.conversationTitle)
             : undefined;
           const conversationTitle = explicitTitle ?? conversationTitleFromRequestMeta(extra?._meta);
-          if (conversationId && conversationTitle) {
+          if (conversationId) {
+            diagnostics.record("conversation_seen", {
+              requestId: currentRequestLogContext()?.requestId, conversationId,
+            });
+          }
+          if (conversationTitle) {
             diagnostics.record("conversation_labeled", {
               conversationId, conversationTitle,
               requestId: currentRequestLogContext()?.requestId,
@@ -961,7 +968,8 @@ function withTrackedToolHandlers(
             requestId: currentRequestLogContext()?.requestId,
             emit: (level, event, fields) => {
               const context = currentRequestLogContext();
-              const taggedFields = { ...fields, conversationId, traceId: context?.traceId ?? context?.requestId, nodeRequestId: context?.nodeRequestId };
+              const taggedFields = { ...fields, conversationId, traceId: context?.traceId ?? context?.requestId, nodeRequestId: context?.nodeRequestId,
+                otelTraceId: context?.otelTraceId, otelSpanId: context?.otelSpanId, otelParentSpanId: context?.otelParentSpanId };
               diagnostics.record(event, taggedFields);
               if (config.logging.toolCalls || level === "warn") {
                 logEvent(config.logging, level, event, taggedFields);
@@ -1183,6 +1191,7 @@ export function createServer(
     durableTasksAvailable: durableTasks.available,
   }));
   const toolActivities = new ToolActivityTracker();
+  const stopRuntimeSampler = startRuntimeSampler(diagnostics, () => toolActivities.activeCount);
   const linkHub = hostsDirectory(config.cluster.role)
     ? new NodeLinkHub(config.cluster.requestTimeoutMs, undefined, (event, fields) => {
         diagnostics.record(event, fields);
@@ -1400,6 +1409,7 @@ export function createServer(
     close: () => {
       closePromise ??= (async () => {
         diagnostics.record("runtime_stopping");
+        stopRuntimeSampler();
         try {
           await mcpHandler.close();
         } catch (error) {

@@ -49,10 +49,13 @@ export class NodeLinkHub implements NodeTransport {
         "devspace/traceId": context?.traceId ?? context?.requestId,
         "devspace/parentRequestId": context?.requestId,
         "devspace/callId": context?.callId,
+        "devspace/otelTraceId": context?.otelTraceId,
+        "devspace/otelParentSpanId": context?.otelSpanId,
       } },
       createdAt: new Date().toISOString(),
     };
     const fields = { requestId: request.id, nodeRequestId: request.id, traceId: context?.traceId ?? context?.requestId,
+      otelTraceId: context?.otelTraceId, otelSpanId: context?.otelSpanId,
       callId: context?.callId, nodeId, tool: input.name };
     this.emitEvent("node_queued", fields);
     return new Promise<NodeToolResult>((resolve, reject) => {
@@ -184,7 +187,9 @@ export class NodeLinkHub implements NodeTransport {
 
   private requestFields(pending: PendingDispatch): Record<string, unknown> {
     return { requestId: pending.request.id, nodeRequestId: pending.request.id, nodeId: pending.nodeId, tool: pending.request.call.name,
-      traceId: pending.request.call.meta?.["devspace/traceId"], callId: pending.request.call.meta?.["devspace/callId"] };
+      traceId: pending.request.call.meta?.["devspace/traceId"], callId: pending.request.call.meta?.["devspace/callId"],
+      otelTraceId: pending.request.call.meta?.["devspace/otelTraceId"],
+      otelSpanId: pending.request.call.meta?.["devspace/otelParentSpanId"] };
   }
 
   private emitEvent(event: DiagnosticEvent, fields: Record<string, unknown>): void {

@@ -254,6 +254,7 @@ export class DurableTaskManager {
       trace: (() => {
         const context = currentRequestLogContext();
         return { requestId: context?.requestId, traceId: context?.traceId ?? context?.requestId,
+          otelTraceId: context?.otelTraceId, otelSpanId: context?.otelSpanId, otelParentSpanId: context?.otelParentSpanId,
           callId: context?.callId, nodeRequestId: context?.nodeRequestId, workspaceId: input.workspaceId };
       })(),
     };

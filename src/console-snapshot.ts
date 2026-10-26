@@ -5,8 +5,11 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js";
 import { summarizeConsoleObservability } from "./console-observability.js";
+import { readOtelFileTail, type HostMetricSample } from "./otel-file-reader.js";
+import { readPeerSnapshot } from "./peer-observability.js";
 import { LEGACY_UNVERIFIED_DISPATCH_SQL } from "./learning-store.js";
 import { compareToolContracts } from "./multinode/protocol.js";
+import { readConversationLabels } from "./conversation-labels.js";
 
 interface NodeRow {
   id: string; kind: string; alias: string | null; health: string;
@@ -42,6 +45,27 @@ export interface ConsoleSnapshot {
     observability: ReturnType<typeof summarizeConsoleObservability>;
     requests: ReturnType<typeof summarizeDiagnosticTrace>["requests"];
     events: ReturnType<DiagnosticTrace["read"]>;
+  };
+  observability: {
+    collector: "bounded_tail" | "not_collected";
+    peerSync: { gateway: "current" | "stale" | "unavailable"; at?: string };
+    metrics: HostMetricSample[];
+    runtime: {
+      rssBytes?: number; heapUsedBytes?: number; eventLoopLagMs?: number;
+      cpuUserMicros?: number; cpuSystemMicros?: number;
+      eventLoopP95Ms?: number; eventLoopUtilizationPermille?: number;
+      gcDurationMs?: number; gcCount?: number; activeToolCount?: number;
+      otelSpanPending?: number; otelSpanDropped?: number;
+      at?: string;
+    };
+    network: {
+      tcpConnections?: number; tcpRttP50Ms?: number; tcpRttP95Ms?: number;
+      tcpRetransSockets?: number; tcpRetransSegmentsTotal?: number;
+      at?: string;
+    };
+    collectorHealth: {
+      refusedLogs?: number; refusedMetrics?: number; exporterFailed?: number; at?: string;
+    };
   };
 }
 
@@ -151,12 +175,24 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
         };
       }),
   );
-  const events = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 20000 });
-  const requests = summarizeDiagnosticTrace(events).requests.slice(-300).reverse();
+  const archive = readOtelFileTail(stateDir);
+  const peer = readPeerSnapshot(stateDir);
+  const recent = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 2000 });
+  const combined = [...peer.events, ...archive.logs, ...recent].sort((a,b) => a.ts.localeCompare(b.ts));
+  const unique = new Map(combined.map((e) => [
+    [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId,e.taskId].join("|"), e,
+  ]));
+  const events = [...unique.values()].slice(-2000);
+  const allRequests = summarizeDiagnosticTrace(events).requests;
+  const ownerLabels = new Map(readConversationLabels(stateDir,allRequests.slice(-300).map(r=>r.requestId))
+    .map(label=>[label.requestId,label.conversationTitle]));
+  const requests=allRequests.slice(-300).reverse().map(r=>({...r,
+    ...(ownerLabels.has(r.requestId)?{conversationTitle:ownerLabels.get(r.requestId)}:{}),
+  }));
   const byConversation = new Map<string, typeof requests>();
-  for (const request of summarizeDiagnosticTrace(events).requests) {
+  for (const request of requests) {
     if (!request.conversationId) continue;
-    const existing=byConversation.get(request.conversationId)??[];
+    const existing = byConversation.get(request.conversationId) ?? [];
     existing.push(request);
     byConversation.set(request.conversationId,existing);
   }
@@ -168,10 +204,41 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       state:runningTasks?"task_running":Date.now()-Date.parse(recent.lastAt)<30000?"recent_mcp_activity":"no_recent_mcp_activity",
       requests:ordered.slice(0,80).map(r=>({requestId:r.requestId,tool:r.tool,lastAt:r.lastAt,taskId:r.taskId,runId:r.runId,classification:r.classification}))};
   }).sort((a,b)=>b.lastAt.localeCompare(a.lastAt)).slice(0,40);
+  const runtime = [...events].reverse().find(e => e.event === "runtime_sampled");
+  const network = [...events].reverse().find(e => e.event === "network_sampled");
+  const collector = [...events].reverse().find(e => e.event === "collector_sampled");
   return {
     generatedAt: new Date().toISOString(),
-    service: { status: "online", release, diagnosticsBoundBytes: 2 * 1024 * 1024 },
-    nodes, workflows, conversationSessions, tasks, memory, activeTaskUnits: readActiveTaskUnits(),
-    diagnostics: { count: events.length, observability: summarizeConsoleObservability(events), requests, events: events.slice(-40).reverse() },
+    service: { status: "online", release, diagnosticsBoundBytes: 2 * 8 * 1024 * 1024 },
+    nodes, workflows, tasks, memory, conversationSessions, activeTaskUnits: readActiveTaskUnits(),
+    diagnostics: { count: events.length,
+      observability: summarizeConsoleObservability(events),
+      requests, events: events.slice(-200).reverse() },
+    observability: {
+      collector: archive.coverage,
+      peerSync: { gateway: peer.coverage, at: peer.updatedAt },
+      metrics: archive.metrics.slice(-120),
+      runtime: {
+        rssBytes: runtime?.rssBytes, heapUsedBytes: runtime?.heapUsedBytes,
+        eventLoopLagMs: runtime?.eventLoopLagMs,
+        cpuUserMicros: runtime?.cpuUserMicros, cpuSystemMicros: runtime?.cpuSystemMicros, at: runtime?.ts,
+        eventLoopP95Ms: runtime?.eventLoopP95Ms,
+        eventLoopUtilizationPermille: runtime?.eventLoopUtilizationPermille,
+        gcDurationMs: runtime?.gcDurationMs, gcCount: runtime?.gcCount,
+        activeToolCount: runtime?.activeToolCount,
+        otelSpanPending: runtime?.otelSpanPending, otelSpanDropped: runtime?.otelSpanDropped,
+      },
+      network: {
+        tcpConnections: network?.tcpConnections, tcpRttP50Ms: network?.tcpRttP50Ms,
+        tcpRttP95Ms: network?.tcpRttP95Ms, tcpRetransSockets: network?.tcpRetransSockets,
+        tcpRetransSegmentsTotal: network?.tcpRetransSegmentsTotal, at: network?.ts,
+      },
+      collectorHealth: {
+        refusedLogs: collector?.collectorRefusedLogRecords,
+        refusedMetrics: collector?.collectorRefusedMetricPoints,
+        exporterFailed: collector?.collectorExporterFailed,
+        at: collector?.ts,
+      },
+    },
   };
 }

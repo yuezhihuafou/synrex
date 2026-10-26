@@ -6,6 +6,10 @@ import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
 import type { ServerConfig } from "./config.js";
 import { readConsoleSnapshot } from "./console-snapshot.js";
+import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { readOtelFileTail } from "./otel-file-reader.js";
+import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
+import { assignConversationLabel, readConversationLabels } from "./conversation-labels.js";
 
 const COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -166,6 +170,11 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       res.json({runId,offset:raw,nextOffset:raw+length,size,text:buf.toString("utf8")});
     }catch{res.status(404).json({error:"Run log unavailable"});}
   });
+  app.get("/console/api/browser-extension", auth, (_req, res) => {
+    const archive = fileURLToPath(new URL("../deploy/observability/browser-extension.zip",import.meta.url));
+    if(!existsSync(archive)){res.status(404).json({error:"Extension package unavailable"});return;}
+    res.download(archive,"synrex-browser-observer.zip");
+  });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
     res.clearCookie(COOKIE_NAME, sessionCookieOptions);
@@ -173,9 +182,108 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   });
   app.get("/console/api/snapshot", auth, (_req, res) => {
     try {
-      res.json(readConsoleSnapshot(config.stateDir, actualRelease()));
+      const file=path.join(config.stateDir,"observability","console-snapshot.json");
+      if(existsSync(file)){
+        const snap=JSON.parse(readFileSync(file,"utf8")) as {generatedAt?:string};
+        const age=Date.now()-Date.parse(snap.generatedAt??"");
+        if(Number.isFinite(age)){
+          res.setHeader("X-Synrex-Snapshot-Age-Ms",String(Math.max(0,Math.round(age))));
+          res.json({...snap,snapshotAgeMs:age,snapshotStale:age>45000});
+          return;
+        }
+      }
+      // Bootstrap/fault fallback, not the steady state. Never silently label
+      // a missing worker as a current sample.
+      res.json({...readConsoleSnapshot(config.stateDir,actualRelease()),
+        snapshotStale:true,snapshotMode:"inline_fallback"});
     } catch {
       res.status(503).json({ error: "Status data temporarily unavailable" });
+    }
+  });
+  app.get("/console/api/usage", auth, (_req,res)=>{
+    try{
+      const file=path.join(config.stateDir,"observability","usage-rollup.json");
+      if(!existsSync(file)){res.status(202).json({status:"awaiting_offline_rollup"});return;}
+      res.type("json").send(readFileSync(file,"utf8"));
+    }catch{res.status(503).json({error:"Offline usage report unavailable"});}
+  });
+  app.get("/console/api/history", auth, async (req, res) => {
+    try {
+      const start=typeof req.query.start==="string"?req.query.start:undefined;
+      const end=typeof req.query.end==="string"?req.query.end:undefined;
+      const event=typeof req.query.event==="string"?req.query.event:undefined;
+      const local=searchArchive(config.stateDir,{start,end,event});
+      const remote=await searchGatewayArchive({start,end,event});
+      const events=[...local,...remote.events].sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,500);
+      const ownerLabels = new Map(readConversationLabels(config.stateDir,
+        events.map(e=>e.requestId).filter((s):s is string=>Boolean(s)))
+        .map(label=>[label.requestId,label]));
+      res.json({events:events.map(e=>({...e,
+        ...(e.requestId && ownerLabels.has(e.requestId)
+          ? {conversationTitle:ownerLabels.get(e.requestId)!.conversationTitle}:{}),
+      })),stats:historyStats(config.stateDir),retentionDays:7,
+        gatewayHistory:remote.available?"available":"unavailable"});
+    } catch {res.status(503).json({error:"Archive temporarily unavailable"});}
+  });
+  app.get("/console/api/trace", auth, async (req, res) => {
+    const requestId = req.query.requestId;
+    if (typeof requestId !== "string" || !/^[a-zA-Z0-9_-]{1,110}$/.test(requestId)) {
+      res.status(400).json({ error: "Invalid request ID" });
+      return;
+    }
+    try {
+      const recent = new DiagnosticTrace(config.stateDir).read({ minutes: 24 * 60, limit: 20_000, requestId });
+      const localHistory=readArchivedTrace(config.stateDir,requestId);
+      const peerKey=localHistory.events.find(e=>e.otelTraceId)?.otelTraceId ?? requestId;
+      const peerHistory=await readGatewayArchivedTrace(peerKey);
+      const relatedNodeRequestIds=new Set(localHistory.events.map(e=>e.nodeRequestId).filter(Boolean));
+      const linkedPeerEvents=peerHistory.events.filter(e=>e.nodeRequestId && relatedNodeRequestIds.has(e.nodeRequestId));
+      const linkedPeerRequestIds=new Set(linkedPeerEvents.map(e=>e.requestId).filter(Boolean));
+      const archived = [
+        ...[...localHistory.events,...readOtelFileTail(config.stateDir).logs].filter(e=>
+          e.requestId === requestId || e.traceId === requestId || e.nodeRequestId === requestId),
+        ...linkedPeerEvents,
+      ];
+      const found = new Map([...archived, ...recent].map(e => [
+        [e.ts,e.event,e.requestId,e.callId,e.stage,e.nodeRequestId].join("|"), e,
+      ]));
+      const all = [...found.values()].sort((a, b) => a.ts.localeCompare(b.ts));
+      const allSpans=[...localHistory.spans,...peerHistory.spans.filter(s=>
+        s.requestId && linkedPeerRequestIds.has(s.requestId))];
+      const uniqueSpans=[...new Map(allSpans.map(s=>[s.traceId+":"+s.spanId,s])).values()];
+      const ownerLabel=readConversationLabels(config.stateDir,[requestId])[0];
+      const hostLabel=all.find(e=>e.event==="conversation_labeled" && e.conversationTitle)?.conversationTitle;
+      res.json({ requestId, conversationTitle:ownerLabel?.conversationTitle??hostLabel??null,
+        titleSource:ownerLabel?"owner":hostLabel?"host":"unknown",
+        events: all.slice(-1000), spans:uniqueSpans.slice(-1000),
+        truncated: all.length > 1000 || uniqueSpans.length>1000,
+        archiveCoverage: historyStats(config.stateDir).events ? "indexed_7d" : "bounded_tail",
+        remoteState:peerHistory.remoteState,
+        remoteTraceGroupExcluded:peerHistory.spans.length-allSpans.length+localHistory.spans.length,
+        hostInternalStages: "not_observed" });
+    } catch {
+      res.status(503).json({ error: "Trace temporarily unavailable" });
+    }
+  });
+  app.post("/console/api/conversation-label", auth, express.json({limit:"2kb"}), (req,res)=>{
+    if (!sameOrigin(req)) {res.status(403).json({error:"Origin rejected"});return;}
+    try {
+      const id=req.body?.requestId;
+      if (typeof id !== "string" || !/^[a-zA-Z0-9_-]{1,110}$/.test(id)) {
+        res.status(400).json({error:"Invalid request ID"});return;
+      }
+      const inRecent=new DiagnosticTrace(config.stateDir).read({minutes:1440,limit:20000,requestId:id}).length>0;
+      const archived=readArchivedTrace(config.stateDir,id).events.length>0;
+      if (!inRecent && !archived) {
+        res.status(404).json({error:"Cannot label an unobserved request"});return;
+      }
+      const label=assignConversationLabel(config.stateDir,id,req.body?.conversationTitle);
+      new DiagnosticTrace(config.stateDir).record("conversation_labeled", {
+        requestId:id,conversationTitle:label.conversationTitle,
+      });
+      res.status(200).json({label});
+    } catch {
+      res.status(400).json({error:"Invalid label"});
     }
   });
 }

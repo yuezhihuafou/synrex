@@ -27,10 +27,15 @@ const DIAGNOSTIC_FILE = "recent.jsonl";
 export type DiagnosticEvent =
   | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent"
   | "request_stalled" | "runtime_started" | "runtime_stopping"
+  | "runtime_sampled"
+  | "network_sampled" | "tunnel_registered" | "tunnel_disconnected" | "tunnel_retry" | "tunnel_auth_failed"
+  | "collector_sampled"
+  | "origin_unavailable" | "service_started" | "service_stopped"
   | "node_queued" | "node_delivered" | "node_completed" | "node_peer_received" | "node_peer_started" | "node_peer_finished" | "node_peer_acknowledged" | "node_transport"
   | "task_created" | "task_runner_started" | "task_spawned" | "task_first_output" | "task_finished" | "task_notification"
   | "mailbox_registered" | "mailbox_delivered" | "mailbox_acknowledged" | "mailbox_error" | "learning_error"
   | "conversation_labeled"
+  | "conversation_seen"
   | "node_request_timeout"
   | "node_late_completion"
   | "mcp_received"
@@ -45,11 +50,35 @@ export type DiagnosticEvent =
 
 export interface DiagnosticEntry {
   traceId?: string;
+  otelTraceId?: string;
+  otelSpanId?: string;
+  otelParentSpanId?: string;
   nodeRequestId?: string;
   nodeId?: string;
   bootId?: string;
   revision?: string;
   pid?: number;
+  rssBytes?: number;
+  heapUsedBytes?: number;
+  cpuUserMicros?: number;
+  cpuSystemMicros?: number;
+  eventLoopLagMs?: number;
+  eventLoopP95Ms?: number;
+  eventLoopUtilizationPermille?: number;
+  gcDurationMs?: number;
+  gcCount?: number;
+  activeToolCount?: number;
+  otelSpanPending?: number;
+  otelSpanDropped?: number;
+  tcpConnections?: number;
+  tcpRttP50Ms?: number;
+  tcpRttP95Ms?: number;
+  tcpRetransSockets?: number;
+  tcpRetransSegmentsTotal?: number;
+  collectorRefusedLogRecords?: number;
+  collectorRefusedMetricPoints?: number;
+  collectorExporterFailed?: number;
+  tunnelUnit?: string;
   stage?: string;
   rpcMethod?: string;
   rpcIdHash?: string;
@@ -86,10 +115,14 @@ const SAFE_NODE_OUTCOME = /^(ok|error|indeterminate_after_dispatch|not_dispatche
 const EVENT_NAMES: readonly string[] = [
   "stage_started", "stage_finished", "mcp_body_ready", "mcp_headers_sent",
   "request_stalled", "runtime_started", "runtime_stopping",
+  "runtime_sampled",
+  "network_sampled", "tunnel_registered", "tunnel_disconnected", "tunnel_retry", "tunnel_auth_failed",
+  "collector_sampled",
+  "origin_unavailable", "service_started", "service_stopped",
   "node_queued", "node_delivered", "node_completed", "node_peer_received", "node_peer_started", "node_peer_finished", "node_peer_acknowledged", "node_transport",
   "task_created", "task_runner_started", "task_spawned", "task_first_output", "task_finished", "task_notification",
   "mailbox_registered", "mailbox_delivered", "mailbox_acknowledged", "mailbox_error", "learning_error",
-  "conversation_labeled", "node_request_timeout", "node_late_completion",
+  "conversation_labeled", "conversation_seen", "node_request_timeout", "node_late_completion",
   "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
@@ -110,6 +143,9 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   const item: DiagnosticEntry = { ts: new Date().toISOString(), event };
   const patterns: Partial<Record<keyof DiagnosticEntry, RegExp>> = {
     traceId: SAFE_ID, nodeRequestId: SAFE_ID, nodeId: SAFE_ID, bootId: SAFE_ID,
+    otelTraceId: /^(?!0{32}$)[0-9a-f]{32}$/,
+    otelSpanId: /^(?!0{16}$)[0-9a-f]{16}$/,
+    otelParentSpanId: /^(?!0{16}$)[0-9a-f]{16}$/,
     revision: /^[a-f0-9]{40}$/,
     stage: /^(body|auth|mcp_dispatch|routing|tool_handler|learning|mailbox|result_packaging|task_launch|task_initial_wait|peer_execute|peer_ack)$/,
     rpcMethod: /^(initialize|notifications\/initialized|notifications\/cancelled|tools\/call|tools\/list|resources\/list|resources\/read|resources\/templates\/list|prompts\/list|prompts\/get|ping|unknown|batch)$/,
@@ -117,12 +153,16 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     errorCategory: /^(not_found|permission|timeout|invalid_input|indeterminate|transport|internal|tool_error|command_exit|cancelled|auth|protocol)$/,
     errorCode: /^(ENOENT|EACCES|EPERM|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ABORT_ERR|EPIPE|ERR_STREAM_PREMATURE_CLOSE)$/,
     signal: /^SIG(?:TERM|KILL|INT|ABRT|SEGV|HUP|PIPE)$/,
+    tunnelUnit: /^(?:devspace|cloudflared|synrex)[a-zA-Z0-9_.-]{0,100}\.service$|^unknown$/,
   };
   for (const [key, pattern] of Object.entries(patterns)) {
     const value = boundedString(fields[key], pattern!);
     if (value) (item as unknown as Record<string, unknown>)[key] = value;
   }
-  for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs"] as const) {
+  for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs",
+    "rssBytes", "heapUsedBytes", "cpuUserMicros", "cpuSystemMicros", "eventLoopLagMs",
+    "eventLoopP95Ms", "eventLoopUtilizationPermille", "gcDurationMs", "gcCount", "activeToolCount",
+    "otelSpanPending", "otelSpanDropped"] as const) {
     const value = boundedNumber(fields[key], Number.MAX_SAFE_INTEGER);
     if (value !== undefined) item[key] = value;
   }
@@ -148,7 +188,7 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   if (callId) item.callId = callId;
   if (workspaceId) item.workspaceId = workspaceId;
   if (conversationId) item.conversationId = conversationId;
-  if (event === "conversation_labeled" && conversationId && conversationTitle) {
+  if (event === "conversation_labeled" && (conversationId || requestId) && conversationTitle) {
     item.conversationTitle = conversationTitle;
   }
   if (tool) item.tool = tool;
@@ -160,6 +200,12 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
   if (durationMs !== undefined) item.durationMs = durationMs;
   if (elapsedMs !== undefined) item.elapsedMs = elapsedMs;
   if (status !== undefined) item.status = status;
+  for (const key of ["tcpConnections", "tcpRttP50Ms", "tcpRttP95Ms",
+    "tcpRetransSockets", "tcpRetransSegmentsTotal",
+    "collectorRefusedLogRecords", "collectorRefusedMetricPoints", "collectorExporterFailed"] as const) {
+    const n = boundedNumber(fields[key], Number.MAX_SAFE_INTEGER);
+    if (n !== undefined) item[key] = n;
+  }
   if (phase !== undefined) item.phase = phase;
   return item;
 }
@@ -220,10 +266,16 @@ export class DiagnosticTrace {
       entries.filter((entry) => entry.conversationTitle === input.title && entry.conversationId)
         .map((entry) => entry.conversationId!),
     );
+    const matchedRequests = input.title === undefined ? undefined : new Set(
+      entries.filter((entry) => entry.event==="conversation_labeled"
+        && entry.conversationTitle===input.title && entry.requestId)
+        .map((entry)=>entry.requestId!),
+    );
     return entries.filter((entry) => (
       (!input.requestId || entry.requestId === input.requestId || entry.traceId === input.requestId || entry.nodeRequestId === input.requestId)
       && (!input.conversationId || entry.conversationId === input.conversationId)
-      && (!matchedIds || (entry.conversationId !== undefined && matchedIds.has(entry.conversationId)))
+      && (!matchedIds || (entry.conversationId !== undefined && matchedIds.has(entry.conversationId))
+        || (entry.requestId!==undefined && matchedRequests?.has(entry.requestId)))
     )).slice(-limit);
   }
 }
@@ -232,9 +284,13 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
   const observed = new Map<string, Set<DiagnosticEvent>>();
   const requests = new Map<string, { requestId: string; lastEvent: DiagnosticEvent; conversationId?: string; tool?: string; callId?: string; status?: number; taskId?: string; runId?: string; lastAt: string }>();
   const conversationTitles = new Map<string, string>();
+  const requestTitles = new Map<string, string>();
   for (const entry of entries) {
     if (entry.conversationId && entry.conversationTitle) {
       conversationTitles.set(entry.conversationId, entry.conversationTitle);
+    }
+    if (entry.event === "conversation_labeled" && entry.requestId && entry.conversationTitle) {
+      requestTitles.set(entry.requestId, entry.conversationTitle);
     }
     const id = entry.traceId ?? entry.requestId;
     if (!id) continue;
@@ -260,8 +316,10 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
     conversations: [...conversationTitles].map(([conversationId, conversationTitle]) => ({ conversationId, conversationTitle })),
     requests: [...requests.values()].map((request) => ({
       ...request,
-      ...(request.conversationId && conversationTitles.has(request.conversationId)
-        ? { conversationTitle: conversationTitles.get(request.conversationId) } : {}),
+      ...(requestTitles.has(request.requestId)
+        ? { conversationTitle: requestTitles.get(request.requestId) }
+        : request.conversationId && conversationTitles.has(request.conversationId)
+          ? { conversationTitle: conversationTitles.get(request.conversationId) } : {}),
       classification: observed.get(request.requestId)?.has("mcp_finished")
         ? "rev_http_completed"
         : observed.get(request.requestId)?.has("mcp_closed_early")

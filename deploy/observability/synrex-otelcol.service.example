@@ -1,0 +1,18 @@
+[Unit]
+Description=Synrex observability sidecar (non-critical)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/synrex-observability/collector.env
+ExecStart=%h/.local/bin/otelcol-contrib --config %h/.config/synrex-observability/collector.yaml
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+MemoryMax=256M
+CPUQuota=25%
+TasksMax=32
+UMask=0077
+
+[Install]
+WantedBy=default.target

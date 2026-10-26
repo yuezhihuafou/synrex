@@ -1,0 +1,180 @@
+# Synrex observability / P012 Console
+
+This is a deployment and incident runbook, not evidence of a completed rollout.
+The only out-of-scope segment is provider-owned ChatGPT reasoning and internal
+server scheduling. All other phases must be recorded **where observable**,
+with unknown segments shown explicitly rather than inferred from RTT.
+
+## Observation layers and identifiers
+
+| Layer | Source | Correlation / limitations |
+|---|---|---|
+| HTTP/MCP | Existing JSONL diagnostic events | requestId, callId, stage, response flush |
+| Tool / peer | NodeLinkHub, WorkerClient, tool watcher | legacy traceId, nodeRequestId, callId |
+| Durable tasks | per-run trace.jsonl | taskId, runId and inherited trace context |
+| W3C Trace Context | requestTraceMiddleware, traceStage | otelTraceId, otelSpanId, otelParentSpanId; **JSONL metadata, not yet exported native OTel spans** |
+| Runtime | startRuntimeSampler | RSS/heap/CPU, event loop/GC, active tool count; 10-second samples |
+| System | separate OTel Collector hostmetrics | CPU/disk/network/PID, local bounded OTLP archive |
+| TCP/Tunnel | network-observer | host TCP RTT/retrans counters and allowlisted journal events; connection-level only |
+| Optional peer mirror | peer-snapshot timer on swy1 | bounded recent gateway metadata; marked stale after 2 minutes |
+| Browser | owner-authenticated /console | read-only snapshots/trace lookup; no ChatGPT internal instrumentation |
+
+Distinguish a completed tool, HTTP response flush, SSE close and actual
+ChatGPT-visible completion. Unknown is a valid outcome. All nested stage
+durations may overlap: compute critical paths from causality, not by summation.
+
+## Sidecar deployment (separate from release)
+
+See `deploy/observability/README.md` for the configuration, pinned
+`otelcol-contrib` package and systemd examples. Per-node storage:
+
+- swy1: `~/.local/share/devspace-cutover-20261018/observability`
+- gateway: `~/.local/share/devspace/observability`
+
+Each node runs `synrex-otelcol.service` and
+`synrex-network-observer.service` plus `synrex-archive-index.service`,
+independent of `devspace.service`.
+swy1 also runs `synrex-peer-snapshot.timer` as a non-authoritative mirror.
+Check with:
+
+```sh
+systemctl --user is-active synrex-otelcol.service synrex-network-observer.service
+curl -fsS http://127.0.0.1:13133/
+curl -fsS http://127.0.0.1:8888/metrics | grep -E '^otelcol_(receiver_refused|exporter_send_failed)'
+systemctl --user status synrex-peer-snapshot.timer --no-pager
+```
+
+Each per-node `logs.otlp.json` and `metrics.otlp.json` is capped by 32 MiB
+rotations with twelve backups. Retention is **up to** seven days, not a
+guarantee of seven days. Diagnostic source JSONL itself has two 8 MiB files;
+the Collector is responsible for accumulating available history. The
+The independent `archive-indexer.mjs` consumes log/trace files using
+persisted inode-and-byte offsets, keeps deduplicated allowlisted request events
+and native spans for seven days in `observability/history.sqlite`, and stores
+one metric sample per minute/dimension. Index retention does not depend on
+the raw Collector file rotation. The Console's authenticated indexed query
+supports recent/old owner events and an on-demand bounded SSH query to
+gateway. Source files remain bounded; the seven-day index is distinct.
+Monitor disk space, indexing lag and Collector dropped records. If the indexer
+stays down beyond the raw archive rotation, reconstruction is impossible.
+
+For browser client timing, download the opt-in Chrome extension from the
+authenticated Console. Unzip, enable Developer mode in
+`chrome://extensions`, choose **Load unpacked** and select that directory.
+Export its local metadata-only JSON from the toolbar popup and import it in
+the Console. It never collects prompts/replies, cannot see OpenAI internals,
+and does not guarantee an exact tool ID correlation. Browser installation is
+not remotely forced.
+
+The producer emits standards-shaped OTLP spans over loopback HTTP
+`127.0.0.1:14318/v1/traces`, buffered and bounded. A rejected exporter
+increments `otelSpanDropped`; the JSONL phase events remain a separate
+fallback. The arbitrary local port 4318 was already in use on swy1 and is
+intentionally not overridden.
+
+For actual independent service overhead experiments, run
+`node scripts/benchmark-observability.mjs OLD_RELEASE NEW_RELEASE`.
+The script compares matched loopback HTTP middleware, not model/host latency
+or full MCP task completion. Collect real-node CPU/RSS, exporter drops,
+application p50/p95/p99 and full-task outcomes separately.
+
+The Collector emits process PID/name and metrics, **not command line**, owner,
+executable path or process arguments. It does not collect MCP input content,
+tool output or secret-bearing HTTP headers. If a deployment enabled command
+line metrics before this policy, rotate its previous private archive according
+to local retention needs.
+
+## Validation before production promotion
+
+1. Assert actual `devspace.service` ExecStart and public OAuth state have
+   not changed; confirm pinned current release by manifest, not Git HEAD.
+2. Build a **clean, versioned, immutable** candidate from a commit. Run
+   TypeScript checks and tests covering HTTP flush, W3C context, peer routing,
+   task traces, Console auth/trace lookup and redaction.
+3. Run `scripts/probe-reliable-release.ts` with disposable OAuth and SQLite,
+   validating real authenticated MCP, restart, Console and headless browser.
+4. Benchmark active P012 + sidecar cost relative to the old pinned runtime.
+5. Only with a verified owner backup, predictable rollback and a separate
+   activation process, promote the pinned owner release. Promote each peer
+   separately. An isolated worktree is not a deployed product feature.
+6. Confirm real user-facing P012, local HTTP, public OAuth, peer route,
+   collector health and deployed release fingerprints.
+
+## Remaining limitations (must not be hidden by Console)
+
+### Conversation title registration and provenance
+
+ChatGPT MCP does not reliably provide `openai/conversation_title` or
+`openai/session` to each tool call. The server now records a host-provided
+title when available even without a session ID; it records a pseudonymous
+`conversation_seen` event when a session ID is available independently.
+The seven-day index retains both fields when emitted. The authenticated
+P012 Console can also explicitly assign a title to **one verified request
+ID**. This mapping is held in private `observability/conversation-labels.sqlite`
+and annotated as `source=owner`; it never auto-binds nearby conversations.
+The optional browser extension records tab titles locally and exports them
+with timestamps. Time-only suggestions are never treated as exact.
+
+### 2026-10-22: browser capture coverage audit
+
+The v1.0 extension stored terminal network events only and did not verify that
+the user's installed Chrome extension was actually receiving events. Its
+background Map could be lost during Chrome MV3 service-worker suspension.
+In v1.1, the browser side captures `started`, `headers_received`,
+`first_response`, and terminal `completed`/`network_error` events,
+each grouped under a randomized browser-local `flowId`. It preserves
+in-flight metadata across worker suspension in storage.session, labels
+service-worker network requests as tab-unknown, and keeps data local in
+five-minute shards (up to 5000 recent events or seven days, whichever is
+shorter). It includes a popup self-test that sends a credential-free favicon
+request from the current ChatGPT page and verifies real webRequest events.
+Re-load any previously installed unpacked extension after a v1.1 upgrade.
+
+The Console now accepts these richer records, keeps the raw browser event
+sequence, and emits bounded candidate findings: browser-reported network
+errors near a UI timeout; UI timeouts without nearby network records; and
+ambiguous cases where HTTP completes despite UI timeout. Inferred/time-window
+links remain clearly labeled non-exact. Querying one MCP request's native
+waterfall uses its exact `synrex.request_id`; different requests under a shared
+W3C trace are not merged. The gateway contributes only correlated
+`nodeRequestId` events and peer-local spans, not arbitrary same-trace events.
+
+Audit of the last 30 minutes around 22:43 local: 91/91 logged MCP HTTP
+requests completed; all had OTel trace context, while only nine distinct W3C
+trace IDs were in the native span archive because trace context was reused
+across multiple calls. A real gateway test generated the expected owner
+`node_queued`/`node_delivered`/`node_completed` and gateway
+`node_peer_*` events. These establish cross-node diagnostic coverage, but
+native spans for every network hop are not guaranteed.
+
+The tests use a mocked Chrome event API and isolated HTTP/MCP browsers.
+They **cannot** prove that a particular user's actual Chrome has the extension
+enabled or that ChatGPT will render any given error under a detected selector.
+The operator must run the popup's live self-test and export the metadata.
+WebSocket message frames, ChatGPT internal inference/acknowledgment and
+client-to-MCP exact host correlation remain unknown.
+
+### 2026-10-22 21:51 client transport timeout incident
+
+For 21:49–21:52:30 Asia/Kuala_Lumpur, the owner history had 10 completed
+HTTP MCP requests, all status 200; slowest was 2635 ms; latest completion
+at 21:50:33.729. No `mcp_failed`, `mcp_closed_early` or
+`request_stalled` was observed for that window, and the primary
+`cloudflared-devspace.service` journal contained zero matching errors.
+Auxiliary test tunnel authentication failures are separate. The browser
+displayed a completed ChatGPT response and then a transport-timeout warning.
+The root cause **cannot be uniquely attributed** without a browser-side
+request lifecycle record: browser/proxy connection, platform stream timeout,
+and completion/ack behavior are outside the Synrex server's telemetry.
+
+- An OTLP file exporter persists log records and metrics, but does not by itself
+  synthesize native OTel spans from existing phase events.
+- Host TCP RTT statistics are not request-specific network latency.
+- The gateway mirror is capped recent metadata, not fully replicated OTLP
+  history. A missing or stale mirror is not proof that gateway has no events.
+- Native browser-to-server tool event correlation is not guaranteed, because
+  HTTP response headers are not necessarily visible in ChatGPT's host UI.
+- No actual ChatGPT reasoning, internal model scheduling or host UI spans are
+  available. These intervals remain unobserved.
+- Collector 0-refused and 0-export-failed counters alone do not establish
+  perfect coverage: check persisted offsets, snapshots and crash/rotation tests.

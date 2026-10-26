@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Synrex console snapshot independently of MCP
+
+[Timer]
+OnBootSec=15s
+OnUnitInactiveSec=15s
+AccuracySec=2s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
