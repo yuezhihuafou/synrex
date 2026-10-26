@@ -4,6 +4,8 @@ import { spawnSync } from "node:child_process";
 export interface ShellCommand {
   executable: string;
   args: string[];
+  windowsVerbatimArguments?: boolean;
+  ptyArgs?: string[] | string;
 }
 
 export interface KillableProcess {
@@ -38,9 +40,17 @@ export function resolveShellCommand(
   environment: NodeJS.ProcessEnv = process.env,
 ): ShellCommand {
   if (platform === "win32") {
+    // cmd.exe needs the command after /c wrapped as one command line. When the
+    // command itself starts with a quoted executable (for example Node under
+    // Program Files), the resulting double quote at the front is significant.
+    // child_process must pass it verbatim; node-pty accepts the already escaped
+    // command line as a string on Windows.
+    const commandLine = `"${command}"`;
     return {
       executable: environment.ComSpec ?? environment.COMSPEC ?? "cmd.exe",
-      args: ["/d", "/s", "/c", command],
+      args: ["/d", "/s", "/c", commandLine],
+      windowsVerbatimArguments: true,
+      ptyArgs: `/d /s /c ${commandLine}`,
     };
   }
 

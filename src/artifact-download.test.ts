@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -25,6 +26,7 @@ import {
 import { ArtifactError } from "./artifact-error.js";
 import {
   IncomingArtifactAdapterRegistry,
+  createOpenAIIncomingArtifactAdapter,
   type IncomingArtifactAdapter,
 } from "./incoming-artifacts.js";
 
@@ -34,11 +36,15 @@ try {
   testOneToolContract();
   testPlatformSupportContract();
   if (isArtifactDownloadSupportedPlatform()) {
+    await testOpenAIHostShapedToolDownload(join(root, "openai-host-shaped"));
     await testSafeDownloadAndConflict(join(root, "downloads"));
     await testDestinationValidation(join(root, "destinations"));
     await testSizeLimitAndCleanup(join(root, "size-limit"));
     await testCrashLeftoverCleanup(join(root, "stale-partials"));
     await testSymlinkRejection(join(root, "symlinks"));
+    if (process.platform === "win32") {
+      await testWindowsParentSwapRejection(join(root, "windows-parent-swap"));
+    }
     await testPublicationFailurePreservesReplacement(join(root, "publication-race"));
     await testPublishedPermissions(join(root, "permissions"));
   } else {
@@ -47,6 +53,71 @@ try {
   testLogRedaction();
 } finally {
   await rm(root, { recursive: true, force: true });
+}
+
+async function testOpenAIHostShapedToolDownload(testRoot: string): Promise<void> {
+  const workspaceRoot = join(testRoot, "workspace");
+  await mkdir(workspaceRoot, { recursive: true });
+  const bytes = Buffer.from("chatgpt-native-file-to-windows-workspace\u0000\xff", "latin1");
+  const requested: string[] = [];
+  const nativeFile = {
+    download_url: "https://oaisdmntprcentralindia.blob.core.windows.net/chatgpt-file/generated.bin?sig=secret",
+    file_id: "file-service://generated+opaque/windows-e2e",
+    mime_type: "application/octet-stream",
+    file_name: "generated.bin",
+    size: bytes.length,
+  };
+
+  let callback: ((input: { file: typeof nativeFile; workspaceId: string; path: string }) => Promise<unknown>) | undefined;
+  const server = {
+    registerTool(
+      name: string,
+      _descriptor: Record<string, unknown>,
+      handler: typeof callback,
+    ) {
+      assert.equal(name, "download_artifact");
+      callback = handler;
+      return {};
+    },
+  };
+
+  registerArtifactTools(server as never, {
+    config: {
+      artifactMaxFileBytes: 1024,
+      logging: { toolCalls: false },
+    } as never,
+    workspaces: {
+      async getWorkspace(workspaceId: string) {
+        assert.equal(workspaceId, "ws_windows_e2e");
+        return { id: workspaceId, root: workspaceRoot };
+      },
+    } as never,
+    incomingArtifactAdapters: [
+      createOpenAIIncomingArtifactAdapter({
+        fetch: async (input, init) => {
+          requested.push(String(input));
+          assert.equal(init?.redirect, "manual");
+          return new Response(bytes, {
+            status: 200,
+            headers: {
+              "content-length": String(bytes.length),
+              "content-type": "application/octet-stream",
+            },
+          });
+        },
+      }),
+    ],
+  });
+
+  assert.ok(callback);
+  const result = await callback({
+    file: nativeFile,
+    workspaceId: "ws_windows_e2e",
+    path: "artifacts/generated.bin",
+  }) as { structuredContent?: { path?: string } };
+  assert.equal(result.structuredContent?.path, join("artifacts", "generated.bin"));
+  assert.deepEqual(await readFile(join(workspaceRoot, "artifacts", "generated.bin")), bytes);
+  assert.deepEqual(requested, [nativeFile.download_url]);
 }
 
 function testOneToolContract(): void {
@@ -103,7 +174,7 @@ function testPlatformSupportContract(): void {
   assert.equal(isArtifactDownloadSupportedPlatform("freebsd"), false);
   assert.equal(isArtifactDownloadSupportedPlatform("openbsd"), false);
   assert.equal(isArtifactDownloadSupportedPlatform("netbsd"), false);
-  assert.equal(isArtifactDownloadSupportedPlatform("win32"), false);
+  assert.equal(isArtifactDownloadSupportedPlatform("win32"), true);
 }
 
 async function testUnsupportedPlatform(testRoot: string): Promise<void> {
@@ -140,7 +211,7 @@ async function testSafeDownloadAndConflict(testRoot: string): Promise<void> {
     file: { native: true },
     path: "public/images/generated.png",
   });
-  assert.equal(first.path, "public/images/generated.png");
+  assert.equal(first.path, join("public", "images", "generated.png"));
   assert.deepEqual(await readFile(join(workspaceRoot, first.path)), bytes);
 
   await expectArtifactError(
@@ -165,7 +236,18 @@ async function testDestinationValidation(testRoot: string): Promise<void> {
   const workspaceRoot = join(testRoot, "workspace");
   await mkdir(workspaceRoot, { recursive: true });
 
-  for (const path of ["../outside.txt", "nested/../outside.txt", "/absolute.txt", "folder/"]) {
+  const invalidPaths = [
+    "../outside.txt",
+    "nested/../outside.txt",
+    "nested\\..\\outside.txt",
+    "/absolute.txt",
+    "folder/",
+    "C:relative.txt",
+  ];
+  if (process.platform === "win32") {
+    invalidPaths.push("NUL.txt", "assets/CON", "assets/trailing. ", "assets/file.txt:stream");
+  }
+  for (const path of invalidPaths) {
     await expectArtifactError(
       downloadIncomingArtifact({
         registry: registryFor({ name: "blocked.txt", stream: Readable.from(["blocked"]) }),
@@ -258,13 +340,12 @@ async function testCrashLeftoverCleanup(testRoot: string): Promise<void> {
 }
 
 async function testSymlinkRejection(testRoot: string): Promise<void> {
-  if (process.platform === "win32") return;
-
   const outside = join(testRoot, "outside");
   await mkdir(outside, { recursive: true, mode: 0o700 });
+  const symlinkType = process.platform === "win32" ? "junction" : "dir";
 
   const linkedWorkspaceRoot = join(testRoot, "linked-workspace");
-  await symlink(outside, linkedWorkspaceRoot, "dir");
+  await symlink(outside, linkedWorkspaceRoot, symlinkType);
   await expectArtifactError(
     downloadIncomingArtifact({
       registry: registryFor({ name: "blocked.txt", stream: Readable.from(["blocked"]) }),
@@ -279,7 +360,7 @@ async function testSymlinkRejection(testRoot: string): Promise<void> {
 
   const linkedDestinationRoot = join(testRoot, "linked-destination-workspace");
   await mkdir(linkedDestinationRoot, { recursive: true });
-  await symlink(outside, join(linkedDestinationRoot, "assets"), "dir");
+  await symlink(outside, join(linkedDestinationRoot, "assets"), symlinkType);
   await expectArtifactError(
     downloadIncomingArtifact({
       registry: registryFor({ name: "blocked.txt", stream: Readable.from(["blocked"]) }),
@@ -291,6 +372,35 @@ async function testSymlinkRejection(testRoot: string): Promise<void> {
     }),
     "artifact_destination_parent_unsafe",
   );
+}
+
+async function testWindowsParentSwapRejection(testRoot: string): Promise<void> {
+  const workspaceRoot = join(testRoot, "workspace");
+  const destinationDirectory = join(workspaceRoot, "assets");
+  const movedDirectory = join(workspaceRoot, "assets-original");
+  const outside = join(testRoot, "outside");
+  await mkdir(destinationDirectory, { recursive: true });
+  await mkdir(outside, { recursive: true });
+
+  await expectArtifactError(
+    downloadIncomingArtifact({
+      registry: registryFor({ name: "generated.txt", stream: Readable.from(["downloaded"]) }),
+      workspaceId: "ws_test",
+      workspaceRoot,
+      maxFileBytes: 1024,
+      file: { native: true },
+      path: "assets/generated.txt",
+      publishLink: async (partialPath, candidatePath) => {
+        await rename(destinationDirectory, movedDirectory);
+        await symlink(outside, destinationDirectory, "junction");
+        await link(partialPath, candidatePath);
+      },
+    }),
+    "artifact_destination_publish_failed",
+  );
+
+  assert.equal(await readFile(join(outside, "generated.txt"), "utf8").then(() => true, () => false), false);
+  assert.equal(await readFile(join(movedDirectory, "generated.txt"), "utf8").then(() => true, () => false), false);
 }
 
 async function testPublicationFailurePreservesReplacement(testRoot: string): Promise<void> {
@@ -323,6 +433,7 @@ async function testPublicationFailurePreservesReplacement(testRoot: string): Pro
 }
 
 async function testPublishedPermissions(testRoot: string): Promise<void> {
+  if (process.platform === "win32") return;
   const workspaceRoot = join(testRoot, "workspace");
   await mkdir(workspaceRoot, { recursive: true });
   const previousUmask = process.umask(0o077);

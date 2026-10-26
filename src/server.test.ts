@@ -26,6 +26,23 @@ import { expectedToolNames } from "./tool-surface-manifest.js";
 
 const execFileAsync = promisify(execFile);
 
+function nodeEvalCommand(source: string): string {
+  return `${JSON.stringify(process.execPath)} -e ${JSON.stringify(source)}`;
+}
+
+function delayedCommand(seconds: number, output?: string): string {
+  if (process.platform === "win32") {
+    const emit = output === undefined
+      ? ""
+      : `; Write-Output '${output.replaceAll("'", "''")}'`;
+    return `powershell.exe -NoLogo -NoProfile -NonInteractive -Command "Start-Sleep -Seconds ${seconds}${emit}"`;
+  }
+
+  return output === undefined
+    ? `sleep ${seconds}`
+    : `sleep ${seconds}; printf '${output.replaceAll("'", "'\\''")}\\n'`;
+}
+
 test("MCP initialization identifies Synrex and preserves the coding tool surface", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const server = context.client.getServerVersion();
@@ -233,7 +250,7 @@ test("codex process failures expose MCP error state and exit code", async (t) =>
     name: "exec_command",
     arguments: {
       workspaceId: opened.workspaceId,
-      cmd: "sh -c 'printf expected-error >&2; exit 7'",
+      cmd: nodeEvalCommand("process.stderr.write('expected-error'); process.exit(7)"),
       yieldTimeMs: 2_000,
     },
   });
@@ -263,7 +280,7 @@ test("completion mailbox relays a finished background job only in the originatin
   const workspaceId = opened.workspaceId as string;
   const metaA = { "openai/session": firstScope };
   const start = await context.client.callTool({
-    name: "exec_command", arguments: { workspaceId, cmd: "sleep 3; printf 'done\\n'" },
+    name: "exec_command", arguments: { workspaceId, cmd: delayedCommand(3, "done") },
     _meta: metaA,
   } as Parameters<Client["callTool"]>[0]);
   const taskId = structuredContent(start).taskId as string;
@@ -324,7 +341,7 @@ test("legacy final task command waits and reports a terminal final barrier recei
   const workspaceId = opened.workspaceId as string;
   const started = await context.client.callTool({
     name: "exec_command",
-    arguments: { workspaceId, cmd: "sleep 2; printf 'final-barrier-ok\\n'" },
+    arguments: { workspaceId, cmd: delayedCommand(2, "final-barrier-ok") },
   });
   const taskId = structuredContent(started).taskId as string;
   assert.match(taskId, /^task_[a-f0-9]{16}$/);
@@ -385,7 +402,7 @@ test("codex common command responses stay compact and keep retrieval handles", a
   const opened = structuredContent(await callOpen(context.client, context.project));
   const response = await context.client.callTool({
     name: "exec_command",
-    arguments: { workspaceId: opened.workspaceId, cmd: "printf 'compact-ok\\n'" },
+    arguments: { workspaceId: opened.workspaceId, cmd: nodeEvalCommand("process.stdout.write('compact-ok\\n')") },
   });
   const structured = structuredContent(response);
   assert.equal(structured.exitCode, 0);
@@ -449,7 +466,10 @@ test("open_workspace deduplicates only unchanged instructions within one convers
   } as Parameters<Client["callTool"]>[0]);
   const changed = structuredContent(changedWorktree);
   const changedFiles = changed.agentsFiles as Array<{ path: string; content: string }> | undefined;
-  assert.ok(changedFiles?.some((file) => file.path === "AGENTS.md" && file.content === "changed project instructions\n"));
+  assert.ok(changedFiles?.some((file) => (
+    file.path === "AGENTS.md"
+    && file.content.replace(/\r\n/g, "\n") === "changed project instructions\n"
+  )));
 });
 
 test("codex devspace-log responses satisfy the process output schema", async (t) => {
@@ -460,7 +480,7 @@ test("codex devspace-log responses satisfy the process output schema", async (t)
 
   const command = await context.client.callTool({
     name: "exec_command",
-    arguments: { workspaceId, cmd: "printf 'log-probe\\n'" },
+    arguments: { workspaceId, cmd: nodeEvalCommand("process.stdout.write('log-probe\\n')") },
   });
   const runId = structuredContent(command).runId;
   assert.equal(typeof runId, "string");
@@ -548,7 +568,7 @@ test("known long codex commands detach early instead of occupying the MCP reques
   const startedAt = performance.now();
   const response = await context.client.callTool({
     name: "exec_command",
-    arguments: { workspaceId: opened.workspaceId, cmd: "sleep 3" },
+    arguments: { workspaceId: opened.workspaceId, cmd: delayedCommand(3) },
   });
   const elapsedMs = performance.now() - startedAt;
   const state = structuredContent(response);
@@ -587,7 +607,7 @@ test("durable task wire stays compact and suppresses unchanged polling per conve
   const opened = structuredContent(await callOpen(context.client, context.project, "compact-task-wire"));
   const started = await context.client.callTool({
     name: "exec_command",
-    arguments: { workspaceId: opened.workspaceId, cmd: "sleep 2" },
+    arguments: { workspaceId: opened.workspaceId, cmd: delayedCommand(2) },
   });
   const initial = structuredContent(started);
   assert.match(initial.taskId as string, /^task_[0-9a-f]{16}$/i);
@@ -648,7 +668,7 @@ test("task_wait completes durable commands without repeated host polling", async
   const opened = structuredContent(await callOpen(context.client, context.project));
   const start = await context.client.callTool({
     name: "exec_command",
-    arguments: { workspaceId: opened.workspaceId, cmd: "sleep 2; printf 'wait-completed\\n'" },
+    arguments: { workspaceId: opened.workspaceId, cmd: delayedCommand(2, "wait-completed") },
   });
   const taskId = structuredContent(start).taskId as string;
   assert.match(taskId, /^task_[0-9a-f]{16}$/);

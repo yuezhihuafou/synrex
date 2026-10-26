@@ -3,7 +3,9 @@ import { resolveShellCommand, terminateProcessTree } from "./process-platform.js
 
 assert.deepEqual(resolveShellCommand("echo ok", "win32", { ComSpec: "C:\\Windows\\cmd.exe" }), {
   executable: "C:\\Windows\\cmd.exe",
-  args: ["/d", "/s", "/c", "echo ok"],
+  args: ["/d", "/s", "/c", "\"echo ok\""],
+  windowsVerbatimArguments: true,
+  ptyArgs: "/d /s /c \"echo ok\"",
 });
 
 assert.deepEqual(resolveShellCommand("echo ok", "darwin", { SHELL: "/bin/zsh" }), {

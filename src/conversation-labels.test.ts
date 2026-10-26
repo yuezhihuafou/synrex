@@ -12,7 +12,9 @@ test("explicit owner title persists by exact request without leaking to neighbor
   const row=assignConversationLabel(dir,"request-a","评估全链路日志");
   assert.equal(row.source,"owner");
   assert.equal(readConversationLabels(dir,["request-a"])[0]?.conversationTitle,"评估全链路日志");
-  assert.equal(statSync(path.join(dir,"observability","conversation-labels.sqlite")).mode & 0o777,0o600);
+  if (process.platform !== "win32") {
+    assert.equal(statSync(path.join(dir,"observability","conversation-labels.sqlite")).mode & 0o777,0o600);
+  }
   assert.equal(readConversationLabels(dir,["request-b"]).length,0);
   assert.throws(()=>assignConversationLabel(dir,"../other","secret"));
   assert.throws(()=>assignConversationLabel(dir,"request-a","hello\npassword"));

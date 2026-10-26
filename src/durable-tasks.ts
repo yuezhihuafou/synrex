@@ -1,6 +1,6 @@
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, watch } from "node:fs";
+import { existsSync, watch, watchFile, unwatchFile } from "node:fs";
 import { mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,6 +17,7 @@ import {
   type DurableTaskView,
 } from "./durable-task-model.js";
 import type { ProcessSnapshot, StartCommandInput } from "./process-sessions.js";
+import { terminateProcessTree } from "./process-platform.js";
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_PREVIEW_CHARACTERS = 40_000;
@@ -80,9 +81,25 @@ function taskEnvironment(input: StartCommandInput): Record<string, string> {
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  const temporary = `${filePath}.tmp-${process.pid}`;
+  const temporary = `${filePath}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, filePath);
+  await renameReplacingWindowsSharingViolation(temporary, filePath);
+}
+
+async function renameReplacingWindowsSharingViolation(source: string, destination: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || attempt >= 20 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) {
+        await unlink(source).catch(() => undefined);
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(5 * (attempt + 1), 50)));
+    }
+  }
 }
 
 function runIdFor(now: Date): string {
@@ -168,7 +185,7 @@ export class DurableTaskManager {
   constructor(options: DurableTaskManagerOptions = {}) {
     this.runRoot = options.runRoot ?? runStoreRoot();
     this.runnerPath = options.runnerPath
-      ?? fileURLToPath(new URL("./durable-task-runner.js", import.meta.url));
+      ?? fileURLToPath(new URL("../bin/durable-task-runner.js", import.meta.url));
     this.launchOverride = options.launchTask;
     this.systemdAvailable = options.systemdAvailable ?? systemdUserAvailable;
     this.stopSystemdUnit = options.stopSystemdUnit ?? (async (unitName) => {
@@ -177,7 +194,16 @@ export class DurableTaskManager {
         windowsHide: true,
       });
     });
-    this.killProcess = options.killProcess ?? ((pid, signal) => process.kill(pid, signal));
+    this.killProcess = options.killProcess ?? ((pid, signal) => {
+      if (process.platform === "win32") {
+        terminateProcessTree({
+          pid,
+          kill: (forwardedSignal) => process.kill(pid, forwardedSignal),
+        }, signal, false);
+        return;
+      }
+      process.kill(pid, signal);
+    });
     this.available = Boolean(this.launchOverride) || existsSync(this.runnerPath);
   }
 
@@ -359,6 +385,35 @@ export class DurableTaskManager {
     const state = await this.findTask(taskId);
     this.assertOwned(state, workspaceRoot);
     const taskPath = await this.findTaskPath(taskId);
+    if (process.platform === "win32") {
+      let pending: ReturnType<typeof setTimeout> | undefined;
+      const notify = () => {
+        if (pending) return;
+        pending = setTimeout(() => { pending = undefined; onChange(); }, 70);
+        pending.unref?.();
+      };
+      const listener = (
+        current: import("node:fs").Stats,
+        previous: import("node:fs").Stats,
+      ) => {
+        if (
+          current.mtimeMs === previous.mtimeMs
+          && current.size === previous.size
+          && current.ino === previous.ino
+        ) return;
+        notify();
+      };
+      // libuv's Windows fs.watch directory backend can abort the entire Node
+      // process when the watched path is expressed through an 8.3 short-name
+      // alias. Poll the exact task file instead; task.json is atomically
+      // replaced, so stat changes still provide the same latency hint while
+      // the timed state checks remain the durable source of truth.
+      watchFile(taskPath, { persistent: false, interval: 250 }, listener);
+      return () => {
+        if (pending) clearTimeout(pending);
+        unwatchFile(taskPath, listener);
+      };
+    }
     try {
       let pending: ReturnType<typeof setTimeout> | undefined;
       const watcher = watch(path.dirname(taskPath), { persistent: false }, (_event, filename) => {
@@ -442,6 +497,10 @@ export class DurableTaskManager {
       }
     }
     if (state.runnerPid) {
+      // Embedded/test launchers may run the durable runner in this process.
+      // The cancel marker is the durable intent and the runner observes it;
+      // never signal our own host process merely because runnerPid === pid.
+      if (state.runnerPid === process.pid) return;
       if (process.platform !== "win32") {
         try {
           this.killProcess(-state.runnerPid, "SIGTERM");

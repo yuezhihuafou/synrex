@@ -246,7 +246,7 @@ export class ProcessSessionManager {
     const session = await this.createSession(input);
     this.sessions.set(session.id, session);
     try {
-      if (input.tty && process.platform !== "win32") await this.startPty(session, input);
+      if (input.tty) await this.startPty(session, input);
       else this.startPipe(session, input);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -394,7 +394,7 @@ export class ProcessSessionManager {
       throw new Error("PTY support requires the optional node-pty dependency.");
     }
     const shell = resolveShellCommand(input.command);
-    const pty = nodePty.spawn(shell.executable, shell.args, {
+    const pty = nodePty.spawn(shell.executable, shell.ptyArgs ?? shell.args, {
       cwd: input.cwd,
       env: processEnvironment({ workspaceId: input.workspaceId, workspaceRoot: input.workspaceRoot }),
       name: "xterm-256color",

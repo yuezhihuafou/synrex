@@ -114,11 +114,11 @@ export class WorkspaceRegistry {
     private readonly store?: WorkspaceStore,
   ) {}
 
-  dedupeConversationAgentsFiles(
+  async dedupeConversationAgentsFiles(
     conversationScopeId: string | undefined,
     workspaceRoot: string,
     files: LoadedAgentsFile[],
-  ): { files: LoadedAgentsFile[]; reusedPaths: string[] } {
+  ): Promise<{ files: LoadedAgentsFile[]; reusedPaths: string[] }> {
     if (!conversationScopeId) return { files, reusedPaths: [] };
     let seen = this.conversationInstructionFingerprints.get(conversationScopeId);
     if (!seen) {
@@ -136,18 +136,24 @@ export class WorkspaceRegistry {
 
     const fresh: LoadedAgentsFile[] = [];
     const reusedPaths: string[] = [];
+    const canonicalWorkspaceRoot = (await tryRealpath(workspaceRoot)) ?? resolve(workspaceRoot);
     for (const file of files) {
-      if (!isPathInsideRoot(file.path, workspaceRoot)) {
+      const canonicalFilePath = (await tryRealpath(file.path)) ?? resolve(file.path);
+      if (!isPathInsideRoot(canonicalFilePath, canonicalWorkspaceRoot)) {
         // External/global instructions are not recoverable through workspace
         // read, so keep them self-contained in every workspace response.
         fresh.push(file);
         continue;
       }
-      const logicalPath = relative(workspaceRoot, file.path).split(sep).join("/");
+      const logicalPath = relative(canonicalWorkspaceRoot, canonicalFilePath).split(sep).join("/");
       const fingerprint = createHash("sha256")
         .update(logicalPath)
         .update("\0")
-        .update(file.content)
+        // Git worktrees on Windows may materialize the same committed
+        // instruction file with CRLF while the source checkout still has LF.
+        // Instruction dedupe is semantic text dedupe, so line-ending-only
+        // conversion must not make unchanged guidance look new.
+        .update(file.content.replace(/\r\n/g, "\n"))
         .digest("hex");
       if (seen.has(fingerprint)) {
         reusedPaths.push(logicalPath);

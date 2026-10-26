@@ -1,9 +1,9 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import { readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { resolveShellCommand } from "./process-platform.js";
+import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 import { pruneRunStore } from "./compact-runtime/retention.js";
 import type { DurableTaskState, DurableTaskStatus } from "./durable-task-model.js";
 import { recordTaskTrace, type TaskTraceContext } from "./task-trace.js";
@@ -38,9 +38,25 @@ export interface DurableTaskRunnerOptions {
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  const temporary = `${path}.tmp-${process.pid}`;
+  const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
-  await rename(temporary, path);
+  await renameReplacingWindowsSharingViolation(temporary, path);
+}
+
+async function renameReplacingWindowsSharingViolation(source: string, destination: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (process.platform !== "win32" || attempt >= 20 || !["EPERM", "EACCES", "EBUSY"].includes(code ?? "")) {
+        await unlink(source).catch(() => undefined);
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, Math.min(5 * (attempt + 1), 50)));
+    }
+  }
 }
 
 async function writeCompletionNotification(
@@ -210,6 +226,7 @@ export async function runDurableTask(
       env: request.env,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
+      windowsVerbatimArguments: shell.windowsVerbatimArguments,
     });
     childPid = child.pid;
     trace("task_spawned", { elapsedMs: Math.max(0, Date.now() - startedAtMs) });
@@ -226,14 +243,24 @@ export async function runDurableTask(
     });
 
     const forwardSignal = (signal: NodeJS.Signals) => {
+      if (requestedSignal) return;
       requestedSignal = signal;
-      child.kill(signal);
+      terminateProcessTree(child, signal, false);
     };
     const onTerm = () => forwardSignal("SIGTERM");
     const onInt = () => forwardSignal("SIGINT");
     process.once("SIGTERM", onTerm);
     process.once("SIGINT", onInt);
     await state("working");
+
+    // The on-disk marker is the durable cancellation intent. Signals from the
+    // manager are only a fast-path, so embedded runners and recovered runners
+    // can still honour cancellation without requiring the manager to signal
+    // its own process.
+    const cancellationPoll = setInterval(() => {
+      if (!requestedSignal && existsSync(cancelPath)) forwardSignal("SIGTERM");
+    }, 100);
+    cancellationPoll.unref();
 
     const heartbeat = setInterval(() => {
       void state("working").catch(() => undefined);
@@ -242,6 +269,7 @@ export async function runDurableTask(
 
     const result = await completion;
 
+    clearInterval(cancellationPoll);
     clearInterval(heartbeat);
     process.off("SIGTERM", onTerm);
     process.off("SIGINT", onInt);

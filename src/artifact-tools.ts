@@ -6,6 +6,7 @@ import {
   mkdir,
   open,
   readdir,
+  realpath,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -35,7 +36,9 @@ const PARTIAL_PREFIX = ".devspace-download-";
 const PARTIAL_SUFFIX = ".partial";
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1_000;
 const MAX_STALE_PARTIAL_CLEANUP = 32;
-const ARTIFACT_DOWNLOAD_PLATFORMS = new Set<NodeJS.Platform>(["linux"]);
+const ARTIFACT_DOWNLOAD_PLATFORMS = new Set<NodeJS.Platform>(["linux", "win32"]);
+const WINDOWS_DRIVE_PREFIX = /^[A-Za-z]:/;
+const WINDOWS_RESERVED_NAME = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 
 const openAIFileReferenceInputSchema = z.strictObject({
   download_url: z.string(),
@@ -200,6 +203,7 @@ export async function downloadIncomingArtifact({
     destinationDirectory = await prepareDestinationDirectory(
       workspaceHandle,
       destination.parentParts,
+      workspaceRoot,
     );
     await cleanupStalePartials(destinationDirectory);
 
@@ -207,11 +211,37 @@ export async function downloadIncomingArtifact({
       destinationDirectory.anchorPath,
       `${PARTIAL_PREFIX}${randomUUID()}${PARTIAL_SUFFIX}`,
     );
+    await assertDirectoryPathMatchesHandle(
+      destinationDirectory,
+      "artifact_destination_parent_unsafe",
+      "Artifact destination parent changed during download preparation.",
+    );
     handle = await open(
       partialPath,
       fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | NO_FOLLOW,
       0o600,
     );
+    // Windows lacks openat()/O_NOFOLLOW in Node. Verify that the newly-created
+    // empty partial still belongs to the exact directory handle before any
+    // untrusted artifact bytes are written. Subsequent writes use this handle,
+    // so a later path swap cannot redirect the stream.
+    await assertDirectoryPathMatchesHandle(
+      destinationDirectory,
+      "artifact_destination_parent_unsafe",
+      "Artifact destination parent changed before content streaming.",
+    );
+    const openedPartialEntry = await lstat(partialPath);
+    const openedPartialHandleEntry = await handle.stat();
+    if (
+      openedPartialEntry.isSymbolicLink()
+      || !openedPartialEntry.isFile()
+      || !sameFileIdentity(openedPartialEntry, openedPartialHandleEntry)
+    ) {
+      throw new ArtifactError(
+        "artifact_partial_unsafe",
+        "Native file partial changed before content streaming.",
+      );
+    }
 
     const hash = createHash("sha256");
     let size = 0;
@@ -266,7 +296,7 @@ export async function downloadIncomingArtifact({
       handle,
       publishLink,
     );
-    await unlink(partialPath).catch(() => undefined);
+    await unlinkPartialSafely(destinationDirectory, partialPath);
     partialPath = undefined;
 
     return {
@@ -279,7 +309,13 @@ export async function downloadIncomingArtifact({
     throw error;
   } finally {
     await handle?.close().catch(() => undefined);
-    if (partialPath) await unlink(partialPath).catch(() => undefined);
+    if (partialPath) {
+      if (destinationDirectory) {
+        await unlinkPartialSafely(destinationDirectory, partialPath);
+      } else {
+        await unlink(partialPath).catch(() => undefined);
+      }
+    }
     await destinationDirectory?.close().catch(() => undefined);
     await workspaceHandle?.close().catch(() => undefined);
   }
@@ -348,8 +384,23 @@ async function openDirectoryNoFollow(
 ): Promise<FileHandle> {
   let handle: FileHandle | undefined;
   try {
+    const before = process.platform === "win32" ? await lstat(path) : undefined;
+    if (before && (before.isSymbolicLink() || !before.isDirectory())) {
+      throw new ArtifactError(code, message);
+    }
     handle = await open(path, DIRECTORY_FLAGS);
     await assertDirectoryHandle(handle);
+    if (before) {
+      const [opened, after] = await Promise.all([handle.stat(), lstat(path)]);
+      if (
+        after.isSymbolicLink()
+        || !after.isDirectory()
+        || !sameFileIdentity(before, opened)
+        || !sameFileIdentity(after, opened)
+      ) {
+        throw new ArtifactError(code, message);
+      }
+    }
     return handle;
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -369,7 +420,7 @@ async function assertDirectoryHandle(handle: FileHandle): Promise<void> {
 }
 
 function descriptorDirectoryPath(handle: FileHandle): string {
-  if (isArtifactDownloadSupportedPlatform()) return `/proc/self/fd/${handle.fd}`;
+  if (process.platform === "linux") return `/proc/self/fd/${handle.fd}`;
   throw new ArtifactError(
     "artifact_platform_unsupported",
     "Native file download requires descriptor-anchored directory operations on this platform.",
@@ -377,12 +428,13 @@ function descriptorDirectoryPath(handle: FileHandle): string {
 }
 
 function normalizeArtifactDestination(value: string): ArtifactDestination {
-  const rawParts = value.split(sep);
+  const rawParts = value.split(/[\\/]+/);
   if (
     !value
     || value.includes("\u0000")
     || isAbsolute(value)
-    || value.endsWith(sep)
+    || WINDOWS_DRIVE_PREFIX.test(value)
+    || /[\\/]$/.test(value)
     || rawParts.includes("..")
   ) {
     throw new ArtifactError(
@@ -391,7 +443,7 @@ function normalizeArtifactDestination(value: string): ArtifactDestination {
     );
   }
 
-  const normalized = normalize(value);
+  const normalized = normalize(value.replace(/[\\/]+/g, sep));
   if (
     normalized === "."
     || normalized === ".."
@@ -411,6 +463,12 @@ function normalizeArtifactDestination(value: string): ArtifactDestination {
       "Artifact destination must name a file inside the selected workspace.",
     );
   }
+  if (process.platform === "win32" && parts.some(isUnsafeWindowsArtifactPathPart)) {
+    throw new ArtifactError(
+      "artifact_destination_invalid",
+      "Artifact destination contains a Windows-reserved or ambiguous path component.",
+    );
+  }
 
   return {
     path: normalized,
@@ -422,13 +480,15 @@ function normalizeArtifactDestination(value: string): ArtifactDestination {
 async function prepareDestinationDirectory(
   rootHandle: FileHandle,
   parentParts: readonly string[],
+  rootPath: string,
 ): Promise<SecureDestinationDirectory> {
   const openedHandles: FileHandle[] = [];
   let parentHandle = rootHandle;
-  let parentAnchor = descriptorDirectoryPath(rootHandle);
+  let parentAnchor = await directoryAnchorPath(rootHandle, rootPath);
 
   try {
     for (const part of parentParts) {
+      const childPath = join(parentAnchor, part);
       const child = await ensureWorkspaceChildDirectory(
         parentHandle,
         parentAnchor,
@@ -436,7 +496,7 @@ async function prepareDestinationDirectory(
       );
       openedHandles.push(child);
       parentHandle = child;
-      parentAnchor = descriptorDirectoryPath(child);
+      parentAnchor = await directoryAnchorPath(child, childPath);
     }
 
     return {
@@ -462,6 +522,11 @@ async function ensureWorkspaceChildDirectory(
   name: string,
 ): Promise<FileHandle> {
   await assertDirectoryHandle(parentHandle);
+  await assertDirectoryPathMatchesHandle(
+    { handle: parentHandle, anchorPath: parentAnchor },
+    "artifact_destination_parent_unsafe",
+    "Artifact destination parent changed while preparing nested directories.",
+  );
   const path = join(parentAnchor, name);
   try {
     await mkdir(path, { mode: 0o755 });
@@ -469,11 +534,17 @@ async function ensureWorkspaceChildDirectory(
     if (!isNodeError(error) || error.code !== "EEXIST") throw error;
   }
 
-  return openDirectoryNoFollow(
+  const child = await openDirectoryNoFollow(
     path,
     "artifact_destination_parent_unsafe",
     "Artifact destination parent must be a real directory inside the workspace.",
   );
+  await assertDirectoryPathMatchesHandle(
+    { handle: parentHandle, anchorPath: parentAnchor },
+    "artifact_destination_parent_unsafe",
+    "Artifact destination parent changed while preparing nested directories.",
+  );
+  return child;
 }
 
 async function publishDestination(
@@ -485,9 +556,19 @@ async function publishDestination(
   publishLink: typeof link,
 ): Promise<void> {
   await assertDirectoryHandle(directory.handle);
+  await assertDirectoryPathMatchesHandle(
+    directory,
+    "artifact_destination_parent_unsafe",
+    "Artifact destination parent changed before publication.",
+  );
   const candidate = join(directory.anchorPath, filename);
   try {
     await publishLink(partialPath, candidate);
+    await assertDirectoryPathMatchesHandle(
+      directory,
+      "artifact_destination_parent_unsafe",
+      "Artifact destination parent changed during publication.",
+    );
     assertPublishedArtifactEntry(await lstat(candidate), writtenEntry);
   } catch (error) {
     if (isNodeError(error) && error.code === "EEXIST") {
@@ -496,10 +577,21 @@ async function publishDestination(
         "Artifact destination already exists.",
       );
     }
+    if (error instanceof ArtifactError) throw error;
+    if (process.platform === "win32") {
+      await assertDirectoryPathMatchesHandle(
+        directory,
+        "artifact_destination_parent_unsafe",
+        "Artifact destination parent changed during publication.",
+      );
+    }
     // Once the destination path exists, never unlink it during failure cleanup.
     // Another process may have replaced that path after publication, and a
     // path-based verification followed by unlink would introduce another race.
-    throw error;
+    throw new ArtifactError(
+      "artifact_destination_publish_failed",
+      "Native file could not be published safely.",
+    );
   }
 }
 
@@ -525,6 +617,11 @@ async function cleanupStalePartials(
   directory: SecureDestinationDirectory,
 ): Promise<void> {
   await assertDirectoryHandle(directory.handle);
+  await assertDirectoryPathMatchesHandle(
+    directory,
+    "artifact_destination_parent_unsafe",
+    "Artifact destination parent changed during partial cleanup.",
+  );
   const entries = await readdir(directory.anchorPath, { withFileTypes: true });
   let inspected = 0;
   const cutoff = Date.now() - STALE_PARTIAL_AGE_MS;
@@ -537,6 +634,11 @@ async function cleanupStalePartials(
     inspected += 1;
 
     const path = join(directory.anchorPath, entry.name);
+    await assertDirectoryPathMatchesHandle(
+      directory,
+      "artifact_destination_parent_unsafe",
+      "Artifact destination parent changed during partial cleanup.",
+    );
     const metadata = await lstatOrUndefined(path);
     if (
       !metadata
@@ -547,6 +649,77 @@ async function cleanupStalePartials(
     ) continue;
     await unlink(path).catch(() => undefined);
   }
+}
+
+async function unlinkPartialSafely(
+  directory: SecureDestinationDirectory,
+  partialPath: string,
+): Promise<void> {
+  if (process.platform === "win32") {
+    try {
+      await assertDirectoryPathMatchesHandle(
+        directory,
+        "artifact_destination_parent_unsafe",
+        "Artifact destination parent changed before partial cleanup.",
+      );
+    } catch {
+      // Never follow a replaced Windows parent path merely to clean a temp
+      // file. Leaving a private random partial behind in the originally-open
+      // directory is safer than unlinking through a raced junction.
+      return;
+    }
+  }
+  await unlink(partialPath).catch(() => undefined);
+}
+
+async function directoryAnchorPath(handle: FileHandle, path: string): Promise<string> {
+  if (process.platform === "linux") return descriptorDirectoryPath(handle);
+  if (process.platform !== "win32") return descriptorDirectoryPath(handle);
+  const anchorPath = await realpath(path);
+  await assertDirectoryPathMatchesHandle(
+    { handle, anchorPath },
+    "artifact_destination_parent_unsafe",
+    "Artifact destination parent must remain a real directory inside the workspace.",
+  );
+  return anchorPath;
+}
+
+async function assertDirectoryPathMatchesHandle(
+  directory: Pick<SecureDestinationDirectory, "handle" | "anchorPath">,
+  code: string,
+  message: string,
+): Promise<void> {
+  if (process.platform !== "win32") return;
+  try {
+    const [opened, current] = await Promise.all([
+      directory.handle.stat(),
+      lstat(directory.anchorPath),
+    ]);
+    if (
+      current.isSymbolicLink()
+      || !current.isDirectory()
+      || !opened.isDirectory()
+      || !sameFileIdentity(current, opened)
+    ) {
+      throw new ArtifactError(code, message);
+    }
+  } catch (error) {
+    if (error instanceof ArtifactError) throw error;
+    throw new ArtifactError(code, message);
+  }
+}
+
+function sameFileIdentity(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino;
+}
+
+function isUnsafeWindowsArtifactPathPart(part: string): boolean {
+  if (!part || part.endsWith(".") || part.endsWith(" ")) return true;
+  if (/[:<>"|?*\u0000-\u001f]/.test(part)) return true;
+  return WINDOWS_RESERVED_NAME.test(part);
 }
 
 async function writeAll(

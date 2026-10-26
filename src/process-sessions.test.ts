@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { HeadTailBuffer, ProcessSessionManager } from "./process-sessions.js";
 
 const smallBuffer = new HeadTailBuffer(100);
@@ -212,15 +213,20 @@ if (buffered.sessionId) manager.terminate("workspace-a", buffered.sessionId);
 
 try {
   if (process.platform === "win32") {
-    const pty = await manager.start({
-      workspaceId: "workspace-a",
+    // node-pty's Windows backend keeps a worker MessagePort alive after the
+    // ConPTY exits. Exercise the real PTY in a child so the test runner itself
+    // does not inherit that long-lived native handle.
+    const smoke = spawnSync(process.execPath, [
+      "--import",
+      "tsx",
+      "src/test-support/windows-pty-smoke.ts",
+    ], {
       cwd: process.cwd(),
-      command: "echo pty-ok",
-      tty: true,
-      yieldTimeMs: 10_000,
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 10_000,
     });
-    assert.equal(pty.running, false);
-    assert.match(pty.output, /pty-ok/);
+    assert.equal(smoke.status, 0, `${smoke.stdout}\n${smoke.stderr}`);
   } else {
     const pty = await manager.start({
       workspaceId: "workspace-a",

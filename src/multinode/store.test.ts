@@ -15,13 +15,16 @@ function registration(alias?: string) {
 
 test("local node identity is stable across store reopen", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "devspace-node-store-"));
-  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  let secondStore: SqliteControlPlaneStore | undefined;
+  t.after(async () => {
+    secondStore?.close();
+    await rm(stateDir, { recursive: true, force: true });
+  });
   const firstStore = new SqliteControlPlaneStore(stateDir);
   const first = firstStore.ensureLocalNode(registration("primary"));
   firstStore.close();
 
-  const secondStore = new SqliteControlPlaneStore(stateDir);
-  t.after(() => secondStore.close());
+  secondStore = new SqliteControlPlaneStore(stateDir);
   const second = secondStore.ensureLocalNode(registration("renamed"));
   assert.equal(second.id, first.id);
   assert.equal(second.alias, "renamed");

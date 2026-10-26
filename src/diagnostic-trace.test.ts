@@ -32,8 +32,10 @@ test("small persistent diagnostic log keeps only safe metadata and correlates re
   for (const secret of ["secret prompt", "sensitive", "cat ~/.ssh/id_rsa", "private code", "private token", "access_token"]) {
     assert.ok(!raw.includes(secret), `must not persist ${secret}`);
   }
-  assert.equal((await stat(diagnostics.file)).mode & 0o777, 0o600);
-  assert.equal((await stat(join(root, "diagnostics"))).mode & 0o777, 0o700);
+  if (process.platform !== "win32") {
+    assert.equal((await stat(diagnostics.file)).mode & 0o777, 0o600);
+    assert.equal((await stat(join(root, "diagnostics"))).mode & 0o777, 0o700);
+  }
   const events = new DiagnosticTrace(root).read();
   assert.equal(events.length, 4);
   assert.deepEqual(summarizeDiagnosticTrace(events).requests, [{

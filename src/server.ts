@@ -586,7 +586,7 @@ function registerMcpSurface(
       const visibleAgentProviders = includeBootstrapContext ? cardAgentProviders : [];
       const visibleAgents = includeBootstrapContext ? cardAgents : [];
       const dedupedAgents = includeBootstrapContext
-        ? workspaces.dedupeConversationAgentsFiles(conversationScopeId, workspace.root, agentsFiles)
+        ? await workspaces.dedupeConversationAgentsFiles(conversationScopeId, workspace.root, agentsFiles)
         : { files: [], reusedPaths: [] };
       const loadedAgentsFiles = dedupedAgents.files.map((file) => ({
         path: formatAgentsPath(file.path, workspace.root),

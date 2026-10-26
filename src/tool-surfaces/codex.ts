@@ -31,7 +31,7 @@ const CODEX_LONG_EXEC_YIELD_MS = 1_000;
 const CODEX_INTERACTIVE_YIELD_MS = 250;
 
 function execYieldMs(command: string): number {
-  const likelyLong = /(?:^|[;&|]\s*)(?:sleep\s+\d|(?:pnpm|npm|yarn|bun)\s+(?:test|build|typecheck|lint|check|run\s+(?:test|build|typecheck|lint|check)|tsx\s+--test\b)|(?:node|tsx)\s+--test\b|pytest\b|colcon\s+(?:build|test)\b|cmake\s+--build\b|(?:make|ninja)\b|cargo\s+(?:test|build|clippy)\b|go\s+test\b|mvn\b|gradle\b)/i.test(command);
+  const likelyLong = /(?:^|[;&|]\s*)(?:sleep\s+\d|(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b[^\r\n]*\bStart-Sleep\b|(?:pnpm|npm|yarn|bun)\s+(?:test|build|typecheck|lint|check|run\s+(?:test|build|typecheck|lint|check)|tsx\s+--test\b)|(?:node|tsx)\s+--test\b|pytest\b|colcon\s+(?:build|test)\b|cmake\s+--build\b|(?:make|ninja)\b|cargo\s+(?:test|build|clippy)\b|go\s+test\b|mvn\b|gradle\b)/i.test(command);
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
