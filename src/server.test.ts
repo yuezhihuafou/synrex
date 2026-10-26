@@ -286,7 +286,7 @@ test("codex process failures expose MCP error state and exit code", async (t) =>
   assert.equal(response.isError, true);
   assert.equal(structuredContent(response).exitCode, 7);
   assert.match(contentText(response), /expected-error/);
-  assert.match(contentText(response), /goal is still open/);
+  assert.match(contentText(response), /acceptance criteria remain unmet/);
   assert.equal(structuredContent(response).result, contentText(response));
 });
 
@@ -302,7 +302,7 @@ test("failed durable command is surfaced as error with a repair-next hint", asyn
   assert.equal(structuredContent(terminal).status, "completed");
   assert.equal(structuredContent(terminal).exitCode, 13);
   assert.equal(terminal.isError, true, "completed shell task with nonzero exit must not look successful");
-  assert.match(contentText(terminal), /goal is still open/);
+  assert.match(contentText(terminal), /acceptance criteria remain unmet/);
   assert.match(contentText(terminal), /fix or alternative/);
   assert.match(contentText(terminal), /Final command failed \(exit 13\)/);
   assert.doesNotMatch(contentText(terminal), /Final dependency is completed/);

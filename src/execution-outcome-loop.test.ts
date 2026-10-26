@@ -20,7 +20,7 @@ for (const [name, instructions] of [
 });
 
 test("a failed command prompts recovery, not an excuse to finish", () => {
-  assert.match(FAILURE_CONTINUATION_HINT, /goal is still open/);
+  assert.match(FAILURE_CONTINUATION_HINT, /acceptance criteria remain unmet/);
   assert.match(FAILURE_CONTINUATION_HINT, /fix or alternative/);
-  assert.match(FAILURE_CONTINUATION_HINT, /Do not stop at diagnosis/);
+  assert.match(FAILURE_CONTINUATION_HINT, /intentionally expected failure may already satisfy the request/);
 });
