@@ -390,6 +390,31 @@ export class DurableTaskManager {
     return view;
   }
 
+  /** Include a small terminal-output tail in the model's completion receipt.
+   * The full run log remains authoritative and available by runId. */
+  async outputTail(
+    workspaceRoot: string,
+    taskId: string,
+    maxBytes = 2_048,
+  ): Promise<{ text: string; truncated: boolean } | undefined> {
+    const state = await this.findTask(taskId);
+    this.assertOwned(state, workspaceRoot);
+    if (state.status !== "completed" && state.status !== "failed" && state.status !== "cancelled") {
+      return undefined;
+    }
+    const info = await stat(state.outputPath);
+    if (info.size === 0) return undefined;
+    const size = Math.min(info.size, Math.max(1, Math.min(maxBytes, 4_096)));
+    const handle = await open(state.outputPath, "r");
+    try {
+      const bytes = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(bytes, 0, size, info.size - size);
+      return { text: bytes.subarray(0, bytesRead).toString("utf8"), truncated: info.size > size };
+    } finally {
+      await handle.close();
+    }
+  }
+
   /** Observe an out-of-process durable runner's atomic task.json renames.
    * Events are only a latency optimisation; every caller must retain timed
    * state checks because fs.watch is not a durable event journal. */

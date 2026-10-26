@@ -752,8 +752,30 @@ async function waitForDurableTask(
   if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
     await durableTasks.get(workspaceRoot, taskId); // acknowledge terminal notification
   }
-  return final ? finalWaitResponse(waited, taskId)
+  const response = final ? await finalWaitResponse(waited, taskId)
     : taskViewResponse(waited.view, { unchanged: waited.unchanged });
+  if (waited.unchanged || !["completed", "failed", "cancelled"].includes(waited.view.status)) {
+    return response;
+  }
+  try {
+    const output = await durableTasks.outputTail(workspaceRoot, taskId);
+    if (!output?.text) return response;
+    const preview = `--- ${output.truncated ? "Task output tail (truncated)" : "Task output (complete)"} ---\n`
+      + output.text
+      + (output.truncated ? `\nFull log: devspace-log tail ${waited.view.runId}` : "");
+    return {
+      ...response,
+      content: [...response.content, textBlock(preview)],
+      structuredContent: {
+        ...response.structuredContent,
+        result: `${response.structuredContent.result}\n${preview}`,
+        outputTruncated: output.truncated,
+      },
+    };
+  } catch {
+    // Missing or rotated output must not turn a completed command into a tool error.
+    return response;
+  }
 }
 
 async function finalWaitResponse(waited: TaskWaitResult, taskId: string) {

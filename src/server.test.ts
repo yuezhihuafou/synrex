@@ -842,6 +842,8 @@ test("task_wait completes durable commands without repeated host polling", async
   assert.equal(sixToolResult.status, "completed");
   assert.equal(sixToolResult.exitCode, 0);
   assert.equal(sixToolResult.runId, structuredContent(start).runId);
+  assert.match(sixToolResult.result as string, /wait-completed/);
+  assert.equal(sixToolResult.outputTruncated, false);
   const waited = await context.client.callTool({
     name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId },
   });
@@ -850,11 +852,31 @@ test("task_wait completes durable commands without repeated host polling", async
   assert.equal(result.status, "completed");
   assert.equal(result.exitCode, 0);
   assert.equal(result.unchanged, undefined);
+  assert.match(result.result as string, /wait-completed/);
   const terminal = await context.client.callTool({
     name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId, sinceRevision: result.revision },
   });
   assert.equal(structuredContent(terminal).status, "completed");
   assert.equal(structuredContent(terminal).unchanged, undefined);
+
+  const failed = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId: opened.workspaceId,
+      cmd: "sleep 2; node -e 'process.stderr.write(\"E\".repeat(4096))'; exit 7",
+    },
+  });
+  const failedTaskId = structuredContent(failed).taskId as string;
+  assert.match(failedTaskId, /^task_[0-9a-f]{16}$/);
+  const failedWait = await context.client.callTool({
+    name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId: failedTaskId },
+  });
+  const failedReceipt = structuredContent(failedWait);
+  assert.equal(failedReceipt.exitCode, 7);
+  assert.equal(failedReceipt.outputTruncated, true);
+  assert.match(failedReceipt.result as string, /Task output tail \(truncated\)/);
+  assert.match(failedReceipt.result as string, /Full log: devspace-log tail/);
+  assert.ok((failedReceipt.result as string).length < 2_500);
 });
 
 test("project tool keeps architecture results compact unless detail is requested", async (t) => {
