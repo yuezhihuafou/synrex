@@ -8,6 +8,7 @@ import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import type { ServerConfig } from "./config.js";
+import { resolveCoreListenPort } from "./server-bind.js";
 import { resolveCliWorkspaceContext } from "./cli-workspace.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
@@ -389,12 +390,15 @@ async function serve(): Promise<void> {
   }
 
   const config = loadConfig();
+  const listenPort = resolveCoreListenPort(
+    config.port, config.host, config.publicBaseUrl, process.env.SYNREX_CORE_LISTEN_PORT,
+  );
   await runStartupWorktreeCleanup(config);
   await runStartupMetadataCleanup(config);
   const { createServer } = await import("./server.js");
   const { app, close, localAgentProviders, localNode } = createServer(config);
-  const httpServer = app.listen(config.port, config.host, () => {
-    console.log(`synrex listening on http://${config.host}:${config.port}/mcp`);
+  const httpServer = app.listen(listenPort, config.host, () => {
+    console.log(`synrex listening on http://${config.host}:${listenPort}/mcp`);
     console.log(`public base url: ${config.publicBaseUrl}`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`allowed hosts: ${config.allowedHosts.join(", ")}`);

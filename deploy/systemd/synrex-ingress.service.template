@@ -1,0 +1,18 @@
+# Optional STABLE ingress. Do NOT enable until one-time owner cutover has
+# passed separate QA. Replace @RELEASE_DIRECTORY@ with immutable candidate.
+[Unit]
+Description=Synrex owner stable loopback ingress
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/swy/.nvm/versions/node/v22.22.2/bin/node @RELEASE_DIRECTORY@/scripts/ingress-gate.mjs --listen 7676 --upstream 7677 --control %t/synrex-ingress.sock
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStopSec=12
+
+[Install]
+WantedBy=default.target

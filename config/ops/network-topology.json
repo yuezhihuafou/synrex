@@ -4,6 +4,12 @@
   "owners": { "publicMcpOAuth": "swy1", "gatewayMandatoryForDevelopment": false },
   "releaseCriticalEndpoints": ["swy1-core"],
   "releaseCriticalUnits": ["devspace.service", "cloudflared-devspace.service"],
+  "stableIngress": {
+    "listenPort": 7676,
+    "ingressUnit": "synrex-ingress.service",
+    "corePort": 7677,
+    "coreUnit": "devspace.service"
+  },
   "endpoints": [
     { "id": "swy1-core", "node": "swy1", "bind": "127.0.0.1", "port": 7676, "unit": "devspace.service", "expected": "active", "probe": "/healthz", "environment": "production" },
     { "id": "swy1-cloudflare-metrics", "node": "swy1", "bind": "127.0.0.1", "port": 20241, "unit": "cloudflared-devspace.service", "expected": "active", "environment": "infrastructure" },
