@@ -137,7 +137,10 @@ try {
     ownerToken: randomBytes(32).toString("base64url"),
     nodeJoinToken: randomBytes(32).toString("base64url"),
   }), { mode: 0o600 });
+  // The caller may itself be a relocated production Core (:7677). This
+  // disposable QA instance must use its independently selected loopback port.
   const env = { ...process.env, DEVSPACE_CONFIG_DIR: configDir, DEVSPACE_COMPACT_RUN_ROOT: join(scratch, "runs") };
+  delete env.SYNREX_CORE_LISTEN_PORT;
   server = spawn(process.execPath, [join(release, "dist/cli.js"), "serve"], {
     env, stdio: "ignore", detached: process.platform !== "win32",
   });

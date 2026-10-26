@@ -390,9 +390,14 @@ async function serve(): Promise<void> {
   }
 
   const config = loadConfig();
+  const privateListenOverride = process.env.SYNREX_CORE_LISTEN_PORT;
   const listenPort = resolveCoreListenPort(
-    config.port, config.host, config.publicBaseUrl, process.env.SYNREX_CORE_LISTEN_PORT,
+    config.port, config.host, config.publicBaseUrl, privateListenOverride,
   );
+  // Only the server's listener uses this systemd-scoped override. Tool
+  // subprocesses and durable shell tasks must not inherit it and silently
+  // redirect unrelated Synrex instances or test services to the owner port.
+  delete process.env.SYNREX_CORE_LISTEN_PORT;
   await runStartupWorktreeCleanup(config);
   await runStartupMetadataCleanup(config);
   const { createServer } = await import("./server.js");
