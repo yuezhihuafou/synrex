@@ -1,5 +1,12 @@
 # Synrex: product boundary and delivery roadmap
 
+**2026-10-26 P0 implementation note:** Parallel-chat integration, ingress
+continuity and Tunnel/port ownership form one engineering effort. Consult
+`docs/platform/SYNREX_P0_CONTINUITY_INTEGRATION.md` for the measured baseline,
+read-only inventory tools, release-lock source and isolated ingress prototype.
+That source work is **not** a claim that the proxy or revised activation guard
+is already deployed on swy1's public ingress.
+
 ## Product identity
 
 **Synrex is a standalone GPT-led remote coding and execution platform.** It exposes

@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "description": "Observed 2026-10-26; authoritative only for local unit and port intentions, not Cloudflare remote ingress or public OAuth settings.",
+  "owners": { "publicMcpOAuth": "swy1", "gatewayMandatoryForDevelopment": false },
+  "releaseCriticalEndpoints": ["swy1-core"],
+  "releaseCriticalUnits": ["devspace.service", "cloudflared-devspace.service"],
+  "endpoints": [
+    { "id": "swy1-core", "node": "swy1", "bind": "127.0.0.1", "port": 7676, "unit": "devspace.service", "expected": "active", "probe": "/healthz", "environment": "production" },
+    { "id": "swy1-cloudflare-metrics", "node": "swy1", "bind": "127.0.0.1", "port": 20241, "unit": "cloudflared-devspace.service", "expected": "active", "environment": "infrastructure" },
+    { "id": "swy1-memhub", "node": "swy1", "bind": "127.0.0.1", "port": 3001, "unit": "memhub.service", "expected": "active", "environment": "optional-memory" },
+    { "id": "swy1-memhub-core", "node": "swy1", "bind": "127.0.0.1", "port": 18960, "unit": "memhub-core.service", "expected": "active", "environment": "optional-memory" },
+    { "id": "swy1-qwen-relay", "node": "swy1", "bind": "127.0.0.1", "port": 11435, "unit": "devspace-qwen-tunnel.service", "expected": "active", "environment": "optional-compute" },
+    { "id": "gateway-core", "node": "gateway", "bind": "127.0.0.1", "port": 7676, "unit": "devspace.service", "expected": "active", "probe": "/healthz", "environment": "peer" },
+    { "id": "gateway-swy1-relay", "node": "gateway", "bind": "127.0.0.1", "port": 7678, "unit": "devspace-swy1-lan-tunnel.service", "expected": "active", "probe": "/healthz", "environment": "infrastructure" },
+    { "id": "gateway-memhub-relay", "node": "gateway", "bind": "127.0.0.1", "port": 3001, "unit": "memhub-swy1-tunnel.service", "expected": "active", "environment": "optional-memory" },
+    { "id": "gateway-qwen", "node": "gateway", "bind": "127.0.0.1", "port": 11435, "unit": "devspace-local-operator.service", "expected": "active", "environment": "optional-compute" },
+    { "id": "gateway-agy-socks", "node": "gateway", "bind": "127.0.0.1", "port": 1089, "unit": "synrex-agy-socks.service", "expected": "active", "environment": "optional-subagent" },
+    { "id": "gateway-public-cloudflare-disabled", "node": "gateway", "bind": "127.0.0.1", "port": null, "unit": "cloudflared-devspace.service", "expected": "inactive", "environment": "production-authority" }
+  ],
+  "links": [
+    { "from": "gateway-swy1-relay", "to": "swy1-core", "kind": "ssh-local-forward" },
+    { "from": "gateway-memhub-relay", "to": "swy1-memhub", "kind": "ssh-local-forward" },
+    { "from": "swy1-qwen-relay", "to": "gateway-qwen", "kind": "ssh-local-forward" }
+  ],
+  "unregisteredObservedTestPorts": [8769, 8771, 8783],
+  "cloudflareRemoteIngress": "unverified-external-configuration"
+}
