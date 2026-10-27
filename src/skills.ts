@@ -107,7 +107,14 @@ export function loadWorkspaceSkills(config: ServerConfig, cwd: string): LoadedSk
     includeDefaults: false,
   });
 
-  const withoutSubagents = withoutSubagentsSkill(result);
+  // DBS is a user-global business/content toolkit, not part of Synrex's
+  // engineering toolchain. Keep it installed for other agents but never
+  // advertise it through Synrex workspaces or subagent skill context.
+  const filtered = {
+    ...result,
+    skills: result.skills.filter((skill) => skill.name !== "dbs" && !skill.name.startsWith("dbs-")),
+  };
+  const withoutSubagents = withoutSubagentsSkill(filtered);
   if (!config.subagents.enabled) return withoutSubagents;
 
   const managedDir = dirname(join(config.devspaceSkillsDir, SUBAGENTS_SKILL));
