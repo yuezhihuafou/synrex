@@ -191,6 +191,11 @@ async function executeCliAgent(
         }
         const text = chunk.toString("utf8");
         if (spec.outputFormat === "stream-json") {
+          // Some older CLI versions emit one pretty-printed final JSON
+          // object even when stream-json was requested. Retain only a bounded
+          // compatibility window; normal line-by-line events still take
+          // precedence and are not replayed.
+          if (stdout.length < 64 * 1024) stdout += text.slice(0, 64 * 1024 - stdout.length);
           lineBuffer += text;
           let breakAt = lineBuffer.indexOf("\n");
           while (breakAt !== -1) {
