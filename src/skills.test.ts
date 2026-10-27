@@ -27,6 +27,8 @@ try {
   const globalClaudeSkills = join(root, ".claude", "skills");
   const projectClaudeSkills = join(projectRoot, ".claude", "skills");
   await mkdir(join(globalAgentsSkills, "agent-global-skill"), { recursive: true });
+  await mkdir(join(globalAgentsSkills, "dbs"), { recursive: true });
+  await mkdir(join(globalAgentsSkills, "dbs-diagnosis"), { recursive: true });
   await mkdir(join(projectAgentsSkills, "agent-project-skill"), { recursive: true });
   await mkdir(join(globalClaudeSkills, "claude-global-skill"), { recursive: true });
   await mkdir(join(projectClaudeSkills, "claude-project-skill"), { recursive: true });
@@ -49,6 +51,10 @@ try {
       "# Agent Global Skill",
     ].join("\n"),
   );
+  for (const name of ["dbs", "dbs-diagnosis"]) {
+    await writeFile(join(globalAgentsSkills, name, "SKILL.md"),
+      `---\nname: ${name}\ndescription: Business toolkit only.\n---\n# ${name}\n`);
+  }
   await writeFile(
     join(projectAgentsSkills, "agent-project-skill", "SKILL.md"),
     [
@@ -179,6 +185,7 @@ try {
   }));
   const loaded = loadWorkspaceSkills(config, projectRoot);
   assert.equal(loaded.skills.some((skill) => skill.name === "agent-global-skill"), true);
+  assert.equal(loaded.skills.some((skill) => skill.name === "dbs" || skill.name.startsWith("dbs-")), false);
   assert.equal(loaded.skills.some((skill) => skill.name === "agent-project-skill"), true);
   assert.equal(loaded.skills.some((skill) => skill.name === "claude-global-skill"), true);
   assert.equal(loaded.skills.some((skill) => skill.name === "claude-project-skill"), true);
