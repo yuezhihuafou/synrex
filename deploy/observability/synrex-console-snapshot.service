@@ -4,8 +4,8 @@ Description=Synrex out-of-process console snapshot
 [Service]
 Type=oneshot
 Environment=SYNREX_STATE_DIR=%h/.local/share/devspace-cutover-20261018
-Environment=SYNREX_RELEASE_DIR=%h/services/devspace/releases/20261023-synrex-usage-d12b06a
-ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node %h/.local/share/synrex-observability/console-snapshot-worker.mjs
+Environment=SYNREX_RELEASE_ROOT=%h/services/devspace/releases
+ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node %h/.local/share/synrex-observability/active-console-snapshot.mjs
 Nice=15
 IOSchedulingClass=idle
 MemoryMax=256M

@@ -61,6 +61,11 @@ The resulting cached snapshot reported `synrex-main-2b0ffcfe97f0` and a
 present `dataFreshness` section. The old configuration was retained in
 `~/.local/state/synrex/console-hotfix-20261027T080628Z`.
 This did not repair or restart the ChatGPT reply stream.
+To prevent the next Core handoff from reintroducing this drift, the
+independent Console collector has a stable loader that reads the active Core
+systemd ExecStart on **every** snapshot invocation, verifies that release's
+manifest/build identity, and imports the worker from that immutable release.
+It does not depend on a moving release symlink or a stale environment pin.
 
 ## Delivery limitations
 
