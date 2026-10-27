@@ -12,6 +12,7 @@ import { compareToolContracts } from "./multinode/protocol.js";
 import { readConversationLabels } from "./conversation-labels.js";
 import { summarizeConsoleUsage, type UsageEpisode } from "./console-usage.js";
 import { readStoredUsage } from "./usage-ledger.js";
+import { readDelegationMetrics, type DelegationMetrics } from "./console-delegation.js";
 
 interface NodeRow {
   id: string; kind: string; alias: string | null; health: string;
@@ -60,6 +61,7 @@ export interface ConsoleSnapshot {
   timeline: Array<{at:string;kind:string;taskId?:string;runId?:string;nodeId?:string;errorCategory?:string;exitCode?:number;outcome?:string}>;
   memory: { episodes: number; successful: number; notes: number; candidates: number; promoted: number };
   usage: ReturnType<typeof summarizeConsoleUsage>;
+  delegation: DelegationMetrics;
   diagnostics: {
     count: number;
     observability: ReturnType<typeof summarizeConsoleObservability>;
@@ -326,6 +328,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       diagnostics: allEvents.length >= 20000,
       episodes: usageEpisodesCapped,
     }, storedUsage),
+    delegation: readDelegationMetrics(stateDir, allEvents, Date.now(), allEvents.length >= 20000),
     diagnostics: { count: events.length,
       observability: summarizeConsoleObservability(events),
       requests, events: events.slice(-200).reverse() },

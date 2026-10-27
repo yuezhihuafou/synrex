@@ -18,6 +18,14 @@ type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"h
   durationMs?:number;status?:number;errorCategory?:string;netError?:string;startedAt?:string;
   host?:string;conversationTitle?:string};
 type UsagePeriod = "24h" | "7d" | "30d";
+type DelegationMetrics = { window:"24h"; source:{scope:"local_workspace";diagnosticsCapped:boolean;agentRecordsCapped:boolean;
+  agentsAvailable:boolean;note:string};
+  totals:{observedMcpToolCalls:number;agentSessionsStarted:number;agentTurnsCompleted:number;
+    agentTurnsFailed:number;agentExecutionMs:number;agentTurnSuccessPercent:number|null;userTaskSuccessPercent:null};
+  workspaces:Array<{workspaceId:string;observedMcpToolCalls:number;agentSessionsStarted:number;
+    agentTurnsCompleted:number;agentTurnsFailed:number;agentExecutionMs:number}>;
+  agentTasks:Array<{agentId:string;workspaceId:string;provider:string;state:string;
+    createdAt:string;finishedTurns:number;failedTurns:number;executionMs:number}> };
 type UsageTotals = { requests:number; completed:number; toolExecutions:number; inputBytes:number; outputBytes:number;
   measuredInput:number;measuredOutput:number;
   payloadTokenEquivalentInput:number;payloadTokenEquivalentOutput:number;gitReviews:number;reviewedFileTouches:number;
@@ -36,6 +44,7 @@ type Snapshot = {
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; checks:string[]; acceptanceCriteria:string[]; updatedAt: string }>;
   conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  delegation?: DelegationMetrics;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?:number; exitCode?:number|null; statusSource:string }>;
   activeTaskUnits?: string[] | null;
   activeTaskProcesses?: Array<{unit:string;pid:number|null;memoryBytes:number|null;cpuTimeMs:number|null}> | null;
@@ -222,6 +231,44 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
     {d.execution&&Object.keys(d.execution.failureCategories).length>0&&<Panel title="可观察失败原因" hint="仅来自工具执行事件中的错误类别，不代表根因或用户目标失败">
       {Object.entries(d.execution.failureCategories).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>
         <div key={reason} className="list-row"><strong className="grow">{reason}</strong><span>{count} 次</span></div>)}
+    </Panel>}
+    {d.delegation&&<Panel title="GPT / Subagent 委派效率" hint="近 24 小时 · 本机工作区 · 历史记录只读聚合">
+      <div className="metrics">
+        <Metric label="MCP 工具调用" value={d.delegation.totals.observedMcpToolCalls}
+          info="服务端观测调用，不等于 GPT 内部推理" symbol="⌘"/>
+        <Metric label="新建 Subagent" value={d.delegation.totals.agentSessionsStarted}
+          info="会话数；继续会话不会重复计数" symbol="◇"/>
+        <Metric label="Agent 执行时长" value={Math.round(d.delegation.totals.agentExecutionMs/1000)+" s"}
+          info="已记录终态 Agent 回合之和" symbol="◷"/>
+        <Metric label="Agent 回合成功率" value={d.delegation.totals.agentTurnSuccessPercent===null
+          ?"无样本":d.delegation.totals.agentTurnSuccessPercent+"%"}
+          info="非用户任务完成率" symbol="✓"/>
+      </div>
+      <p className="footnote">{d.delegation.source.note}</p>
+      {(d.delegation.source.diagnosticsCapped||d.delegation.source.agentRecordsCapped)&&
+        <p className="footnote">部分历史日志已达到读取上限，当前指标只表示已观测样本，不代表完整周期总量。</p>}
+      {!d.delegation.source.agentsAvailable&&<p className="footnote">本地 Agent 记录暂不可用，委派数据不能视为零使用量。</p>}
+      <div className="table-scroll"><table><thead><tr>
+        <th>工作区</th><th>MCP 工具调用</th><th>Subagent 新会话</th><th>Agent 回合成功 / 失败</th><th>Agent 时长</th>
+      </tr></thead><tbody>
+        {d.delegation.workspaces.map(w=><tr key={w.workspaceId}>
+          <td><code title={w.workspaceId}>{w.workspaceId}</code></td>
+          <td>{w.observedMcpToolCalls}</td><td>{w.agentSessionsStarted}</td>
+          <td>{w.agentTurnsCompleted} / {w.agentTurnsFailed}</td>
+          <td>{Math.round(w.agentExecutionMs/1000)} s</td>
+        </tr>)}
+      </tbody></table></div>
+      {d.delegation.agentTasks.length>0&&<>
+        <p className="footnote">最近 Agent 任务（Agent ID 是独立执行标识，并非 GPT 用户任务 ID）</p>
+        <div className="table-scroll"><table><thead><tr>
+          <th>Agent ID</th><th>Provider</th><th>状态</th><th>回合成功 / 失败</th><th>耗时</th>
+        </tr></thead><tbody>
+          {d.delegation.agentTasks.slice(0,10).map(a=><tr key={a.agentId}>
+            <td><code>{a.agentId}</code></td><td>{a.provider}</td><td>{a.state}</td>
+            <td>{a.finishedTurns-a.failedTurns} / {a.failedTurns}</td><td>{Math.round(a.executionMs/1000)} s</td>
+          </tr>)}
+        </tbody></table></div>
+      </>}
     </Panel>}
     <Panel title="数据源最近活动" hint="快照刷新不代表数据源有新事件；空闲不等于离线">
       <p className="footnote">快照读取：{time(d.dataFreshness?.sampledAt??d.generatedAt)}。下列时间分别来自原始数据源，不是页面刷新时间。</p>

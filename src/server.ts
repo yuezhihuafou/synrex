@@ -190,8 +190,11 @@ function serverInstructions(
   const placement = " In multi-node mode, normally omit the open_workspace node selector and let Synrex resolve placement. Never guess a node. Set node only when the user explicitly identifies a host or Synrex reports an ambiguity with candidate nodes; required placement rules cannot be overridden by the model.";
   const intelligence = " Use project for relevant architecture changes or verified local experience, not for repetitive approval of ordinary reads/edits. Do not run the same project check without new evidence.";
   const workflows = " For genuinely long or multi-session tasks, use workflow_open/checkpoint at meaningful handoff boundaries, not after each step. Batch independent reads, prefer task_wait to repeated task_get polling, and run focused tests during edits with final comprehensive checks before release. Keep GPT responsible for design and correctness; deterministic execution needs no repeated model confirmations. On recovery check current Git/tasks rather than trusting summaries. Synrex cannot resume GPT reasoning after a host turn ends.";
+  const delegation = config.subagents.enabled
+    ? " GPT owns requirements, architecture, decisions and final verification. For a substantial independent multi-file investigation, implementation, review or test synthesis, prefer a bounded Subagent assignment instead of many fine-grained host tool calls; load the advertised subagents skill when needed. Use native Synrex tools for small reads, one-file edits and quick checks. Reuse the same agent ID and context reference when continuing one task; parallelize independent read-only assignments only. Give writers isolated worktrees, never race shared source or a production release. Delegate once per meaningful outcome, not one agent per file or command; verify its reported result independently. Subagent invocation is an explicit GPT decision, not a hidden automatic planner."
+    : "";
 
-  return `${common}${placement} ${toolSurface.instructions({ agents, skills })}${intelligence}${workflows}${artifactInstruction}${showChangesInstruction}`;
+  return `${common}${placement} ${toolSurface.instructions({ agents, skills })}${intelligence}${workflows}${delegation}${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {

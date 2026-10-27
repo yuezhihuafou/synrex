@@ -1310,6 +1310,8 @@ test("open_workspace advertises subagent instructions on demand by default", asy
   const skills = opened.skills as Array<Record<string, unknown>>;
   assert.equal(skills.some((skill) => skill.name === "subagents"), true);
   assert.doesNotMatch(String(opened.instruction), /# Synrex subagents/);
+  assert.match(context.client.getInstructions() ?? "", /prefer a bounded Subagent assignment/);
+  assert.match(context.client.getInstructions() ?? "", /GPT owns requirements, architecture, decisions and final verification/);
 });
 
 test("open_workspace preloads subagent instructions when configured", async (t) => {

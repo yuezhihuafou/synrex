@@ -1,5 +1,14 @@
 # Synrex: product boundary and delivery roadmap
 
+**2026-10-27 Subagent delegation follow-up (source candidate):** The compact
+MCP task-level delegation rule and detailed managed Subagent Skill now favor
+bounded independent multi-file work, with explicit session/Context Pack reuse
+and isolated writer boundaries. Console reads local 24-hour MCP tool starts
+and Agent turn evidence by workspace, without falsely claiming per-user-task
+attribution or model-side token data. See
+`docs/decisions/20261027-subagent-delegation-console.md`; source integration,
+deployment and measured GPT-tool savings are separate gates.
+
 **2026-10-27 cross-conversation WIP review:** Recorded source-level reconciliation
 is in `docs/platform/CONVERSATION_WIP_INTEGRATION_REVIEW_20261027.md`.
 LearningStore now has an explicitly requested, bounded read-only

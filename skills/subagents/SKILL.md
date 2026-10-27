@@ -7,6 +7,17 @@ description: Delegate focused coding, research, review, or verification work to 
 
 Subagents are optional. Use the normal workspace tools for routine work; delegate only when a separate worker materially helps through independent context, specialization, or follow-up.
 
+## GPT-led delegation protocol
+
+GPT retains requirement analysis, task boundaries, architecture decisions and **independent final acceptance**. Prefer a single bounded Subagent over a sequence of fine-grained GPT tool calls when an outcome is substantial and independently verifiable: repository-wide discovery, multi-module analysis/implementation, review, or synthesis of many test results. The goal is fewer GPT tool turns and verified task success, **not** higher model quota consumption or more Subagents.
+
+- Keep simple reads, small patches, health checks and fast source inspection in native Synrex tools. Batch up to eight independent file ranges with `read.files`; group safe read-only shell queries.
+- Before starting an agent, define a deliverable, exact workspace, allowed files/commands, constraints and expected verification. Read the current Git state and use an **isolated worktree** for any independent writer. Never hand two writers the same checkout. Production release remains the single guarded transaction owned by GPT.
+- For continuing work, use `agents continue <id>` and a previously built `--context-ref` when still current. Use `--workflow`, `--context-file` or `agents context build` when a task needs versioned source hints or workflow state; don't rebuild Context Packs after every model turn.
+- Parallel Subagents are appropriate for independent **read-only** scopes; serialize integration and final testing. Prefer at most a few meaningful work packages, not one Subagent per file, search or command.
+- Treat a completed agent turn as **agent execution evidence**, not user-objective success. Inspect its diff, citations and tests before integration. If the agent/daemon is unavailable, fall back to bounded native tools without spinning or blind retries.
+- Synrex cannot make an ordinary ChatGPT turn resume itself. Prefer one durable task receipt and backoff-guided `task_wait` over repeated polling; only inspect again when output or an independent dependency demands it.
+
 Use the Synrex CLI through the shell or process tool. Run commands from the project the subagent should work on.
 
 ## Choose a target
