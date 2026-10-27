@@ -78,3 +78,55 @@ test("explicit title binding requires authenticated, same-origin request and kno
   assert.equal(detail.conversationTitle,"评估全链路日志");
   assert.equal(detail.titleSource,"owner");
 });
+
+test("local desktop console accepts its exact loopback origin", async t => {
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-local-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const app=express(),ownerToken="owner-test-token";
+  const server=await new Promise<Server>(resolve=>{
+    const s=app.listen(0,"127.0.0.1",()=>resolve(s));
+  });
+  t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
+  const port=(server.address() as {port:number}).port;
+  registerSynrexConsole(app,{stateDir:dir,port,publicBaseUrl:"https://console.example.test",
+    oauth:{ownerToken}} as ServerConfig);
+  const response=await fetch(`http://127.0.0.1:${port}/console/api/login`,{
+    method:"POST",headers:{origin:`http://127.0.0.1:${port}`,"content-type":"application/json"},
+    body:JSON.stringify({password:ownerToken}),
+  });
+  assert.equal(response.status,200);
+  const cookie=response.headers.get("set-cookie")??"";
+  assert.match(cookie,/rev_console=/);
+  assert.doesNotMatch(cookie,/; Secure/i);
+});
+
+test("Windows bridge obtains the Control action token server-side", async t => {
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-bridge-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const calls:Array<{url:string;init?:RequestInit}>=[];
+  const fakeFetch:typeof fetch=async(input,init)=>{
+    const url=String(input);calls.push({url,init});
+    if(url.endsWith("/api/action-token"))return new Response(JSON.stringify({token:"test-action-value"}),{status:200});
+    if(url.endsWith("/api/status"))return new Response(JSON.stringify({platform:"win32"}),{status:200});
+    if(url.endsWith("/api/management/service"))return new Response(JSON.stringify({ok:true}),{status:200});
+    return new Response(JSON.stringify({error:"not found"}),{status:404});
+  };
+  const app=express(),ownerToken="owner-test-token";
+  registerSynrexConsole(app,{stateDir:dir,port:17677,publicBaseUrl:"https://console.example.test",
+    oauth:{ownerToken}} as ServerConfig,{windowsControlBaseUrl:"http://127.0.0.1:17678",fetchImpl:fakeFetch});
+  const server=await new Promise<Server>(resolve=>{
+    const s=app.listen(0,"127.0.0.1",()=>resolve(s));
+  });
+  t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
+  const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/console/api/windows`;
+  const cookie="rev_console="+createConsoleSession(ownerToken);
+  assert.equal((await fetch(base+"/status",{headers:{cookie}})).status,200);
+  assert.equal(calls.some(call=>call.url.endsWith("/api/action-token")),false);
+  const response=await fetch(base+"/service",{method:"POST",headers:{cookie,origin:"https://console.example.test",
+    "content-type":"application/json"},body:JSON.stringify({target:"tunnel",action:"restart"})});
+  assert.equal(response.status,200);
+  const action=calls.find(call=>call.url.endsWith("/api/management/service"));
+  const headers=action?.init?.headers as Record<string,string>;
+  assert.equal(headers.origin,"http://127.0.0.1:17678");
+  assert.equal(headers["x-devspace-console-token"],"test-action-value");
+});

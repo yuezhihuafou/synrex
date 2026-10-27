@@ -1,5 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, openSync, closeSync, readSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
@@ -14,6 +15,13 @@ const COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 60_000;
+const WINDOWS_CONTROL_TIMEOUT_MS = 4_000;
+const WINDOWS_CONTROL_MAX_RESPONSE_BYTES = 1024 * 1024;
+
+interface ConsoleServices {
+  windowsControlBaseUrl?: string | null;
+  fetchImpl?: typeof fetch;
+}
 
 function equal(a: string, b: string): boolean {
   const first = Buffer.from(a);
@@ -43,6 +51,98 @@ function readCookie(request: Request): string | undefined {
   const cookie = header.split(";").map((part) => part.trim())
     .find((part) => part.startsWith(`${COOKIE_NAME}=`));
   return cookie?.slice(COOKIE_NAME.length + 1);
+}
+
+function loopbackAddress(value: string | undefined): boolean {
+  return value === "127.0.0.1" || value === "::1" || value === "::ffff:127.0.0.1";
+}
+
+function localConsoleOrigins(config: ServerConfig): Set<string> {
+  return new Set([
+    `http://127.0.0.1:${config.port}`,
+    `http://localhost:${config.port}`,
+    `http://[::1]:${config.port}`,
+  ]);
+}
+
+function consoleOriginAllowed(req: Request, config: ServerConfig): boolean {
+  const origin = req.header("origin") ?? "";
+  const publicOrigin = new URL(config.publicBaseUrl).origin;
+  if (origin === publicOrigin) return true;
+  return loopbackAddress(req.socket.remoteAddress) && localConsoleOrigins(config).has(origin);
+}
+
+function consoleCookieOptions(config: ServerConfig, req: Request) {
+  const origin = req.header("origin") ?? new URL(config.publicBaseUrl).origin;
+  return {
+    httpOnly: true,
+    sameSite: "strict" as const,
+    secure: origin.startsWith("https:"),
+    path: "/console",
+    maxAge: SESSION_SECONDS * 1000,
+  };
+}
+
+function windowsControlBase(config: ServerConfig, services: ConsoleServices): string | null {
+  if (services.windowsControlBaseUrl !== undefined) return services.windowsControlBaseUrl;
+  const configured=process.env.SYNREX_WINDOWS_CONTROL_URL?.trim();
+  if(configured){
+    try{
+      const url=new URL(configured);
+      if(url.protocol==="http:"&&["127.0.0.1","localhost","[::1]"].includes(url.hostname)
+        && !url.username&&!url.password&&!url.search&&!url.hash&&["","/"].includes(url.pathname)){
+        return url.origin;
+      }
+    }catch{/* fall through to the platform default */}
+  }
+  if (process.platform !== "win32" || config.port >= 65_535) return null;
+  return `http://127.0.0.1:${config.port + 1}`;
+}
+
+async function readBoundedJson(response: globalThis.Response): Promise<unknown> {
+  const text = await response.text();
+  if (Buffer.byteLength(text) > WINDOWS_CONTROL_MAX_RESPONSE_BYTES) {
+    throw new Error("Windows Control response exceeded the Console limit");
+  }
+  return text ? JSON.parse(text) : {};
+}
+
+async function windowsControlRequest(
+  config: ServerConfig,
+  services: ConsoleServices,
+  pathname: string,
+  options: { method?: "GET" | "POST"; body?: unknown; protected?: boolean } = {},
+): Promise<{ status: number; body: unknown }> {
+  const base = windowsControlBase(config, services);
+  if (!base) return { status: 404, body: { error: "Windows Control is unavailable on this host" } };
+  const fetchImpl = services.fetchImpl ?? fetch;
+  const headers: Record<string, string> = {};
+  if (options.protected) {
+    const tokenResponse = await fetchImpl(`${base}/api/action-token`, {
+      signal: AbortSignal.timeout(WINDOWS_CONTROL_TIMEOUT_MS),
+    });
+    const tokenPayload = await readBoundedJson(tokenResponse) as { token?: unknown };
+    if (!tokenResponse.ok || typeof tokenPayload.token !== "string" || tokenPayload.token.length > 128) {
+      return { status: 503, body: { error: "Windows Control action token unavailable" } };
+    }
+    headers.origin = base;
+    headers["x-devspace-console-token"] = tokenPayload.token;
+  }
+  let body: string | undefined;
+  if (options.method === "POST") {
+    headers["content-type"] = "application/json";
+    body = JSON.stringify(options.body ?? {});
+    if (Buffer.byteLength(body) > 32 * 1024) return { status: 413, body: { error: "Request too large" } };
+  }
+  try {
+    const response = await fetchImpl(`${base}${pathname}`, {
+      method: options.method ?? "GET", headers, body,
+      signal: AbortSignal.timeout(WINDOWS_CONTROL_TIMEOUT_MS),
+    });
+    return { status: response.status, body: await readBoundedJson(response) };
+  } catch {
+    return { status: 503, body: { error: "Windows Control is temporarily unavailable" } };
+  }
 }
 
 function consoleManifest(): { file: string; css?: string[] } {
@@ -84,14 +184,8 @@ function actualRelease(): string {
  * editable data routes. This console intentionally has no access to model host
  * cookies or the OAuth bearer token.
  */
-export function registerSynrexConsole(app: Express, config: ServerConfig): void {
+export function registerSynrexConsole(app: Express, config: ServerConfig, services: ConsoleServices = {}): void {
   const attempts = new Map<string, { count: number; until: number }>();
-  const expectedOrigin = new URL(config.publicBaseUrl).origin;
-  const https = expectedOrigin.startsWith("https:");
-  const sessionCookieOptions = {
-    httpOnly: true, sameSite: "strict" as const, secure: https,
-    path: "/console", maxAge: SESSION_SECONDS * 1000,
-  };
   const auth = (req: Request, res: Response, next: () => void): void => {
     if (!verifyConsoleSession(readCookie(req), config.oauth.ownerToken)) {
       res.setHeader("Cache-Control", "no-store");
@@ -101,7 +195,7 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     next();
   };
   const sameOrigin = (req: Request): boolean =>
-    req.header("origin") === expectedOrigin && req.is("application/json") === "application/json";
+    consoleOriginAllowed(req, config) && req.is("application/json") === "application/json";
   const noStore = (_req: Request, res: Response, next: () => void) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -115,6 +209,11 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'",
     ].join("; "));
     res.type("html").send(serveConsoleHtml(config));
+  });
+  app.get("/console/browser-extension.zip", auth, (_req, res) => {
+    const archive = fileURLToPath(new URL("../browser-extension/synrex-browser-trace.zip", import.meta.url));
+    if (!existsSync(archive)) { res.status(404).json({ error: "Extension archive not included in this release" }); return; }
+    res.download(archive, "synrex-browser-trace.zip");
   });
   app.post("/console/api/login", express.json({ limit: "2kb" }), (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
@@ -135,11 +234,34 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       return;
     }
     attempts.delete(remote);
-    res.cookie(COOKIE_NAME, createConsoleSession(config.oauth.ownerToken), sessionCookieOptions);
+    res.cookie(COOKIE_NAME, createConsoleSession(config.oauth.ownerToken), consoleCookieOptions(config, req));
     res.status(200).json({ authenticated: true });
   });
   app.get("/console/api/session", auth, (_req, res) => {
     res.json({ authenticated: true });
+  });
+  app.get("/console/api/clock", auth, (_req, res) => {
+    res.json({ serverTimeMs: Date.now() });
+  });
+  app.get("/console/api/run-log/:runId", auth, (req, res) => {
+    const runId=typeof req.params.runId==="string"?req.params.runId:"";
+    if (!/^run_\d{14}_[a-zA-Z0-9]{4,32}$/.test(runId)) {
+      res.status(400).json({error:"Invalid run ID"});return;
+    }
+    const day=runId.slice(4,8)+"-"+runId.slice(8,10)+"-"+runId.slice(10,12);
+    const root=process.env.DEVSPACE_COMPACT_RUN_ROOT??path.join(homedir(),".local","share","devspace","runs");
+    const file=path.join(root,day,runId,"output.log");
+    try {
+      const size=statSync(file).size;
+      const raw=Number(req.query.offset??0);
+      if (!Number.isSafeInteger(raw) || raw<0 || raw>size) {res.status(400).json({error:"Invalid offset"});return;}
+      const limit=16*1024;
+      const length=Math.min(limit,size-raw);
+      const buf=Buffer.alloc(length);
+      const fd=openSync(file,"r");
+      try {readSync(fd,buf,0,length,raw);}finally{closeSync(fd);}
+      res.json({runId,offset:raw,nextOffset:raw+length,size,text:buf.toString("utf8")});
+    }catch{res.status(404).json({error:"Run log unavailable"});}
   });
   app.get("/console/api/browser-extension", auth, (_req, res) => {
     const archive = fileURLToPath(new URL("../deploy/observability/browser-extension.zip",import.meta.url));
@@ -148,7 +270,7 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
-    res.clearCookie(COOKIE_NAME, sessionCookieOptions);
+    res.clearCookie(COOKIE_NAME, consoleCookieOptions(config, req));
     res.json({ authenticated: false });
   });
   app.get("/console/api/snapshot", auth, (_req, res) => {
@@ -178,6 +300,33 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       res.type("json").send(readFileSync(file,"utf8"));
     }catch{res.status(503).json({error:"Offline usage report unavailable"});}
   });
+  app.get("/console/api/windows/status", auth, async (_req,res)=>{
+    const result=await windowsControlRequest(config,services,"/api/status");
+    res.status(result.status).json(result.body);
+  });
+  app.get("/console/api/windows/config", auth, async (_req,res)=>{
+    const result=await windowsControlRequest(config,services,"/api/management/config");
+    res.status(result.status).json(result.body);
+  });
+  app.get("/console/api/windows/log", auth, async (req,res)=>{
+    const service=req.query.service;
+    if(service!=="devspace"&&service!=="tunnel"){
+      res.status(400).json({error:"Invalid Windows service"});return;
+    }
+    const result=await windowsControlRequest(config,services,`/api/management/log?service=${service}`);
+    res.status(result.status).json(result.body);
+  });
+  const windowsAction = (pathname:string) => async (req:Request,res:Response) => {
+    if(!sameOrigin(req)){res.status(403).json({error:"Origin rejected"});return;}
+    const result=await windowsControlRequest(config,services,pathname,{method:"POST",body:req.body,protected:true});
+    res.status(result.status).json(result.body);
+  };
+  app.post("/console/api/windows/service",auth,express.json({limit:"16kb"}),windowsAction("/api/management/service"));
+  app.post("/console/api/windows/config",auth,express.json({limit:"32kb"}),windowsAction("/api/management/config/save"));
+  app.post("/console/api/windows/tunnel-token",auth,express.json({limit:"4kb"}),windowsAction("/api/management/tunnel-token"));
+  app.post("/console/api/windows/autostart",auth,express.json({limit:"2kb"}),windowsAction("/api/management/autostart"));
+  app.post("/console/api/windows/doctor",auth,express.json({limit:"2kb"}),windowsAction("/api/management/doctor"));
+  app.post("/console/api/windows/validate",auth,express.json({limit:"2kb"}),windowsAction("/api/management/validate"));
   app.get("/console/api/history", auth, async (req, res) => {
     try {
       const start=typeof req.query.start==="string"?req.query.start:undefined;
