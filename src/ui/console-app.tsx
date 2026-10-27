@@ -99,6 +99,7 @@ const statusText: Record<string,string> = {
   online:"在线", offline:"离线", suspect:"连接异常", draining:"停止调度", active:"进行中",
   blocked:"阻塞", completed:"已完成", cancelled:"已取消",
   rev_http_completed:"Synrex 已返回", connection_closed_early:"连接提前断开",
+  tool_completed_connection_closed:"工具已结束 / 连接提前断开",
   tool_finished_http_not_observed:"工具完成 / HTTP 未确认",
   rev_handler_error:"执行错误", rev_incomplete_or_log_window_truncated:"状态未确认",
 };
@@ -109,7 +110,7 @@ function time(value?: string) {
 }
 function Badge({ value }: { value:string }) {
   const tone = ["online","completed","rev_http_completed"].includes(value) ? "ok"
-    : ["offline","blocked","connection_closed_early","rev_handler_error"].includes(value) ? "bad" : "pending";
+    : ["offline","blocked","connection_closed_early","tool_completed_connection_closed","rev_handler_error"].includes(value) ? "bad" : "pending";
   return <span className={`badge badge-${tone}`}><i />{statusText[value] ?? value}</span>;
 }
 function Panel({ title, hint, extra, children }: { title:string; hint?:string; extra?:ReactNode; children:ReactNode }) {

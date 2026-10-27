@@ -334,7 +334,9 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
       classification: observed.get(request.requestId)?.has("mcp_finished")
         ? "rev_http_completed"
         : observed.get(request.requestId)?.has("mcp_closed_early")
-          ? "connection_closed_early"
+          ? observed.get(request.requestId)?.has("tool_execution_finished")
+            ? "tool_completed_connection_closed"
+            : "connection_closed_early"
           : observed.get(request.requestId)?.has("mcp_failed")
             ? "rev_handler_error"
             : observed.get(request.requestId)?.has("tool_execution_finished")
