@@ -47,6 +47,7 @@ import {
   compileMcpRegistrationSurface,
   createModernMcpServerAdapter,
   modernMcpAdapterErrorLogFields,
+  normalizeMcpToolCallArgumentAliases,
   type McpRegistrationTarget,
 } from "./mcp-modern-server.js";
 import { DurableTaskManager } from "./durable-tasks.js";
@@ -1403,7 +1404,8 @@ export function createServer(
         requestId,
         method: req.method,
       });
-      await traceStage("mcp_dispatch", () => mcpNodeHandler(req, res, req.body));
+      const mcpBody = normalizeMcpToolCallArgumentAliases(req.body);
+      await traceStage("mcp_dispatch", () => mcpNodeHandler(req, res, mcpBody));
       diagnostics.record("mcp_handler_returned", { requestId, method: req.method });
     } catch (error) {
       diagnostics.record("mcp_failed", { requestId, traceId: requestId, errorCategory: errorCategory(error) });
@@ -1425,7 +1427,7 @@ export function createServer(
   // The SDK parser runs before /mcp. Record parser/size failures without
   // Express' default error page/log echoing pieces of the request body.
   app.use((error: unknown, req: Request, res: Response, next: express.NextFunction) => {
-    if (requestPath(req) !== "/mcp") return next(error);
+    if (requestPath(req) !== mcpRoute) return next(error);
     const status = (error as { status?: number })?.status === 413 ? 413 : 400;
     traceEvent("mcp_failed", { errorCategory: "protocol", status });
     if (!res.headersSent) sendJsonRpcError(res, status, -32700, "Invalid MCP request");

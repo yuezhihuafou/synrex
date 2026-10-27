@@ -149,7 +149,8 @@ const workspaceId = recordValue(opened.structuredContent).workspaceId;
 if (typeof workspaceId !== "string") throw new Error("open_workspace did not return workspaceId");
 
 const command = await callTool("exec_command", {
-  workspaceId,
+  workspace_id: workspaceId,
+  working_directory: ".",
   cmd: `${JSON.stringify(process.execPath)} -e ${JSON.stringify("process.stdout.write('candidate-command-ok\\n')")}`,
 });
 const commandResult = recordValue(command.structuredContent);
@@ -175,8 +176,8 @@ if (typeof sessionId !== "number" || ptyResult.running !== true) {
 for (let attempt = 0; attempt < 30 && ptyResult.running === true; attempt += 1) {
   await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 50 : 100));
   const polled = await callTool("write_stdin", {
-    workspaceId,
-    sessionId,
+    workspace_id: workspaceId,
+    session_id: sessionId,
     chars: "",
     ...(attempt === 0 ? { columns: 120, rows: 30 } : {}),
   });
@@ -205,7 +206,7 @@ if (typeof taskId !== "string") {
   throw new Error(`candidate durable command did not detach to a task: ${JSON.stringify(durableResult)}`);
 }
 for (let attempt = 0; attempt < 40; attempt += 1) {
-  const task = await callTool("task_get", { workspaceId, taskId });
+  const task = await callTool("task_get", { workspace_id: workspaceId, task_id: taskId });
   durableResult = recordValue(task.structuredContent);
   if (!["working", "input_required"].includes(String(durableResult.status ?? ""))) break;
   await new Promise((resolve) => setTimeout(resolve, 100));
@@ -226,7 +227,7 @@ if (!durableOutput.includes("candidate-durable-ok")) {
 const worktreeOpened = await callTool("open_workspace", {
   path: workspacePath,
   mode: "worktree",
-  baseRef: "HEAD",
+  base_ref: "HEAD",
 }, "windows-http-smoke-worktree");
 const worktreeResult = recordValue(worktreeOpened.structuredContent);
 const worktreeWorkspaceId = worktreeResult.workspaceId;

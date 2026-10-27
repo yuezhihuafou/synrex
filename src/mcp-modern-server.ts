@@ -101,6 +101,47 @@ export function modernMcpAdapterErrorLogFields(error: Error): Record<string, unk
   };
 }
 
+/**
+ * Some MCP hosts expose camelCase JSON Schema properties as snake_case tool
+ * arguments. Keep the public schema canonical, but accept that host-normalized
+ * wire form before the modern MCP server validates the registered tool schema.
+ * Only top-level tool arguments are rewritten; nested user payloads remain
+ * semantic data and are never recursively renamed.
+ */
+export function normalizeMcpToolCallArgumentAliases(body: unknown): unknown {
+  if (Array.isArray(body)) {
+    let changed = false;
+    const normalized = body.map((entry) => {
+      const next = normalizeMcpToolCallArgumentAliases(entry);
+      if (next !== entry) changed = true;
+      return next;
+    });
+    return changed ? normalized : body;
+  }
+  if (!isRecord(body) || body.method !== "tools/call") return body;
+  const params = isRecord(body.params) ? body.params : undefined;
+  const args = params && isRecord(params.arguments) ? params.arguments : undefined;
+  if (!params || !args) return body;
+
+  let normalizedArgs: Record<string, unknown> | undefined;
+  for (const [key, value] of Object.entries(args)) {
+    if (key.startsWith("_") || !key.includes("_")) continue;
+    const camelKey = key.replace(/_([a-zA-Z0-9])/g, (_match, char: string) => char.toUpperCase());
+    if (camelKey === key) continue;
+    normalizedArgs ??= { ...args };
+    if (!(camelKey in normalizedArgs)) normalizedArgs[camelKey] = value;
+    delete normalizedArgs[key];
+  }
+  if (!normalizedArgs) return body;
+  return {
+    ...body,
+    params: {
+      ...params,
+      arguments: normalizedArgs,
+    },
+  };
+}
+
 function legacyToolHandlerExtra(context: ServerContext): Record<string, unknown> {
   return {
     signal: context.mcpReq.signal,
@@ -112,4 +153,8 @@ function legacyToolHandlerExtra(context: ServerContext): Record<string, unknown>
     sendNotification: context.mcpReq.notify,
     sendRequest: context.mcpReq.send,
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

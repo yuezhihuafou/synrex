@@ -7,6 +7,7 @@ import {
   compileMcpRegistrationSurface,
   createModernMcpServerAdapter,
   modernMcpAdapterErrorLogFields,
+  normalizeMcpToolCallArgumentAliases,
 } from "./mcp-modern-server.js";
 
 test("strict modern handler answers the 2026-07-28 discovery probe", async (t) => {
@@ -213,6 +214,62 @@ test("modern adapter error logging preserves error and cause identity", () => {
       message: "inner failure",
     },
   });
+});
+
+test("host-normalized snake_case tool arguments are restored before validation", () => {
+  const nested = { keep_snake_case: true };
+  const body = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: {
+      name: "exec_command",
+      arguments: {
+        workspace_id: "ws_host",
+        operation_id: "op_host_12345678",
+        working_directory: "subdir",
+        input_responses: nested,
+      },
+    },
+  };
+
+  const normalized = normalizeMcpToolCallArgumentAliases(body) as {
+    params: { arguments: Record<string, unknown> };
+  };
+  assert.deepEqual(normalized.params.arguments, {
+    workspaceId: "ws_host",
+    operationId: "op_host_12345678",
+    workingDirectory: "subdir",
+    inputResponses: nested,
+  });
+  assert.strictEqual(normalized.params.arguments.inputResponses, nested);
+  assert.deepEqual(body.params.arguments, {
+    workspace_id: "ws_host",
+    operation_id: "op_host_12345678",
+    working_directory: "subdir",
+    input_responses: nested,
+  });
+});
+
+test("canonical camelCase wins over a duplicate host alias and batch requests are supported", () => {
+  const canonical = {
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: {
+      name: "write_stdin",
+      arguments: {
+        workspaceId: "canonical",
+        workspace_id: "alias",
+        session_id: 42,
+      },
+    },
+  };
+  const untouched = { jsonrpc: "2.0", id: 3, method: "tools/list", params: {} };
+  const normalized = normalizeMcpToolCallArgumentAliases([canonical, untouched]) as Array<Record<string, unknown>>;
+  const params = normalized[0]?.params as { arguments: Record<string, unknown> };
+  assert.deepEqual(params.arguments, { workspaceId: "canonical", sessionId: 42 });
+  assert.strictEqual(normalized[1], untouched);
 });
 
 function modernRequest(method: string, params: Record<string, unknown>): Request {
