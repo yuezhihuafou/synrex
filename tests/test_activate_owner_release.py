@@ -93,6 +93,30 @@ class ActivationTests(unittest.TestCase):
             self.assertIn("already running", result.stderr)
         self.assertFalse(self.calls.exists())
 
+    def test_inherited_release_lock_reuses_the_promotion_transaction(self):
+        directory = self.home / ".local/state/synrex"
+        directory.mkdir(parents=True)
+        with (directory / "owner-release.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # The promotion worker and activation child share one open file
+            # description: no unlock/relock gap between build and cutover.
+            result = subprocess.run(
+                ["bash", str(SCRIPT), str(self.release), str(self.backup)],
+                env={**self.env, "SYNREX_INHERITED_RELEASE_LOCK_FD": str(lock.fileno())},
+                pass_fds=(lock.fileno(),), capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("OWNER_RELEASE_ACTIVATED", result.stdout)
+            competing = self.activate()
+            self.assertEqual(competing.returncode, 75)
+            self.assertIn("already running", competing.stderr)
+
+    def test_spoofed_inherited_fd_is_rejected_before_any_changes(self):
+        result = self.activate(SYNREX_INHERITED_RELEASE_LOCK_FD="8")
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("invalid or unowned inherited transaction lock", result.stderr)
+        self.assertFalse(self.calls.exists())
+
     def test_configured_but_missing_ingress_control_blocks_before_restart(self):
         result = self.activate(SYNREX_INGRESS_CONTROL_SOCKET=str(self.root / "not-running.sock"))
         self.assertEqual(result.returncode, 75)

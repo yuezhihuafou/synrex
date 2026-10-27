@@ -2,8 +2,9 @@
 # Single entrypoint for repeatable, fail-closed Synrex production promotion.
 # Develop in any worktree; integrate selected tested commits to main first.
 # Run from a clean checkout of that published main (which may be detached).
-# The build and QA are isolated from the running Core. Only --deploy switches
-# the active Core, using a separate systemd unit and the stable ingress lock.
+# The entire --deploy transaction runs in an independent user systemd unit.
+# One owner-release flock covers build, QA, backup, activation and rollback;
+# the Core being replaced is never the parent of its own release transaction.
 set -euo pipefail
 mode=${1:---check}
 source_repo=${2:-$(pwd)}
@@ -13,6 +14,29 @@ if test "$mode" != --check && test "$mode" != --deploy; then
 fi
 source_repo=$(realpath "$source_repo")
 cd "$source_repo"
+if test "$mode" = --deploy && test "${SYNREX_PROMOTION_WORKER:-}" != 1; then
+  # Dispatch BEFORE taking the transaction lock. The systemd worker owns it
+  # until activation (or rollback) completes, even if the MCP caller drops.
+  test -f "$source_repo/deploy/promote-main.sh"
+  unit="synrex-promotion-$(date -u +%Y%m%d%H%M%S)-${BASHPID}"
+  systemd-run --user --collect --unit="$unit" \
+    --description="Synrex single-owner release transaction" \
+    --property=Type=exec --setenv="SYNREX_PROMOTION_WORKER=1" \
+    --setenv="PATH=$PATH" \
+    /bin/bash "$source_repo/deploy/promote-main.sh" --deploy "$source_repo"
+  echo "PROMOTION_DISPATCHED unit=$unit source=$source_repo; check journalctl --user -u $unit and the release receipt"
+  exit 0
+fi
+# The same lock protects standalone activation, rollback and ingress migration.
+# --check also holds it while producing a candidate, so no two conversations
+# can build/publish or activate a release concurrently.
+lockdir="$HOME/.local/state/synrex"
+mkdir -p "$lockdir"
+exec 8>"$lockdir/owner-release.lock"
+if ! flock -n 8; then
+  echo 'PROMOTION_BLOCKED another owner release transaction is already running' >&2
+  exit 75
+fi
 base=/home/swy/services/devspace
 release_root="$base/releases"
 backup_root="$base/backups"
@@ -63,10 +87,11 @@ dispatch() {
     --state-dir /home/swy/.local/share/devspace-cutover-20261018 \
     --config-dir /home/swy/.devspace-cutover-20261018 \
     --destination "$backup" --keep 30 >"$backup/backup-receipt.txt"
-  local unit="synrex-promote-${source_sha:0:12}-$suffix"
-  systemd-run --user --collect --unit="$unit" --description="Synrex guarded main release" \
-    --property=Type=exec /bin/bash "$target/deploy/activate-owner-release.sh" "$target" "$backup"
-  echo "PROMOTION_DISPATCHED unit=$unit receipt=$backup/release-receipt.json"
+  # The worker inherits FD 8, so the rollback-safe activation retains the
+  # SAME lock rather than opening a second descriptor and deadlocking itself.
+  SYNREX_INHERITED_RELEASE_LOCK_FD=8 /bin/bash \
+    "$target/deploy/activate-owner-release.sh" "$target" "$backup"
+  echo "PROMOTION_RECEIPT=$backup/release-receipt.json"
 }
 mkdir -p "$backup"
 chmod 700 "$backup"

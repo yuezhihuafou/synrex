@@ -12,10 +12,25 @@ dropin="$dropdir/90-owner-pinned-release.conf"
 # mutable Git checkout. A second ChatGPT conversation must not race a switch.
 lockdir="$HOME/.local/state/synrex"
 mkdir -p "$lockdir"
-exec 9>"$lockdir/owner-release.lock"
-if ! flock -n 9; then
-  echo 'OWNER_RELEASE_BLOCKED another activation is already running' >&2
-  exit 75
+if test -n "${SYNREX_INHERITED_RELEASE_LOCK_FD:-}"; then
+  # A systemd promotion worker already owns the lock for the entire build.
+  # Verify the inherited FD actually names the canonical lock inode, then
+  # acquire it again (flock on the same open description is re-entrant).
+  inherited_fd="$SYNREX_INHERITED_RELEASE_LOCK_FD"
+  if ! [[ "$inherited_fd" =~ ^[3-9][0-9]*$ ]] ||
+      ! test -e "/proc/self/fd/$inherited_fd" ||
+      test "$(stat -Lc '%d:%i' "/proc/self/fd/$inherited_fd" 2>/dev/null)" != \
+        "$(stat -Lc '%d:%i' "$lockdir/owner-release.lock" 2>/dev/null)" ||
+      ! flock -n "$inherited_fd"; then
+    echo 'OWNER_RELEASE_BLOCKED invalid or unowned inherited transaction lock' >&2
+    exit 75
+  fi
+else
+  exec 9>"$lockdir/owner-release.lock"
+  if ! flock -n 9; then
+    echo 'OWNER_RELEASE_BLOCKED another activation is already running' >&2
+    exit 75
+  fi
 fi
 
 # Fail before changing any systemd configuration when durable tasks are still
