@@ -17,15 +17,18 @@ function isAllowedNavigation(raw) {
   }
 }
 
-function iconPath() {
-  for (const name of ["Synrex.ico", "DevSpaceForge.ico"]) {
-    const candidate = path.join(__dirname, name);
-    if (fs.existsSync(candidate)) return candidate;
+async function appIcon() {
+  const packaged = path.join(__dirname, "Synrex.ico");
+  if (fs.existsSync(packaged)) return packaged;
+  try {
+    const executableIcon = await app.getFileIcon(process.execPath, { size: "normal" });
+    return executableIcon.isEmpty() ? undefined : executableIcon;
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
-async function createWindow() {
+async function createWindow(icon) {
   win = new BrowserWindow({
     width: 1380,
     height: 900,
@@ -33,7 +36,7 @@ async function createWindow() {
     minHeight: 680,
     show: false,
     title: "Synrex Console",
-    icon: iconPath(),
+    ...(icon ? { icon } : {}),
     autoHideMenuBar: true,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
@@ -48,8 +51,7 @@ async function createWindow() {
   win.show();
 }
 
-function createTray() {
-  const icon = iconPath();
+function createTray(icon) {
   if (!icon) return;
   tray = new Tray(icon);
   tray.setToolTip("Synrex Console");
@@ -66,8 +68,9 @@ else {
   app.setName("Synrex Console");
   app.on("second-instance", () => { win?.show(); win?.focus(); });
   app.whenReady().then(async () => {
-    await createWindow();
-    createTray();
+    const icon = await appIcon();
+    await createWindow(icon);
+    createTray(icon);
   });
   app.on("window-all-closed", () => {});
   app.on("before-quit", () => { app.isQuiting = true; });
