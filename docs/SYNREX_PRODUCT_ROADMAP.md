@@ -1,5 +1,13 @@
 # Synrex: product boundary and delivery roadmap
 
+**2026-10-27 Git/worktree reconciliation:** The inspected, immutable swy1
+production source remains `126a63c` until an explicitly verified release
+switch. The regression and retention record is
+`docs/platform/WORKTREE_REGRESSION_RECONCILIATION_20261027.md`. A new
+source candidate adds safe worktree preview/pruning and a local concurrency
+regression benchmark without changing existing recovery-aware pruning.
+This statement is not a claim of production deployment of those additions.
+
 **2026-10-27 cross-worktree integration:** Worktree inventory and selected
 feature/repair candidates are recorded in
 `docs/platform/WORKTREE_INTEGRATION_AUDIT_20261027.md`. The integration

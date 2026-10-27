@@ -33,6 +33,8 @@ test("worktrees prune removes only managed worktrees unused for three days", asy
   await git(sourceRoot, ["worktree", "add", "--detach", recentWorktree, "HEAD"]);
 
   const baseSha = await git(sourceRoot, ["rev-parse", "HEAD"]);
+  // The safe policy proves commit ancestry against the canonical tracking ref.
+  await git(sourceRoot, ["update-ref", "refs/remotes/origin/main", baseSha]);
   const store = new SqliteWorkspaceStore(stateDir);
   store.createSession({
     id: "ws_old",
@@ -69,9 +71,18 @@ test("worktrees prune removes only managed worktrees unused for three days", asy
     await rm(root, { recursive: true, force: true });
   });
 
+  const preview = await execFileAsync(
+    process.execPath,
+    ["--import", "tsx", cliPath, "worktrees", "prune", "--dry-run"],
+    { env: { ...process.env, ...env }, encoding: "utf8" },
+  );
+  assert.match(preview.stdout, /Would prune 1 safe, stale managed worktree\./);
+  assert.match(preview.stdout, /Eligible: ws_old/);
+  assert.equal(await pathExists(oldWorktree), true, "Dry-run must not mutate Git or workspace state");
+
   const { stdout } = await execFileAsync(
     process.execPath,
-    ["--import", "tsx", cliPath, "worktrees", "prune"],
+    ["--import", "tsx", cliPath, "worktrees", "prune", "--safe"],
     { env: { ...process.env, ...env }, encoding: "utf8" },
   );
 

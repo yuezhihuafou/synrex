@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { platform } from "node:os";
 import { tmpdir } from "node:os";
@@ -49,6 +50,108 @@ test("stale clean worktrees at their base are removed without recovery refs", as
     allowedRoots: [fixture.root],
   }));
   assert.equal(await git(fixture.worktreePath, ["rev-parse", "HEAD"]), session.baseSha);
+});
+
+test("safe worktree cleanup has a read-only preview and removes only merged clean state", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_safe_preview");
+  const base = await git(fixture.sourceRoot, ["rev-parse", "HEAD"]);
+  await git(fixture.sourceRoot, ["update-ref", "refs/remotes/origin/main", base]);
+
+  const options = {
+    store: fixture.store,
+    worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root],
+    staleBefore: futureCutoff(),
+    safeOnly: true,
+  };
+  const preview = unwrap(await cleanupManagedWorktrees({ ...options, dryRun: true }));
+  assert.deepEqual(preview.wouldRemove, ["ws_safe_preview"]);
+  assert.equal(preview.removed.length, 0);
+  assert.equal(await pathExists(fixture.worktreePath), true);
+  assert.equal(fixture.store.getSession("ws_safe_preview")?.status, "active");
+
+  const actual = unwrap(await cleanupManagedWorktrees(options));
+  assert.equal(actual.removed.length, 1);
+  assert.equal(await pathExists(fixture.worktreePath), false);
+});
+
+test("safe pruning refuses changed files even though recoverable legacy prune could stash them", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_safe_dirty");
+  const base = await git(fixture.sourceRoot, ["rev-parse", "HEAD"]);
+  await git(fixture.sourceRoot, ["update-ref", "refs/remotes/origin/main", base]);
+  await writeFile(join(fixture.worktreePath, "README.md"), "unsaved feature work\n");
+  const result = unwrap(await cleanupManagedWorktrees({
+    store: fixture.store, worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root], staleBefore: futureCutoff(), safeOnly: true,
+  }));
+  assert.deepEqual(result.skipped, [{ workspaceId: "ws_safe_dirty", reason: "tracked_changes" }]);
+  assert.equal(await pathExists(fixture.worktreePath), true);
+  assert.equal(fixture.store.getSession("ws_safe_dirty")?.status, "active");
+});
+
+test("safe pruning refuses unique commits even when the worktree is clean", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_safe_unmerged");
+  const base = await git(fixture.sourceRoot, ["rev-parse", "HEAD"]);
+  await git(fixture.sourceRoot, ["update-ref", "refs/remotes/origin/main", base]);
+  await writeFile(join(fixture.worktreePath, "feature.txt"), "not on main\n");
+  await git(fixture.worktreePath, ["add", "feature.txt"]);
+  await git(fixture.worktreePath, ["commit", "-m", "Unique user feature"]);
+  const result = unwrap(await cleanupManagedWorktrees({
+    store: fixture.store, worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root], staleBefore: futureCutoff(), safeOnly: true,
+  }));
+  assert.deepEqual(result.skipped, [{ workspaceId: "ws_safe_unmerged", reason: "unmerged_commits" }]);
+  assert.equal(await pathExists(join(fixture.worktreePath, "feature.txt")), true);
+});
+
+test("safe pruning does not erase unexpected ignored state", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_safe_ignored", { gitignore: ".devspace/\n" });
+  const base = await git(fixture.sourceRoot, ["rev-parse", "HEAD"]);
+  await git(fixture.sourceRoot, ["update-ref", "refs/remotes/origin/main", base]);
+  await mkdir(join(fixture.worktreePath, ".devspace"));
+  await writeFile(join(fixture.worktreePath, ".devspace", "session.json"), "{}\n");
+  const result = unwrap(await cleanupManagedWorktrees({
+    store: fixture.store, worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root], staleBefore: futureCutoff(), safeOnly: true,
+  }));
+  assert.deepEqual(result.skipped, [{ workspaceId: "ws_safe_ignored", reason: "ignored_state" }]);
+  assert.equal(await pathExists(join(fixture.worktreePath, ".devspace", "session.json")), true);
+});
+
+test("safe pruning preserves a worktree while an independent process uses its cwd", {
+  skip: platform() !== "linux",
+}, async (t) => {
+  const fixture = await worktreeFixture(t, "ws_safe_busy");
+  const base = await git(fixture.sourceRoot, ["rev-parse", "HEAD"]);
+  await git(fixture.sourceRoot, ["update-ref", "refs/remotes/origin/main", base]);
+  const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], {
+    cwd: fixture.worktreePath, stdio: "ignore",
+  });
+  await once(child, "spawn");
+  try {
+    const result = unwrap(await cleanupManagedWorktrees({
+      store: fixture.store, worktreeRoot: fixture.worktreeRoot,
+      allowedRoots: [fixture.root], staleBefore: futureCutoff(), safeOnly: true,
+    }));
+    assert.deepEqual(result.skipped, [{ workspaceId: "ws_safe_busy", reason: "active_process" }]);
+    assert.equal(await pathExists(fixture.worktreePath), true);
+  } finally {
+    const stopped = once(child, "exit");
+    child.kill();
+    await stopped;
+  }
+});
+
+test("safe dry-run does not delete stale sessions whose worktree directory is already missing", async (t) => {
+  const fixture = await worktreeFixture(t, "ws_safe_missing");
+  await git(fixture.sourceRoot, ["worktree", "remove", fixture.worktreePath]);
+  const preview = unwrap(await cleanupManagedWorktrees({
+    store: fixture.store, worktreeRoot: fixture.worktreeRoot,
+    allowedRoots: [fixture.root], staleBefore: futureCutoff(), dryRun: true,
+  }));
+  assert.deepEqual(preview.missing, []);
+  assert.deepEqual(preview.skipped, [{ workspaceId: "ws_safe_missing", reason: "missing_path" }]);
+  assert.ok(fixture.store.getSession("ws_safe_missing"), "Dry-run must not mutate the session database");
 });
 
 test("detached commits remain reachable through a recovery ref", async (t) => {

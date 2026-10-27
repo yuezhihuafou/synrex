@@ -610,11 +610,16 @@ function runConfigCommand(args: string[]): void {
 
 async function runWorktreesCommand(args: string[]): Promise<void> {
   const [subcommand, ...extra] = args;
-  if (subcommand !== "prune" || extra.length > 0) {
-    throw new Error("Usage: synrex worktrees prune");
+  if (subcommand !== "prune" || extra.some((arg) => !["--safe", "--dry-run"].includes(arg))
+    || new Set(extra).size !== extra.length) {
+    throw new Error("Usage: synrex worktrees prune [--safe] [--dry-run]");
   }
 
-  const cleanup = await pruneStaleManagedWorktrees(loadConfig());
+  const dryRun = extra.includes("--dry-run");
+  const cleanup = await pruneStaleManagedWorktrees(loadConfig(), new Date(), {
+    safeOnly: extra.includes("--safe") || dryRun,
+    dryRun,
+  });
   if (cleanup.isErr()) {
     console.warn(`Failed to prune managed worktrees: ${cleanup.error.message}`);
     process.exitCode = 1;
@@ -623,13 +628,19 @@ async function runWorktreesCommand(args: string[]): Promise<void> {
 
   const result = cleanup.value;
   const preserved = result.removed.filter((entry) => entry.recoveryRef).length;
-  console.log(`Pruned ${result.removed.length} stale managed worktree${result.removed.length === 1 ? "" : "s"}.`);
+  if (dryRun) {
+    console.log(`Would prune ${result.wouldRemove.length} safe, stale managed worktree${result.wouldRemove.length === 1 ? "" : "s"}.`);
+    for (const id of result.wouldRemove) console.log(`Eligible: ${id}`);
+  } else {
+    console.log(`Pruned ${result.removed.length} stale managed worktree${result.removed.length === 1 ? "" : "s"}.`);
+  }
   if (preserved > 0) console.log(`Preserved ${preserved} recovery ref${preserved === 1 ? "" : "s"}.`);
   if (result.missing.length > 0) {
     console.log(`Cleared ${result.missing.length} missing worktree session${result.missing.length === 1 ? "" : "s"}.`);
   }
   if (result.skipped.length > 0) {
-    console.log(`Skipped ${result.skipped.length} worktree${result.skipped.length === 1 ? "" : "s"} with untracked files.`);
+    console.log(`Skipped ${result.skipped.length} worktree${result.skipped.length === 1 ? "" : "s"} to protect local state.`);
+    for (const entry of result.skipped) console.log(`Preserved ${entry.workspaceId}: ${entry.reason}`);
   }
   for (const failure of result.failed) {
     console.warn(`Failed to prune ${failure.workspaceId}: ${failure.error.message}`);
@@ -653,7 +664,7 @@ function printHelp(): void {
       "  synrex oauth status    Show current OAuth enrollment policy",
       "  synrex config get      Print persisted config",
       "  synrex config set publicBaseUrl <url|null>",
-      "  synrex worktrees prune Prune managed worktrees unused for 3 days",
+      "  synrex worktrees prune [--safe] [--dry-run]  Review or clean managed worktrees unused for 3 days",
       "  synrex show-changes <review-ref> [--json]",
       "  synrex workflow list [--workspace <path>]  List resumable GPT coding workflows",
       "  synrex workflow show <workflow-id> [--workspace <path>]",
