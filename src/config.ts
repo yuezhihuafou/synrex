@@ -37,6 +37,7 @@ export interface ServerConfig {
       node?: string;
       labels: Record<string, string>;
     }>;
+    projectBindings: Array<{ project: string; node: string; pathPrefix: string }>;
     joinToken?: string;
     nodeToken?: string;
   };

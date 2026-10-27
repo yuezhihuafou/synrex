@@ -479,6 +479,8 @@ function registerMcpSurface(
           .describe("Explicit node alias/id, only when needed."),
         conversationTitle: z.string().max(120).optional()
           .describe("Optional actual chat title for diagnostics. Do not guess."),
+        project: z.string().trim().min(1).max(128).optional()
+          .describe("Explicit registered Synrex logical project; select its bound execution node. ChatGPT project identity is not inferred."),
       },
       outputSchema: {
         workspaceId: z.string(),
@@ -1371,6 +1373,7 @@ export function createServer(
       invoker: toolInvoker,
       stateDir: config.stateDir,
       maxConcurrentCalls: 4,
+      resolveWorkspaceRoot: async (workspaceId) => (await workspaces.getWorkspace(workspaceId)).root,
       onDiagnostic: (event, fields) => diagnostics.record(event, fields),
       onMetric: (event, fields) => logEvent(config.logging, "info", event, fields),
     });
@@ -1391,6 +1394,7 @@ export function createServer(
           store: controlPlaneStore,
           localNodeId: localNode.id,
           placementRules: config.cluster.placementRules,
+          projectBindings: config.cluster.projectBindings,
         })
       : adapter.registrationTarget;
     bindModernMcpSurface(target);

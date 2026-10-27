@@ -20,6 +20,8 @@ export interface NodeWorkerClientOptions {
   fetchImpl?: typeof fetch;
   stateDir?: string;
   maxConcurrentCalls?: number;
+  /** Canonical peer-local checkout root; conversation workspace IDs may differ. */
+  resolveWorkspaceRoot?: (workspaceId: string) => Promise<string>;
   onMetric?: (event: string, fields: Record<string, string | number | boolean>) => void;
   onDiagnostic?: (event: DiagnosticEvent, fields: Record<string, unknown>) => void;
 }
@@ -133,7 +135,7 @@ export class NodeWorkerClient {
 
   // Reads may overlap, while all non-read operations execute exclusively for
   // their workspace. Preserve delivery order without serializing other projects.
-  private schedule(request: NodeLinkRequest): Promise<void> {
+  private async schedule(request: NodeLinkRequest): Promise<void> {
     const receivedAt = performance.now();
     const fields = { requestId: request.id, nodeRequestId: request.id, traceId: request.call.meta?.["devspace/traceId"],
       otelTraceId: request.call.meta?.["devspace/otelTraceId"], nodeId: this.options.node.id, tool: request.call.name };
@@ -143,7 +145,9 @@ export class NodeWorkerClient {
       return this.execute(request);
     };
     const workspaceId = request.call.arguments.workspaceId;
-    const key = typeof workspaceId === "string" ? workspaceId : "__global__";
+    const key = typeof workspaceId === "string"
+      ? await this.options.resolveWorkspaceRoot?.(workspaceId).catch(() => undefined) ?? `workspace:${workspaceId}`
+      : "__global__";
     let gate = this.workspaceGates.get(key);
     if (!gate) {
       gate = { tail: Promise.resolve(), reads: new Set(), pending: 0 };

@@ -197,6 +197,33 @@
             ],
             "additionalProperties": false
           }
+        },
+        "projectBindings": {
+          "default": [],
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "project": {
+                "type": "string",
+                "minLength": 1
+              },
+              "node": {
+                "type": "string",
+                "minLength": 1
+              },
+              "pathPrefix": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "project",
+              "node",
+              "pathPrefix"
+            ],
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false

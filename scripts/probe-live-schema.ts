@@ -191,7 +191,22 @@ try {
       const expectedTool = expectedByName.get(name);
       return expectedTool && toolSchemaFingerprint([tool]) !== toolSchemaFingerprint([expectedTool]) ? [name] : [];
     });
-    throw new Error(`Live MCP schema fingerprint mismatch. live=${liveFingerprint} compiled=${expectedFingerprint} tools=[${mismatched.join(", ")}]`);
+    const diffFields = (left: unknown, right: unknown, prefix = ""): string[] => {
+      if (JSON.stringify(left) === JSON.stringify(right)) return [];
+      if (!left || !right || typeof left !== "object" || typeof right !== "object") {
+        return [prefix || "root"];
+      }
+      const a = left as Record<string, unknown>, b = right as Record<string, unknown>;
+      return [...new Set([...Object.keys(a), ...Object.keys(b)])]
+        .flatMap((key) => diffFields(a[key], b[key], `${prefix}.${key}`));
+    };
+    const details = process.env.DEVSPACE_SCHEMA_DEBUG === "1"
+      ? mismatched.map((name) => ({ name, paths: diffFields(
+        tools.find((tool) => (tool as { name?: string }).name === name), expectedByName.get(name),
+      ).slice(0, 50) }))
+      : undefined;
+    throw new Error(`Live MCP schema fingerprint mismatch. live=${liveFingerprint} compiled=${expectedFingerprint} tools=[${mismatched.join(", ")}]`
+      + (details ? ` details=${JSON.stringify(details).slice(0, 12000)}` : ""));
   }
 
   let qaWorkflowId: string | undefined;

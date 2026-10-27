@@ -395,7 +395,7 @@ export class DurableTaskManager {
   async outputTail(
     workspaceRoot: string,
     taskId: string,
-    maxBytes = 2_048,
+    maxBytes = 1_280,
   ): Promise<{ text: string; truncated: boolean } | undefined> {
     const state = await this.findTask(taskId);
     this.assertOwned(state, workspaceRoot);

@@ -39,6 +39,11 @@ const clusterConfigSchema = z.object({
   suspectAfterMs: z.number().int().min(5_000).max(10 * 60_000).default(45_000),
   offlineAfterMs: z.number().int().min(10_000).max(60 * 60_000).default(120_000),
   placementRules: z.array(placementRuleSchema).default([]),
+  projectBindings: z.array(z.object({
+    project: z.string().trim().min(1),
+    node: z.string().trim().min(1),
+    pathPrefix: z.string().trim().min(1),
+  }).strict()).default([]),
 }).strict().superRefine((value, context) => {
   if ((value.role === "worker" || value.role === "peer") && !value.gatewayUrl) {
     context.addIssue({

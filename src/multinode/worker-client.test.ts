@@ -91,6 +91,54 @@ test("worker runs parallel reads but preserves per-workspace write ordering", as
     "completed workspaces must not retain scheduler gates indefinitely");
 });
 
+test("worker serializes physical checkout across different conversation workspace IDs", async () => {
+  let releaseRead!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseRead = resolve; });
+  const observed: string[] = [];
+  const worker = new NodeWorkerClient({
+    gatewayUrl: "https://gateway.example",
+    node: {
+      id: "node_shared_root", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 },
+      platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "token", pollWaitMs: 1_000, heartbeatMs: 15_000,
+    resolveWorkspaceRoot: async (id) => id === "ws_other" ? "/other/repo" : "/shared/repo",
+    invoker: {
+      async call(name: string, args: { workspaceId: string }) {
+        observed.push(`${name}:${args.workspaceId}`);
+        if (name === "read") await blocked;
+        return { structuredContent: { ok: true } };
+      },
+    } as unknown as ToolInvoker,
+    fetchImpl: (async () => new Response(JSON.stringify({ ok: true }), {
+      status: 200, headers: { "content-type": "application/json" },
+    })) as typeof fetch,
+  });
+  const schedule = (worker as unknown as {
+    schedule(request: NodeLinkRequest): Promise<void>;
+  }).schedule.bind(worker);
+  const call = (id: string, name: string, workspaceId: string): NodeLinkRequest => ({
+    id: `nrq_${id}`, createdAt: new Date().toISOString(),
+    call: { name, arguments: { workspaceId } },
+  });
+  const first = schedule(call("a", "read", "ws_conversation_1"));
+  const sameRootWriter = schedule(call("b", "apply_patch", "ws_conversation_2"));
+  const otherRootWriter = schedule(call("c", "apply_patch", "ws_other"));
+  for (let i = 0; i < 20 && observed.length < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(observed.includes("read:ws_conversation_1"));
+  assert.ok(observed.includes("apply_patch:ws_other"));
+  assert.ok(!observed.includes("apply_patch:ws_conversation_2"));
+  releaseRead();
+  await Promise.all([first, sameRootWriter, otherRootWriter]);
+  assert.ok(observed.includes("apply_patch:ws_conversation_2"));
+  assert.equal((worker as unknown as { workspaceGates: Map<string, unknown> }).workspaceGates.size, 0);
+});
+
 test("worker close interrupts reconnect backoff and heartbeat requests never overlap", async () => {
   let registrations = 0;
   let heartbeats = 0;

@@ -17,6 +17,7 @@ export function withMultiNodeRouting(
     store: ControlPlaneStore;
     localNodeId: string;
     placementRules?: readonly WorkspacePlacementRule[];
+    projectBindings?: readonly { project: string; node: string; pathPrefix: string }[];
   },
 ): McpRegistrationTarget {
   return {
@@ -31,17 +32,20 @@ export function withMultiNodeRouting(
         if (name === "open_workspace") {
           const selector = typeof input.node === "string" ? input.node : undefined;
           const path = typeof input.path === "string" ? input.path : "";
+          const project = typeof input.project === "string" ? input.project : undefined;
           const placement = selectWorkspaceNode(options.store, {
             selector,
             path,
+            project,
             localNodeId: options.localNodeId,
             rules: options.placementRules,
+            projectBindings: options.projectBindings,
           });
           const selected = placement.node;
           if (selected.id !== options.localNodeId) {
-            const { node: _node, ...arguments_ } = input;
+            const { node: _node, project: _project, ...arguments_ } = input;
             const result = await options.router.openWorkspace({
-              node: selector,
+              node: selected.id,
               arguments: arguments_,
               meta: asMeta(extra._meta),
             });

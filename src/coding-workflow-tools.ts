@@ -34,12 +34,12 @@ function gitSnapshot(root: string): Pick<CodingWorkflowCheckpoint, "gitHead" | "
 const openInput = {
   workspaceId: z.string().describe(workspaceIdDescription),
   requestKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional()
-    .describe("Stable unique request ID for safe retry of workflow creation after an MCP disconnect."),
-  workflowId: workflowId.optional().describe("Resume a known workflow, including from another ChatGPT conversation."),
+    .describe("Idempotency key for workflow creation retries."),
+  workflowId: workflowId.optional().describe("Resume an existing workflow."),
   title: shortText.optional().describe("Short title for a new workflow."),
-  goal: shortText.optional().describe("Goal to create a new workflow; omit when resuming by workflowId."),
-  acceptanceCriteria: items.optional().describe("Observable completion criteria for a new workflow."),
-  constraints: items.optional().describe("Rules, non-goals, and safety constraints for a new workflow."),
+  goal: shortText.optional().describe("Goal for a new workflow."),
+  acceptanceCriteria: items.optional().describe("Observable completion criteria."),
+  constraints: items.optional().describe("Constraints and non-goals."),
 };
 
 export function registerCodingWorkflowTools(input: {
@@ -53,7 +53,7 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_open", {
     title: "Open coding workflow",
-    description: "Create a persistent GPT-led coding workflow from a goal and acceptance criteria, or resume it by workflowId in a later conversation. The goal, not a checkpoint or tool call, defines completion. Stores intent and progress locally; does not invoke Codex/API models.",
+    description: "Create or resume a durable GPT-led workflow by ID. Completion requires original acceptance criteria. Does not invoke a model.",
     inputSchema: openInput,
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, async ({ workspaceId, workflowId: requestedId, requestKey, title, goal, acceptanceCriteria, constraints }) => {
@@ -78,13 +78,13 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_status", {
     title: "Inspect coding workflows",
-    description: "List or inspect workspace workflows and checkpoints. Verify Git and task logs after reconnecting.",
+    description: "Inspect workflows and checkpoints. Verify Git and task receipts after reconnect.",
     inputSchema: {
       workspaceId: z.string().describe(workspaceIdDescription),
       workflowId: workflowId.optional(),
-      includeCompleted: z.boolean().optional().describe("Include finished history when listing; default false."),
-      includeMemory: z.boolean().optional().describe("Opt in to a bounded read-only MemHub project recall, not a task dependency."),
-      memoryProject: z.string().trim().min(1).max(128).optional().describe("Explicit canonical MemHub project slug (required for project recall)."),
+      includeCompleted: z.boolean().optional().describe("Include completed history; default false."),
+      includeMemory: z.boolean().optional().describe("Optional bounded read-only MemHub recall."),
+      memoryProject: z.string().trim().min(1).max(128).optional().describe("Explicit MemHub project slug."),
     },
     annotations: { readOnlyHint: true },
   }, async ({ workspaceId, workflowId: requestedId, includeCompleted, includeMemory, memoryProject }) => {
@@ -151,7 +151,7 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_checkpoint", {
     title: "Save coding workflow checkpoint",
-    description: "Save progress and checks for a long-running workflow. Complete only after original acceptance criteria pass: at least one check, no pending work. Checks are self-reported. Use before handing off unfinished work; expectedRevision prevents stale overwrites.",
+    description: "Save workflow progress and checks. Complete only after acceptance passes with no pending work. Checks are self-reported; expectedRevision guards stale writes.",
     inputSchema: {
       workspaceId: z.string().describe(workspaceIdDescription),
       workflowId,
@@ -159,14 +159,14 @@ export function registerCodingWorkflowTools(input: {
       status: z.enum(["active", "blocked", "completed", "cancelled"]),
       phase: shortText,
       summary: shortText,
-      completedSteps: items.describe("Accumulated completed work, not just changes in this checkpoint."),
-      nextSteps: items.describe("Unfinished actions; empty only if truly finished."),
+      completedSteps: items.describe("Cumulative completed work."),
+      nextSteps: items.describe("Remaining actions; empty only when finished."),
       blockers: items.describe("Specific errors or missing prerequisites."),
-      checks: items.describe("Actual test/check commands and observed outcomes; never assert unrun tests passed."),
+      checks: items.describe("Observed checks; never claim unrun tests passed."),
       taskIds: z.array(z.string().regex(/^task_[a-zA-Z0-9-]+$/)).max(40)
-        .describe("Durable shell task IDs that still need inspection or follow-up."),
+        .describe("Durable task IDs requiring follow-up."),
       agentIds: z.array(z.string().regex(/^agt_[a-f0-9]{8}$/)).max(20).optional()
-        .describe("Explicit Subagent handles whose evidence belongs to this workflow."),
+        .describe("Referenced Subagent evidence IDs."),
     },
     annotations: { readOnlyHint: false, openWorldHint: false },
   }, async ({ workspaceId, workflowId: id, expectedRevision, status, phase, summary, completedSteps, nextSteps, blockers, checks, taskIds, agentIds }) => {

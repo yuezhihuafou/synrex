@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, copyFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,6 +87,26 @@ test("batch read preserves separate file ranges and existing single-file reads",
   const original = await context.client.callTool({ name: "read", arguments: { workspaceId, path: "a.ts" } });
   assert.notEqual(original.isError, true);
   assert.match(String(structuredContent(original).result), /alpha/);
+});
+
+test("parallel MCP conversations preserve independent edits to the same checkout", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const a = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const b = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  assert.notEqual(a, b, "different conversations have distinct workspace identities");
+  const count = 20;
+  const original = Array.from({ length: count }, (_, i) => `unique-${i}`).join("\n") + "\n";
+  await writeFile(join(context.project, "parallel.txt"), original);
+  const results = await Promise.all(Array.from({ length: count }, (_, i) => context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspaceId: i % 2 ? a : b,
+      patch: `*** Begin Patch\n*** Update File: parallel.txt\n@@\n-unique-${i}\n+changed-${i}\n*** End Patch`,
+    },
+  })));
+  assert.equal(results.filter((result) => result.isError).length, 0);
+  assert.equal(await readFile(join(context.project, "parallel.txt"), "utf8"),
+    Array.from({ length: count }, (_, i) => `changed-${i}`).join("\n") + "\n");
 });
 
 test("MCP read delivers bounded visual evidence and preserves image blocks across batch reads", async t => {

@@ -1,5 +1,15 @@
 # Synrex: product boundary and delivery roadmap
 
+**2026-10-27 cross-worktree integration:** Worktree inventory and selected
+feature/repair candidates are recorded in
+`docs/platform/WORKTREE_INTEGRATION_AUDIT_20261027.md`. The integration
+preserves existing production/OAuth/Console behavior, adds optional project
+node bindings (empty by default), physical-workspace tool coordination and
+optimistic patch checks, and treats the Research Harness and old private QA
+assets as separate from Synrex Core. This paragraph describes source-level
+work; actual GitHub and production release identities must be verified from
+remote refs, pinned release manifests, and live tests rather than assumed.
+
 **2026-10-26 P0 implementation note:** Parallel-chat integration, ingress
 continuity and Tunnel/port ownership form one engineering effort. Consult
 `docs/platform/SYNREX_P0_CONTINUITY_INTEGRATION.md` for the measured baseline,
