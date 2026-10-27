@@ -59,7 +59,9 @@ test("MCP supports a controlled failed command -> repair -> verified goal sequen
   const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
   const cmd = "test -f recovered.txt && grep -qx recovered recovered.txt";
   const failed = await context.client.callTool({ name: "exec_command", arguments: { workspaceId, cmd } });
-  assert.equal(failed.isError, true, "initial command must actually fail");
+  assert.notEqual(failed.isError, true, "nonzero command is data, not MCP failure");
+  assert.equal(structuredContent(failed).commandFailed, true);
+  assert.equal(typeof structuredContent(failed).runId, "string");
   assert.notEqual(structuredContent(failed).exitCode, 0);
   const repaired = await context.client.callTool({ name: "apply_patch", arguments: {
     workspaceId, patch: "*** Begin Patch\n*** Add File: recovered.txt\n+recovered\n*** End Patch",
@@ -465,7 +467,7 @@ test("model-facing file mutation tools cannot bypass protected architecture inte
   });
 });
 
-test("codex process failures expose MCP error state and exit code", async (t) => {
+test("codex process failures preserve structured exit evidence without MCP error", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const opened = structuredContent(await callOpen(context.client, context.project));
   const response = await context.client.callTool({
@@ -477,14 +479,25 @@ test("codex process failures expose MCP error state and exit code", async (t) =>
     },
   });
 
-  assert.equal(response.isError, true);
+  assert.notEqual(response.isError, true);
   assert.equal(structuredContent(response).exitCode, 7);
+  assert.equal(structuredContent(response).commandFailed, true);
+  assert.equal((structuredContent(response).failure as { kind:string }).kind, "indeterminate");
   assert.match(contentText(response), /expected-error/);
   assert.match(contentText(response), /acceptance criteria remain unmet/);
   assert.equal(structuredContent(response).result, contentText(response));
 });
 
-test("failed durable command is surfaced as error with a repair-next hint", async (t) => {
+test("invalid MCP tool arguments remain protocol errors rather than shell result data", async(t)=>{
+  const context=await fixture(t,{toolMode:"codex"});
+  const response=await context.client.callTool({
+    name:"exec_command", arguments:{workspaceId:"ws_nonexistent",cmd:"printf must-not-run"},
+  });
+  assert.equal(response.isError,true);
+  assert.equal(response.structuredContent,undefined, "protocol failure has no completed shell receipt");
+});
+
+test("failed durable shell command remains structured data with repair-next hint", async (t) => {
   const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
   const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
   const launched = await context.client.callTool({
@@ -495,13 +508,15 @@ test("failed durable command is surfaced as error with a repair-next hint", asyn
   const terminal = await context.client.callTool({ name: "task_wait", arguments: { workspaceId, taskId, final: true } });
   assert.equal(structuredContent(terminal).status, "completed");
   assert.equal(structuredContent(terminal).exitCode, 13);
-  assert.equal(terminal.isError, true, "completed shell task with nonzero exit must not look successful");
+  assert.notEqual(terminal.isError, true, "completed shell task with nonzero exit must remain readable to ChatGPT");
+  assert.equal(structuredContent(terminal).commandFailed, true);
   assert.match(contentText(terminal), /acceptance criteria remain unmet/);
   assert.match(contentText(terminal), /fix or alternative/);
   assert.match(contentText(terminal), /Final command failed \(exit 13\)/);
   assert.doesNotMatch(contentText(terminal), /Final dependency is completed/);
   const observed = await context.client.callTool({ name: "task_get", arguments: { workspaceId, taskId } });
-  assert.equal(observed.isError, true);
+  assert.notEqual(observed.isError, true);
+  assert.equal(structuredContent(observed).commandFailed, true);
   assert.ok(contentText(observed).includes(FAILURE_CONTINUATION_HINT));
 });
 
@@ -1310,8 +1325,9 @@ test("open_workspace advertises subagent instructions on demand by default", asy
   const skills = opened.skills as Array<Record<string, unknown>>;
   assert.equal(skills.some((skill) => skill.name === "subagents"), true);
   assert.doesNotMatch(String(opened.instruction), /# Synrex subagents/);
-  assert.match(context.client.getInstructions() ?? "", /prefer a bounded Subagent assignment/);
+  assert.match(context.client.getInstructions() ?? "", /Delegate only when a separate bounded worker materially improves/);
   assert.match(context.client.getInstructions() ?? "", /GPT owns requirements, architecture, decisions and final verification/);
+  assert.match(context.client.getInstructions() ?? "", /Agent completed means its turn ended, NEVER that the user's request is done/);
 });
 
 test("open_workspace preloads subagent instructions when configured", async (t) => {
@@ -1343,6 +1359,26 @@ test("open_workspace scopes checkout reuse to OpenAI session metadata", async (t
   assert.notEqual(structuredContent(unscoped).workspaceId, structuredContent(first).workspaceId);
   assert.ok(Array.isArray(structuredContent(otherSession).agentsFiles));
   assert.ok(Array.isArray(structuredContent(unscoped).agentsFiles));
+});
+
+test("reused and new ChatGPT sessions recover bounded original-goal context, not only a workspace ID", async(t)=>{
+  const context=await fixture(t,{toolMode:"codex",git:true});
+  const first=structuredContent(await callOpen(context.client,context.project,"goal-chat-A"));
+  const workspaceId=first.workspaceId as string;
+  const created=await context.client.callTool({name:"workflow_open",arguments:{
+    workspaceId,title:"Product repair",goal:"Deliver the working deployed artifact",
+    acceptanceCriteria:["Artifact is installed","Production smoke test passes"],constraints:[],
+  }});
+  assert.notEqual(created.isError,true);
+  const again=await callOpen(context.client,context.project,"goal-chat-A");
+  const reuseText=contentText(again);
+  assert.match(reuseText,/Deliver the working deployed artifact/);
+  assert.match(reuseText,/Artifact is installed/);
+  assert.match(reuseText,/ORIGINAL request/);
+  assert.ok(Buffer.byteLength(reuseText)<2500, "recovery should not dump a full project prompt");
+  const other=await callOpen(context.client,context.project,"goal-chat-B");
+  assert.match(contentText(other),/Deliver the working deployed artifact/);
+  assert.match(contentText(other),/candidate context only/);
 });
 
 test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) => {

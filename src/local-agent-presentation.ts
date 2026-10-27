@@ -29,6 +29,20 @@ export interface AgentReceiptOutput {
   status: AgentCommandStatus;
 }
 
+/** Explicitly marks the boundary between worker turn and user goal.
+ * This is a model-facing reminder; it never claims to verify the parent task.
+ */
+export function agentGoalHandoff(status: AgentCommandStatus): { goalVerified: false; nextAction: string } {
+  return {
+    goalVerified: false,
+    nextAction: status === "completed"
+      ? "Agent turn finished, not the user's goal. Inspect its actual diff, checks and original acceptance; integrate/repair and verify before concluding."
+      : status === "failed" || status === "stopped"
+        ? "Agent did not deliver the original goal. Inspect the error/evidence, continue the same agent if safe or use native tools, then verify acceptance. Do not blindly replay writes."
+        : "Agent is still running. Keep its ID and inspect the receipt when ready; continue independent work.",
+  };
+}
+
 export interface AgentSummaryOutput extends AgentReceiptOutput {
   target: string;
 }
@@ -40,10 +54,10 @@ export interface AgentFailureOutput {
 }
 
 export type AgentObservationOutput =
-  | { id: string; status: "running"; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact }
-  | { id: string; status: "completed"; response?: string; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact }
-  | { id: string; status: "failed"; error: AgentFailureOutput; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact }
-  | { id: string; status: "stopped"; error?: AgentFailureOutput; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact };
+  | ({ id: string; status: "running"; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact } & ReturnType<typeof agentGoalHandoff>)
+  | ({ id: string; status: "completed"; response?: string; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact } & ReturnType<typeof agentGoalHandoff>)
+  | ({ id: string; status: "failed"; error: AgentFailureOutput; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact } & ReturnType<typeof agentGoalHandoff>)
+  | ({ id: string; status: "stopped"; error?: AgentFailureOutput; evidenceSummary?: AgentEvidenceSummary; evidence?: AgentEvidenceArtifact } & ReturnType<typeof agentGoalHandoff>);
 
 export function presentAgentTargetCatalog(catalog: LocalAgentCatalog): AgentTargetCatalogOutput {
   return {
@@ -86,21 +100,23 @@ export function presentAgentObservation(record: LocalAgentRecord): AgentObservat
     case "completed":
       return {
         ...receipt,
+        ...agentGoalHandoff("completed"),
         status: "completed",
         ...(record.latestResponse === undefined ? {} : { response: record.latestResponse }),
         ...evidence,
       };
     case "failed":
-      return { ...receipt, status: "failed", error: presentAgentFailure(record), ...evidence };
+      return { ...receipt, ...agentGoalHandoff("failed"), status: "failed", error: presentAgentFailure(record), ...evidence };
     case "stopped":
       return {
         ...receipt,
+        ...agentGoalHandoff("stopped"),
         status: "stopped",
         ...(hasAgentFailure(record) ? { error: presentAgentFailure(record) } : {}),
         ...evidence,
       };
     case "running":
-      return { id: receipt.id, status: "running", ...evidence };
+      return { id: receipt.id, status: "running", ...agentGoalHandoff("running"), ...evidence };
   }
 }
 
@@ -127,7 +143,7 @@ export function formatAgentSummary(summary: AgentSummaryOutput): string {
 }
 
 export function formatAgentObservation(observation: AgentObservationOutput): string {
-  const line = formatAgentReceipt(observation);
+  const line = `${formatAgentReceipt(observation)}\n${observation.nextAction}`;
   if (observation.status === "completed" && observation.response !== undefined) {
     return `${line}\n\n${observation.response}`;
   }

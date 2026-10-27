@@ -222,9 +222,12 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
   const terminal = !snapshot.running;
   return {
     content,
-    isError: failed,
+    // A command's nonzero exit is an observed execution result, not an MCP
+    // transport/protocol failure. MCP isError causes some ChatGPT hosts to
+    // discard structuredContent and turn a repairable exit into tool failure.
     structuredContent: {
       result,
+      commandFailed: failed,
       ...(snapshot.sessionId !== undefined ? { sessionId: snapshot.sessionId } : {}),
       ...(isTask ? {
         taskId: snapshot.taskId,
@@ -266,6 +269,7 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
     : view.status;
   const terminalExit = view.result?.exitCode;
   const failed = view.status === "failed" || view.result?.isError === true;
+  const runnerFailed = view.status === "failed";
   const classification = failed ? assessFailure({ exitCode: view.result?.exitCode }) : undefined;
   const result = `task=${view.taskId} ${state} rev=${view.revision}`
     + (view.pollIntervalMs ? ` poll=${view.pollIntervalMs}ms` : "")
@@ -274,9 +278,12 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
     + (failed ? `\n${FAILURE_CONTINUATION_HINT} ${failureGuidance(classification!)}` : "");
   return {
     content: [textBlock(result)],
-    isError: failed,
+    // A failed runner/receipt is a tool error. A completed command with a
+    // nonzero exit is normal data and must reach the model as structured data.
+    ...(runnerFailed ? { isError: true } : {}),
     structuredContent: {
       result,
+      commandFailed: failed,
       taskId: view.taskId,
       status: view.status,
       revision: view.revision,
@@ -768,6 +775,8 @@ async function waitForDurableTask(
       content: [...response.content, textBlock(preview)],
       structuredContent: {
         ...response.structuredContent,
+        // Preserve legacy clients that read result instead of content blocks;
+        // outputTail is capped at 1,280 bytes by durableTasks.
         result: `${response.structuredContent.result}\n${preview}`,
         outputTruncated: output.truncated,
       },
