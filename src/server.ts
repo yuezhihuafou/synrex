@@ -11,7 +11,7 @@ import { access, realpath } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
-import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
+import { createOAuthMetadata, mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from "@modelcontextprotocol/sdk/server/auth/router.js";
 import { requireBearerAuth } from "@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js";
 import { resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import { createMcpHandler } from "@modelcontextprotocol/server";
@@ -83,6 +83,11 @@ import {
 import { withMultiNodeRouting } from "./multinode/mcp-routing.js";
 import { MultiNodeRouter } from "./multinode/router.js";
 import { NodeWorkerClient } from "./multinode/worker-client.js";
+import {
+  authorizationMetadataPath,
+  normalizedPublicBasePath,
+  publicEndpointUrl,
+} from "./public-endpoints.js";
 import {
   buildLocalAgentCatalog,
   buildLocalAgentProviderStatuses,
@@ -1157,7 +1162,11 @@ export function createServer(
   app.use(bodyReadyTrace);
   diagnostics.record("runtime_started");
   registerOAuthRecovery(app, config);
-  const mcpUrl = new URL("/mcp", config.publicBaseUrl);
+  const publicBasePath = normalizedPublicBasePath(config.publicBaseUrl);
+  const mcpRoute = `${publicBasePath}/mcp` || "/mcp";
+  const assetRoute = `${publicBasePath}/mcp-app-assets` || "/mcp-app-assets";
+  const healthRoute = `${publicBasePath}/healthz` || "/healthz";
+  const mcpUrl = publicEndpointUrl(config.publicBaseUrl, "/mcp");
   const resourceServerUrl = resourceUrlFromServerUrl(mcpUrl);
   const oauthProvider = new SingleUserOAuthProvider(config.oauth, mcpUrl, config.stateDir,
     (phase, reason) => {
@@ -1306,24 +1315,48 @@ export function createServer(
 
     registerSynrexConsole(app, config);
 
-  app.use(
-    mcpAuthRouter({
-      provider: oauthProvider,
-      issuerUrl: new URL(config.publicBaseUrl),
-      baseUrl: new URL(config.publicBaseUrl),
-      resourceServerUrl,
-      scopesSupported: config.oauth.scopes,
-      resourceName: "Synrex",
-    }),
-  );
+  const oauthRouterOptions = {
+    provider: oauthProvider,
+    issuerUrl: new URL(config.publicBaseUrl),
+    baseUrl: new URL(config.publicBaseUrl),
+    resourceServerUrl,
+    scopesSupported: config.oauth.scopes,
+    resourceName: "Synrex",
+  };
+  const generatedOAuthMetadata = createOAuthMetadata(oauthRouterOptions);
+  const publicOAuthMetadata = {
+    ...generatedOAuthMetadata,
+    authorization_endpoint: publicEndpointUrl(config.publicBaseUrl, "/authorize").href,
+    token_endpoint: publicEndpointUrl(config.publicBaseUrl, "/token").href,
+    registration_endpoint: generatedOAuthMetadata.registration_endpoint
+      ? publicEndpointUrl(config.publicBaseUrl, "/register").href
+      : undefined,
+    revocation_endpoint: generatedOAuthMetadata.revocation_endpoint
+      ? publicEndpointUrl(config.publicBaseUrl, "/revoke").href
+      : undefined,
+  };
+  if (publicBasePath) {
+    app.get(authorizationMetadataPath(config.publicBaseUrl), (_req, res) => {
+      res.json(publicOAuthMetadata);
+    });
+    app.get(new URL(getOAuthProtectedResourceMetadataUrl(resourceServerUrl)).pathname, (_req, res) => {
+      res.json({
+        resource: resourceServerUrl.href,
+        authorization_servers: [publicOAuthMetadata.issuer],
+        scopes_supported: config.oauth.scopes,
+        resource_name: "Synrex",
+      });
+    });
+  }
+  app.use(publicBasePath || "/", mcpAuthRouter(oauthRouterOptions));
 
-  app.options("/mcp-app-assets/{*asset}", (_req, res) => {
+  app.options(`${assetRoute}/{*asset}`, (_req, res) => {
     setAssetHeaders(res);
     res.sendStatus(204);
   });
 
   app.use(
-    "/mcp-app-assets",
+    assetRoute,
     express.static(uiBuildDirectory(), {
       immutable: true,
       maxAge: "1y",
@@ -1332,11 +1365,11 @@ export function createServer(
     }),
   );
 
-  app.get("/healthz", (_req, res) => {
+  app.get(healthRoute, (_req, res) => {
     res.json({ ok: true, name: "devspace" });
   });
 
-  app.all("/mcp", async (req, res) => {
+  app.all(mcpRoute, async (req, res) => {
     const requestId = res.locals.requestId as string | undefined;
     try {
       const authStarted = performance.now();
@@ -1444,7 +1477,7 @@ if (await isMainModule()) {
   const { app, config, close, localAgentProviders, localNode } = createServer();
   const httpServer = app.listen(config.port, config.host, () => {
     console.log(
-      `devspace listening on http://${config.host}:${config.port}/mcp`,
+      `devspace listening on http://${config.host}:${config.port}${publicEndpointUrl(config.publicBaseUrl, "/mcp").pathname}`,
     );
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log("auth: oauth owner-token flow required");

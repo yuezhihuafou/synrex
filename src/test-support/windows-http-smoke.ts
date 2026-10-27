@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { runStoreRoot } from "../compact-runtime/run-store.js";
+import { publicEndpointUrl } from "../public-endpoints.js";
 
 interface ToolDescription {
   name?: string;
@@ -25,11 +26,11 @@ const auth = JSON.parse(await readFile(join(configDir, "auth.json"), "utf8")) as
 if (!auth.ownerToken) throw new Error("isolated auth owner token is missing");
 
 const redirectUri = "http://127.0.0.1/callback";
-const resource = new URL("/mcp", baseUrl).href;
+const resource = publicEndpointUrl(baseUrl, "/mcp").href;
 const verifier = "synrex-windows-http-smoke-verifier-0123456789";
 const challenge = createHash("sha256").update(verifier).digest("base64url");
 
-const registration = await fetch(`${baseUrl}/register`, {
+const registration = await fetch(publicEndpointUrl(baseUrl, "/register"), {
   method: "POST",
   headers: { "content-type": "application/json" },
   body: JSON.stringify({
@@ -46,7 +47,7 @@ if (registration.status !== 201) {
 const client = await registration.json() as { client_id?: string };
 if (!client.client_id) throw new Error("registration did not return client_id");
 
-const approval = await fetch(`${baseUrl}/authorize`, {
+const approval = await fetch(publicEndpointUrl(baseUrl, "/authorize"), {
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({
@@ -69,7 +70,7 @@ const location = approval.headers.get("location");
 const code = location ? new URL(location).searchParams.get("code") : null;
 if (!code) throw new Error("authorization did not return a code");
 
-const exchange = await fetch(`${baseUrl}/token`, {
+const exchange = await fetch(publicEndpointUrl(baseUrl, "/token"), {
   method: "POST",
   headers: { "content-type": "application/x-www-form-urlencoded" },
   body: new URLSearchParams({
@@ -92,7 +93,7 @@ async function postMcp<T = Record<string, unknown>>(
   params: Record<string, unknown> = {},
 ): Promise<McpResponse<T>> {
   const name = typeof params.name === "string" ? params.name : undefined;
-  const response = await fetch(`${baseUrl}/mcp`, {
+  const response = await fetch(publicEndpointUrl(baseUrl, "/mcp"), {
     method: "POST",
     headers: {
       authorization: `Bearer ${token}`,

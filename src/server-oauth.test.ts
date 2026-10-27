@@ -11,6 +11,78 @@ import { SqliteOAuthStore } from "./oauth-store.js";
 import { createServer } from "./server.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
+test("HTTP and OAuth routes honor a publicBaseUrl path prefix", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-http-base-path-"));
+  const publicBaseUrl = "https://agent.example.com/group";
+  const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
+    server: { publicBaseUrl },
+    storage: { stateDir: join(root, "state") },
+    workspaces: { allowedRoots: [root] },
+    logging: { level: "silent" },
+  }));
+  const running = createServer(config);
+  const listener = running.app.listen(0, "127.0.0.1");
+  t.after(async () => {
+    await running.close();
+    listener.closeAllConnections();
+    await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  await once(listener, "listening");
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const local = `http://127.0.0.1:${address.port}`;
+
+  const health = await fetch(`${local}/group/healthz`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { ok: true, name: "devspace" });
+  assert.equal((await fetch(`${local}/healthz`)).status, 404);
+
+  const authMetadata = await fetch(`${local}/.well-known/oauth-authorization-server/group`);
+  assert.equal(authMetadata.status, 200, await authMetadata.clone().text());
+  const authBody = await authMetadata.json() as {
+    issuer?: string;
+    authorization_endpoint?: string;
+    token_endpoint?: string;
+    registration_endpoint?: string;
+  };
+  assert.equal(authBody.issuer, publicBaseUrl);
+  assert.equal(authBody.authorization_endpoint, `${publicBaseUrl}/authorize`);
+  assert.equal(authBody.token_endpoint, `${publicBaseUrl}/token`);
+  assert.equal(authBody.registration_endpoint, `${publicBaseUrl}/register`);
+
+  const resourceMetadata = await fetch(`${local}/.well-known/oauth-protected-resource/group/mcp`);
+  assert.equal(resourceMetadata.status, 200, await resourceMetadata.clone().text());
+  const resourceBody = await resourceMetadata.json() as {
+    resource?: string;
+    authorization_servers?: string[];
+  };
+  assert.equal(resourceBody.resource, `${publicBaseUrl}/mcp`);
+  assert.deepEqual(resourceBody.authorization_servers, [publicBaseUrl]);
+
+  const registration = await fetch(`${local}/group/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      client_name: "Base path test",
+      redirect_uris: ["https://chatgpt.com/connector_platform_oauth_redirect"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    }),
+  });
+  assert.equal(registration.status, 201, await registration.clone().text());
+  assert.equal((await fetch(`${local}/register`, { method: "POST" })).status, 404);
+
+  const prefixedMcp = await fetch(`${local}/group/mcp`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+  });
+  assert.equal(prefixedMcp.status, 401);
+  assert.equal((await fetch(`${local}/mcp`, { method: "POST" })).status, 404);
+});
+
 test("HTTP MCP enforces canonical and exact alias bearer resources", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "devspace-http-oauth-"));
   const canonical = "https://agent.example.com/mcp";

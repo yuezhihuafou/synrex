@@ -9,6 +9,7 @@ import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import type { ServerConfig } from "./config.js";
 import { resolveCoreListenPort } from "./server-bind.js";
+import { publicEndpointUrl } from "./public-endpoints.js";
 import { resolveCliWorkspaceContext } from "./cli-workspace.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
@@ -398,7 +399,7 @@ async function serve(): Promise<void> {
   const { createServer } = await import("./server.js");
   const { app, close, localAgentProviders, localNode } = createServer(config);
   const httpServer = app.listen(listenPort, config.host, () => {
-    console.log(`synrex listening on http://${config.host}:${listenPort}/mcp`);
+    console.log(`synrex listening on http://${config.host}:${listenPort}${publicEndpointUrl(config.publicBaseUrl, "/mcp").pathname}`);
     console.log(`public base url: ${config.publicBaseUrl}`);
     console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`allowed hosts: ${config.allowedHosts.join(", ")}`);
@@ -498,8 +499,9 @@ async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
 
   try {
     const config = loadConfig();
-    console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
-    console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
+    const publicMcpUrl = publicEndpointUrl(config.publicBaseUrl, "/mcp");
+    console.log(`Local MCP URL: http://${config.host}:${config.port}${publicMcpUrl.pathname}`);
+    console.log(`Public MCP URL: ${publicMcpUrl.toString()}`);
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
     console.log(`Cluster role: ${config.cluster.role}`);
