@@ -158,6 +158,8 @@ function testOneToolContract(): void {
   };
   assert.deepEqual(fileSchema.parse(valid), valid);
   assert.throws(() => fileSchema.parse({ file_id: "file_123" }));
+  assert.equal(fileSchema.safeParse({ ...valid, name: "generated.png" }).success, false);
+  assert.equal(fileSchema.safeParse({ ...valid, size: 123 }).success, false);
 
   const sensitiveExtraValue = "Bearer should-not-leak";
   const rejected = fileSchema.safeParse({

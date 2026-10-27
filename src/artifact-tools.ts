@@ -45,8 +45,6 @@ const openAIFileReferenceInputSchema = z.strictObject({
   file_id: z.string(),
   mime_type: z.string().nullable().optional(),
   file_name: z.string().nullable().optional(),
-  name: z.string().nullable().optional(),
-  size: z.number().int().nonnegative().nullable().optional(),
 });
 
 export interface ArtifactToolRegistrationOptions {
