@@ -70,6 +70,59 @@ test("MCP supports a controlled failed command -> repair -> verified goal sequen
   assert.equal(structuredContent(verified).exitCode, 0);
 });
 
+test("project learning can explicitly recall sibling ChatGPT worktree notes without granting cross-worktree promotion", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true, uiEnabled: false });
+  const first = await context.client.callTool({
+    name: "open_workspace", arguments: { path: context.project, mode: "worktree" },
+  });
+  const second = await context.client.callTool({
+    name: "open_workspace", arguments: { path: context.project, mode: "worktree" },
+  });
+  assert.notEqual(first.isError, true, contentText(first));
+  assert.notEqual(second.isError, true, contentText(second));
+  const sourceId = structuredContent(first).workspaceId as string;
+  const targetId = structuredContent(second).workspaceId as string;
+  assert.notEqual(sourceId, targetId);
+  const added = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: sourceId, action: "learn_record",
+      args: { taskKey: "cross-chat-recovery", title: "Cross-chat recovery lesson",
+        summary: "Check task receipts before replaying uncertain commands.", outcome: "completed" },
+    },
+  });
+  assert.notEqual(added.isError, true, contentText(added));
+  const oldNoteId = structuredContent(added).noteId as string;
+  const defaultRecall = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_recall", args: { query: "recovery" },
+    },
+  });
+  assert.doesNotMatch(contentText(defaultRecall), /Cross-chat recovery lesson/);
+  const explicit = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_recall",
+      args: { query: "recovery", includeProjectWorktrees: true },
+    },
+  });
+  assert.notEqual(explicit.isError, true, contentText(explicit));
+  assert.match(contentText(explicit), /Cross-chat recovery lesson/);
+  assert.deepEqual(structuredContent(explicit).relatedNoteIds, [oldNoteId]);
+  const review = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_review",
+      args: { includeProjectWorktrees: true },
+    },
+  });
+  assert.notEqual(review.isError, true, contentText(review));
+  assert.match(contentText(review), /Cross-chat recovery lesson/);
+  const promotion = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_distill", args: { noteId: oldNoteId },
+    },
+  });
+  assert.equal(promotion.isError, true, "read-only sibling recall must not grant write or promotion rights");
+});
+
 test("batch read preserves separate file ranges and existing single-file reads", async (t) => {
   const context = await fixture(t);
   await writeFile(join(context.project, "a.ts"), "alpha\nbeta\n");

@@ -1,5 +1,19 @@
 # Synrex: product boundary and delivery roadmap
 
+**2026-10-27 cross-conversation WIP review:** Recorded source-level reconciliation
+is in `docs/platform/CONVERSATION_WIP_INTEGRATION_REVIEW_20261027.md`.
+LearningStore now has an explicitly requested, bounded read-only
+`project learn_recall/learn_review` view for other registered worktrees
+sharing the same source checkout. Default isolation, verified evidence rules,
+the single-owner release model, and optional gateway placement remain
+unchanged. Git source publication and production activation are separate
+acceptance gates; this text alone does not claim deployment.
+
+The corresponding Console follow-up labels independent node/workflow/task/
+diagnostic/runtime last-activity timestamps separately from the snapshot
+refresh. Old `active` workflow checkpoints are history, not evidence of
+an actively executing system process; no background polling service is added.
+
 **2026-10-27 Git/worktree reconciliation:** The inspected, immutable swy1
 production source remains `126a63c` until an explicitly verified release
 switch. The regression and retention record is

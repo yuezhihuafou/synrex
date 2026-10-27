@@ -317,6 +317,44 @@ export class LearningStore {
     }
   }
 
+  /**
+   * Explicit read-only project recall for a new conversation using a
+   * different worktree of the same registered source checkout.
+   *
+   * Do not merge raw execution episodes, elevate self-reported notes into
+   * verified evidence, or silently widen the default workspace boundary.
+   * The caller must pass a sourceRoot verified by WorkspaceRegistry; this
+   * query additionally demands the stored worktree source_root to match.
+   */
+  recallSiblingNotes(sourceRoot: string, currentRoot: string, query: string, limit = 6): LearningNote[] {
+    const db = openNotesDatabase(this.stateDir);
+    try {
+      const rows = db.sqlite.prepare(`select * from learning_notes
+        where workspace_root <> ?
+          and (
+            workspace_root = ?
+            or workspace_root in (
+              select distinct root from workspace_sessions
+              where source_root = ? and mode = 'worktree'
+            )
+          )
+        order by updated_at desc limit 120`)
+        .all(currentRoot, sourceRoot, sourceRoot) as LearningNoteRow[];
+      const tokens = queryTokens(query);
+      return rows.map(rowToNote)
+        .map((note) => ({
+          note,
+          score: textScore(tokens, `${note.title} ${note.summary} ${note.rootCause ?? ""} ${note.resolution.join(" ")} ${note.lessons.join(" ")}`),
+        }))
+        .filter((item) => tokens.length === 0 || item.score > 0)
+        .sort((a, b) => b.score - a.score || b.note.updatedAt.localeCompare(a.note.updatedAt))
+        .slice(0, Math.max(1, Math.min(limit, 8)))
+        .map((item) => item.note);
+    } finally {
+      db.close();
+    }
+  }
+
   getNote(workspaceRoot: string, noteId: string): LearningNote {
     const db = openNotesDatabase(this.stateDir);
     try {

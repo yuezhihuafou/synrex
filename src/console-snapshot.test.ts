@@ -47,6 +47,11 @@ test("console uses existing database read-only and does not invent process statu
   assert.equal(snapshot.workflows[0]?.title, "Build");
   assert.equal(snapshot.diagnostics.requests[0]?.classification, "rev_http_completed");
   assert.equal(snapshot.service.release, "test-release");
+  assert.equal(snapshot.dataFreshness.sampledAt, snapshot.generatedAt);
+  assert.equal(snapshot.dataFreshness.nodes, "2026-10-20T00:02:00.000Z");
+  assert.ok(snapshot.dataFreshness.workflows && Number.isFinite(Date.parse(snapshot.dataFreshness.workflows)));
+  assert.equal(snapshot.dataFreshness.tasks, null, "task route without a verified local task is not source activity");
+  assert.ok(snapshot.dataFreshness.diagnostics, "recent diagnostic events retain their original timestamp");
   assert.equal(snapshot.service.diagnosticsBoundBytes, DIAGNOSTIC_FILE_LIMIT * 2);
   assert.equal(snapshot.activeTaskProcesses?.length ?? 0, snapshot.activeTaskUnits?.length ?? 0);
   assert.equal(snapshot.tasks.length, 0);
@@ -118,6 +123,9 @@ test("console exposes local task output time and PID only from a verified local 
   assert.equal(task.childPid,43210);
   assert.equal(task.lastActivityAt,lastActivity);
   assert.equal(task.lastUpdatedAt,now);
+  assert.equal(snapshot.dataFreshness.tasks,lastActivity,
+    "source freshness must use observed task activity rather than the snapshot collection time");
+  assert.notEqual(snapshot.dataFreshness.tasks,snapshot.dataFreshness.sampledAt);
 });
 
 test("console distinguishes historical detached dispatch receipts from verified success", async (t) => {

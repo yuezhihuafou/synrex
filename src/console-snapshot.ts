@@ -27,6 +27,15 @@ interface TaskRow {
 
 export interface ConsoleSnapshot {
   generatedAt: string;
+  /** Collection time is not evidence of recent source activity. */
+  dataFreshness: {
+    sampledAt: string;
+    nodes: string | null;
+    workflows: string | null;
+    tasks: string | null;
+    diagnostics: string | null;
+    runtime: string | null;
+  };
   service: { status: "online"; release: string; diagnosticsBoundBytes: number };
   nodes: Array<{
     id: string; alias: string; kind: string; health: string; os: string;
@@ -97,6 +106,10 @@ function asText(value: unknown, fallback = ""): string {
 }
 function strings(value: unknown, max = 8): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, max) : [];
+}
+function latestObservedAt(values: Array<string | undefined | null>): string | null {
+  return values.filter((value): value is string => Boolean(value) && Number.isFinite(Date.parse(value!)))
+    .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
 }
 function count(db: Database.Database, statement: string): number {
   return Number((db.prepare(statement).get() as { n: number }).n);
@@ -288,8 +301,18 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   const network = [...events].reverse().find(e => e.event === "network_sampled");
   const collector = [...events].reverse().find(e => e.event === "collector_sampled");
   const activeTaskUnits = readActiveTaskUnits();
+  const sampledAt = new Date().toISOString();
   return {
-    generatedAt: new Date().toISOString(),
+    generatedAt: sampledAt,
+    dataFreshness: {
+      sampledAt,
+      nodes: latestObservedAt(nodes.map((node) => node.lastSeenAt)),
+      workflows: latestObservedAt(workflows.map((workflow) => workflow.updatedAt)),
+      tasks: latestObservedAt(tasks.filter((task) => task.statusSource === "local_file")
+        .map((task) => task.lastActivityAt ?? task.lastUpdatedAt)),
+      diagnostics: latestObservedAt(events.map((event) => event.ts)),
+      runtime: runtime?.ts ?? null,
+    },
     service: { status: "online", release, diagnosticsBoundBytes: 2 * DIAGNOSTIC_FILE_LIMIT },
     nodes, workflows, tasks, memory, conversationSessions, activeTaskUnits,
     execution: { workflowCompleted, workflowBlocked, workflowActive, workflowCancelled,

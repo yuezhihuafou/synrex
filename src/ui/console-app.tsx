@@ -27,6 +27,8 @@ type UsageTotals = { requests:number; completed:number; toolExecutions:number; i
   trends:Array<{day:string;requests:number;toolExecutions:number;addedLines:number;removedLines:number}> };
 type Snapshot = {
   generatedAt: string;
+  dataFreshness?: {sampledAt:string;nodes:string|null;workflows:string|null;tasks:string|null;
+    diagnostics:string|null;runtime:string|null};
   snapshotStale?: boolean;
   service: { status: string; release: string };
   nodes: Array<{ id: string; alias: string; kind: string; health: string; os: string; lastSeenAt: string;
@@ -194,10 +196,17 @@ await getJson("/console/api/login",{ method:"POST",headers:{"content-type":"appl
 function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
   const online=d.nodes.filter(x=>x.health==="online").length;
   const active=d.workflows.filter(x=>x.status==="active").length;
+  const sources=[
+    ["节点心跳",d.dataFreshness?.nodes],
+    ["工作流检查点",d.dataFreshness?.workflows],
+    ["已核验本地任务",d.dataFreshness?.tasks],
+    ["MCP 诊断事件",d.dataFreshness?.diagnostics],
+    ["Core 资源采样",d.dataFreshness?.runtime],
+  ] as const;
   return <div className="stack">
     <div className="metrics">
       <Metric label="在线节点" value={`${online} / ${d.nodes.length}`} info="计算网络" symbol="⌘"/>
-      <Metric label="进行中工作流" value={active} info="持久检查点" symbol="☷"/>
+      <Metric label="标记 active 的工作流" value={active} info="持久检查点，不代表当前进程" symbol="☷"/>
       <Metric label="任务索引" value={d.tasks.length} info="最近 30 项" symbol=">_"/>
       <Metric label="待确认请求" value={d.diagnostics.requests.filter(x=>x.classification!=="rev_http_completed").length}
         info="诊断时间线" symbol="⌁"/>
@@ -214,6 +223,12 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
       {Object.entries(d.execution.failureCategories).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>
         <div key={reason} className="list-row"><strong className="grow">{reason}</strong><span>{count} 次</span></div>)}
     </Panel>}
+    <Panel title="数据源最近活动" hint="快照刷新不代表数据源有新事件；空闲不等于离线">
+      <p className="footnote">快照读取：{time(d.dataFreshness?.sampledAt??d.generatedAt)}。下列时间分别来自原始数据源，不是页面刷新时间。</p>
+      {sources.map(([label,lastAt])=><div className="list-row" key={label}>
+        <strong className="grow">{label}</strong><span>{lastAt?time(lastAt):"无可核验数据"}</span>
+      </div>)}
+    </Panel>
     <div className="columns">
       <Panel title="执行节点" hint="主机运行状态" extra={<button className="link" onClick={()=>go("nodes")}>查看全部 →</button>}>
         {d.nodes.map(n=><div className="list-row" key={n.id}><span className="round-symbol">⌘</span>
@@ -246,6 +261,7 @@ const current=d.workflows.find(x=>x.id===id)??d.workflows[0];
     </Panel>
     <Panel title="检查点" hint="只读 · 通过 GPT 对话继续执行">
       {current?<div className="checkpoint"><Badge value={current.status}/><h2>{current.title}</h2>
+        <p className="footnote">检查点最后更新：{time(current.updatedAt)}。工作流状态是历史保存值，并不证明任务当前仍在运行。</p>
         <p>{current.goal}</p><code className="id-block">{current.id}</code>
         <div className="checkpoint-block"><small>原始验收条件（需验证）</small><ol>{current.acceptanceCriteria.map((x,i)=><li key={i}>{x}</li>)}</ol></div>
         <div className="checkpoint-block"><small>当前阶段</small><strong>{current.phase||"—"}</strong><p>{current.summary}</p></div>

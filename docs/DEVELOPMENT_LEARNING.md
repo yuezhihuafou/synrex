@@ -7,6 +7,13 @@ This is project-scoped, owner-controlled memory inside the existing
 
 1. **Start:** call `project` with `action: "learn_recall"` and a focused
    `args.query` before revisiting a familiar bug.
+   When resuming a different, registered worktree of the *same* source
+   checkout, explicitly pass `args.includeProjectWorktrees: true` to include
+   up to six additional self-reported retrospectives from sibling worktrees
+   or the canonical source checkout. This is read-only and
+   never grants promotion or evidence authority in the current workspace.
+   Retained historical notes remain visible even after their original
+   worktree is pruned; the source checkout identity must still match.
 2. **During a substantial workflow:** use `workflow_checkpoint`. Its latest
    summary, completed steps, checks and remaining work automatically upsert
    one lightweight retrospective. Checks are **self-reported** here.
@@ -40,7 +47,9 @@ the full `project` tool.
   Meaningful root-cause analysis still requires the conversational host to
   invoke `learn_record`; it is not automatic LLM reflection.
 - Records are keyed by workspace root; worktrees have distinct learning
-  histories. Do not silently treat different worktrees as one project.
+  histories. Default recall/review remains limited to the current workspace;
+  the optional sibling view uses the registered `sourceRoot` equality, not
+  folder-name guessing, and does not import cross-worktree raw execution traces.
 - Promotion requires recent successful test/check evidence in the same
   workspace and an explicit matching command in the procedure.
 - Promotion never rewrites an existing nonidentical project Skill or

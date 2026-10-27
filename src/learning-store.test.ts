@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { openDatabase } from "./db/client.js";
 import { LearningStore } from "./learning-store.js";
+import { SqliteWorkspaceStore } from "./workspace-store.js";
 
 test("learning store recalls bounded traces and redacts common secrets", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "devspace-learning-"));
@@ -60,6 +61,57 @@ test("development retrospectives persist, update idempotently and stay workspace
   assert.equal(recall.notes.length, 1, "notes survive new LearningStore instances");
   assert.deepEqual(store.listNotes(join(root, "other")), []);
   assert.equal(store.review(workspaceRoot).notes.length, 1);
+});
+
+test("explicit sibling recall uses registered source checkout and never merges unrelated worktrees", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-learning-siblings-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const source = join(root, "synrex-repo");
+  const otherSource = join(root, "other-repo");
+  const current = join(root, "worktrees", "chat-a");
+  const related = join(root, "worktrees", "chat-b");
+  const unrelated = join(root, "worktrees", "unrelated");
+  const sessions = new SqliteWorkspaceStore(stateDir);
+  try {
+    sessions.createSession({ id: "ws_a", root: current, sourceRoot: source, mode: "worktree", managed: true });
+    sessions.createSession({ id: "ws_b", root: related, sourceRoot: source, mode: "worktree", managed: true });
+    sessions.createSession({ id: "ws_b_dup", root: related, sourceRoot: source, mode: "worktree", managed: true });
+    sessions.createSession({ id: "ws_foreign", root: unrelated, sourceRoot: otherSource, mode: "worktree", managed: true });
+  } finally { sessions.close(); }
+  const learning = new LearningStore(stateDir);
+  learning.recordNote({
+    workspaceRoot: current, taskKey: "own", source: "reflection", title: "Own check",
+    outcome: "active", summary: "Only in current chat",
+  });
+  learning.recordNote({
+    workspaceRoot: related, taskKey: "peer", source: "reflection", title: "Timeout recovery",
+    outcome: "completed", summary: "Investigated timeout and restored the long-running task",
+  });
+  learning.recordNote({
+    workspaceRoot: source, taskKey: "source", source: "reflection", title: "Source checkout rollback",
+    outcome: "completed", summary: "Verified rollback from an original project checkout",
+  });
+  learning.recordNote({
+    workspaceRoot: unrelated, taskKey: "foreign", source: "reflection", title: "Foreign timeout",
+    outcome: "completed", summary: "Different project has its own timeout",
+  });
+  assert.equal(learning.recall(current, "timeout").notes.length, 0,
+    "default learning recall must stay in the current workspace");
+  const relevant = learning.recallSiblingNotes(source, current, "timeout");
+  assert.deepEqual(relevant.map((note) => note.title), ["Timeout recovery"],
+    "a duplicate session must not duplicate a retrospective");
+  assert.deepEqual(learning.recallSiblingNotes(source, current, "unrelated"), [],
+    "other repositories cannot be queried through sibling recall");
+  assert.equal(learning.recallSiblingNotes(source, current, "").length, 2,
+    "notes from the canonical checkout and sibling worktrees are both available");
+  const retention = new SqliteWorkspaceStore(stateDir);
+  try {
+    const pruned = retention.markSessionPruned("ws_b");
+    assert.equal(pruned.isErr(), false);
+  } finally { retention.close(); }
+  assert.equal(learning.recallSiblingNotes(source, current, "timeout").length, 1,
+    "pruning a worktree must not erase its project learning history");
 });
 
 test("retrospective records cite local failures but cannot forge skill validation", async (t) => {

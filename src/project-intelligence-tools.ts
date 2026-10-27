@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { basename } from "node:path";
 import {
   ArchitectureModelManager,
   type ArchitectureContract,
@@ -103,6 +104,8 @@ export function registerProjectIntelligenceTools(
       const validationNote = optionalString(values, "validationNote", 2_000);
       const status = optionalCandidateStatus(values, "status");
       const detail = optionalBoolean(values, "detail");
+      // Opt-in only: a different worktree is not the current workspace.
+      const includeProjectWorktrees = optionalBoolean(values, "includeProjectWorktrees") ?? false;
       let result: string;
       let details: Record<string, unknown> = { action };
 
@@ -110,7 +113,7 @@ export function registerProjectIntelligenceTools(
         result = [
           "Architecture: arch_init, arch_brief(target), arch_affected(paths), arch_validate(semanticEvidence?), arch_refresh, arch_change_open(intent, paths, architectureChange?, rationale?), arch_annotate(changeId + target + summary/contracts/tags), arch_policy(changeId + acyclic/maxDepth/dependencyRules), arch_change_close(changeId), arch_render.",
           "Architecture intent is versioned in .devspace-architecture.json and protected: annotations and policies may change only inside an explicit architecture change with rationale. note contracts document intent; forbid_dependency/require_dependency contracts are executable.",
-          "Learning: learn_review (read-only task digest), learn_record(taskKey,title,summary,outcome?,rootCause?,resolution?,lessons?,checks?,nextSteps?,evidenceEpisodeIds?), learn_recall(query), learn_suggest, learn_distill(title?,trigger?,procedure?,noteId?,evidenceEpisodeIds?), learn_candidates(status?), learn_promote(candidateId,validationNote), learn_reject(candidateId), learn_stats. Workflow checkpoints automatically update self-reported notes. After a substantive coding task, review evidence and record root cause, fix, pitfalls and reusable lessons. Do not treat self-reported checks as verified; skill promotion requires a recent successful command explicitly named in the procedure.",
+          "Learning: learn_review(includeProjectWorktrees?), learn_record(taskKey,title,summary,outcome?,rootCause?,resolution?,lessons?,checks?,nextSteps?,evidenceEpisodeIds?), learn_recall(query,includeProjectWorktrees?), learn_suggest, learn_distill(title?,trigger?,procedure?,noteId?,evidenceEpisodeIds?), learn_candidates(status?), learn_promote(candidateId,validationNote), learn_reject(candidateId), learn_stats. Related worktree recall is explicit read-only self-reported context; it cannot act as verified evidence. Workflow checkpoints update self-reported notes. After a substantive task, review evidence and record root cause, fix and pitfalls. Skill promotion requires a recent successful command named in the procedure.",
           "Set detail=true to expand supported read results. Legacy args remains accepted for older hosts.",
         ].join("\n");
       } else if (projectAction === "arch_init") {
@@ -202,16 +205,28 @@ export function registerProjectIntelligenceTools(
         details = { ...details, ...rendered };
       } else if (projectAction === "learn_recall") {
         const recalled = learning.recall(workspace.root, query ?? "", 8);
-        result = formatRecall(recalled.episodes, recalled.candidates, recalled.notes);
+        const siblingNotes = includeProjectWorktrees
+          ? learning.recallSiblingNotes(workspace.sourceRoot ?? workspace.root, workspace.root, query ?? "", 6)
+          : [];
+        result = [formatRecall(recalled.episodes, recalled.candidates, recalled.notes),
+          ...(includeProjectWorktrees ? [
+            `Related registered worktrees: ${siblingNotes.length} matching retrospective(s); summaries are self-reported, not verified command receipts.`,
+            ...siblingNotes.map((note) =>
+              `- related ${basename(note.workspaceRoot)} note ${note.id} [${note.outcome}] ${note.title}: ${compactLine(note.summary, 180)}`),
+          ] : [])].join("\n");
         details = {
           ...details,
           episodeIds: recalled.episodes.map((item) => item.id),
           candidateIds: recalled.candidates.map((item) => item.id),
           noteIds: recalled.notes.map((item) => item.id),
-          ...(detail ? { detail: recalled } : {}),
+          ...(includeProjectWorktrees ? { relatedNoteIds: siblingNotes.map((item) => item.id) } : {}),
+          ...(detail ? { detail: { ...recalled, ...(includeProjectWorktrees ? { relatedNotes: siblingNotes } : {}) } } : {}),
         };
       } else if (projectAction === "learn_review") {
         const review = learning.review(workspace.root);
+        const siblingNotes = includeProjectWorktrees
+          ? learning.recallSiblingNotes(workspace.sourceRoot ?? workspace.root, workspace.root, "", 6)
+          : [];
         result = [
           `Recent retrospectives: ${review.notes.length}; failed execution episodes: ${review.failures.length}; repeatable verified checks: ${review.verifiedChecks.length}.`,
           ...review.notes.slice(0, 8).map((note) =>
@@ -220,10 +235,16 @@ export function registerProjectIntelligenceTools(
             `- failure ${ep.id} ${ep.tool} ${compactLine(ep.inputSummary, 90)} => ${compactLine(ep.outputSummary, 140)}`),
           ...review.verifiedChecks.map((item) =>
             `- check ${item.command}: ${item.occurrences} verified runs; episodes ${item.evidenceEpisodeIds.join(",")}`),
+          ...(includeProjectWorktrees ? [
+            `Related registered worktrees: ${siblingNotes.length} retrospective(s), read-only and unverified.`,
+            ...siblingNotes.map((note) =>
+              `- related ${basename(note.workspaceRoot)} note ${note.id} [${note.outcome}] ${note.title}: ${compactLine(note.summary, 160)}`),
+          ] : []),
           "Evidence is execution history, not an inferred root cause. Use learn_record to save verified insights; cite episode IDs where available.",
         ].join("\n");
         details = { ...details, noteCount: review.notes.length, failureCount: review.failures.length,
-          ...(detail ? { detail: review } : {}) };
+          ...(includeProjectWorktrees ? { relatedNoteIds: siblingNotes.map((note) => note.id) } : {}),
+          ...(detail ? { detail: { ...review, ...(includeProjectWorktrees ? { relatedNotes: siblingNotes } : {}) } } : {}) };
       } else if (projectAction === "learn_record") {
         if (!taskKey || !title || !summary) {
           throw new Error("project learn_record requires taskKey, title and summary.");
