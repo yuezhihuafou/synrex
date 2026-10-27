@@ -997,13 +997,22 @@ async function runShowChanges(args: string[]): Promise<void> {
   }
 
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const review = await readReviewRef(scope.workspaceRoot, reviewRef);
   if (json) {
     printJson(review);
     return;
   }
   console.log(review.patch || review.result);
+}
+
+function localAgentWorkspaceContext(config: ServerConfig) {
+  return resolveCliWorkspaceContext(
+    config.allowedRoots,
+    process.env,
+    process.cwd(),
+    { stateDir: config.stateDir, worktreeRoot: config.worktreeRoot },
+  );
 }
 
 async function runAgentsCommand(args: string[]): Promise<void> {
@@ -1055,7 +1064,7 @@ async function runAgentsCommand(args: string[]): Promise<void> {
 async function runAgentsContext(args: string[], json: boolean): Promise<void> {
   const [action, ...rest] = args;
   const config = loadConfig();
-  const workspace = resolveCliWorkspaceContext(config.allowedRoots);
+  const workspace = localAgentWorkspaceContext(config);
   const store = new LocalAgentContextPacks(config.stateDir, createOptionalProjectMemoryPort());
   if (action === "show" && rest.length === 1) {
     const pack = store.read(rest[0]!, workspace.workspaceRoot);
@@ -1081,7 +1090,7 @@ async function runAgentsContext(args: string[], json: boolean): Promise<void> {
 async function runAgentsTargets(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents targets [--json]");
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
   const providers = buildLocalAgentProviderStatuses(
     config.subagents,
@@ -1097,7 +1106,7 @@ async function runAgentsList(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents ls [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const result = await client.list(resolveCliWorkspaceContext(config.allowedRoots));
+  const result = await client.list(localAgentWorkspaceContext(config));
   const agents = presentAgentResult(result, json);
   if (!agents) return;
 
@@ -1120,7 +1129,7 @@ async function runAgentsList(args: string[], json: boolean): Promise<void> {
 async function runAgentsRun(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentRunArgs(args);
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   let target = parsed.target;
   if (target === "auto") {
     const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
@@ -1157,7 +1166,7 @@ async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentContinueArgs(args);
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const result = await client.continue(parsed.agentId, parsed.prompt, {
     model: parsed.model,
     effort: parsed.effort,
@@ -1183,7 +1192,7 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
 
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const initial = await client.get(id, scope);
   let record = presentAgentResult(initial, json);
   if (!record) return;
@@ -1216,7 +1225,7 @@ async function runAgentsEvents(args: string[], json: boolean): Promise<void> {
   const config = loadConfig();
   const client = createLocalAgentClient(config);
   const events = presentAgentResult(await client.events(
-    id, resolveCliWorkspaceContext(config.allowedRoots), Number(afterRaw ?? 0), 200,
+    id, localAgentWorkspaceContext(config), Number(afterRaw ?? 0), 200,
   ), json);
   if (!events) return;
   if (json) printJson(events);
@@ -1227,7 +1236,7 @@ async function runAgentsStats(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents stats [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const stats = presentAgentResult(await client.stats(resolveCliWorkspaceContext(config.allowedRoots)), json);
+  const stats = presentAgentResult(await client.stats(localAgentWorkspaceContext(config)), json);
   if (!stats) return;
   if (json) printJson(stats);
   else console.log(
@@ -1247,7 +1256,7 @@ async function runAgentsWatch(args: string[], json: boolean): Promise<void> {
   if (!id || extra.length > 0) throw new Error("Usage: devspace agents watch <id> [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   let afterSeq = 0;
   const deadline = Date.now() + 30 * 60_000;
   while (true) {

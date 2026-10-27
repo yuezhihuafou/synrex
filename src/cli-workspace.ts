@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
-import { assertAllowedPath } from "./roots.js";
+import { authorizeAgentWorkspaceRoot, type ManagedWorktreeAuthorization } from "./managed-worktree-authorization.js";
 
 export interface CliWorkspaceContext {
   workspaceId?: string;
@@ -13,6 +13,7 @@ export function resolveCliWorkspaceContext(
   allowedRoots: readonly string[],
   env: NodeJS.ProcessEnv = process.env,
   cwd = process.cwd(),
+  managedWorktrees?: ManagedWorktreeAuthorization,
 ): CliWorkspaceContext {
   const workspaceId = env.DEVSPACE_WORKSPACE_ID?.trim() || undefined;
   const injectedRoot = workspaceId ? env.DEVSPACE_WORKSPACE_ROOT?.trim() : undefined;
@@ -24,7 +25,12 @@ export function resolveCliWorkspaceContext(
 
   return {
     workspaceId,
-    workspaceRoot: assertAllowedPath(candidate, allowedRoots.map(canonicalizePath)),
+    workspaceRoot: authorizeAgentWorkspaceRoot({
+      workspaceRoot: candidate,
+      workspaceId,
+      allowedRoots: allowedRoots.map(canonicalizePath),
+      managedWorktrees,
+    }),
   };
 }
 

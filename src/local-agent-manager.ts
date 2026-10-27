@@ -42,7 +42,7 @@ import {
   LocalAgentEvidenceStore,
   type AgentGitObservation,
 } from "./local-agent-evidence.js";
-import { assertAllowedPath } from "./roots.js";
+import { authorizeAgentWorkspaceRoot, type ManagedWorktreeAuthorization } from "./managed-worktree-authorization.js";
 import {
   isSubagentProviderEnabled,
   type SubagentsConfig,
@@ -77,6 +77,7 @@ export interface LocalAgentManagerOptions {
   loadProfiles: (workspaceRoot: string) => Promise<LocalAgentProfile[]>;
   agentDir?: string;
   allowedRoots?: readonly string[];
+  managedWorktrees?: ManagedWorktreeAuthorization;
   logger?: LocalAgentManagerLogger;
   subagents: SubagentsConfig;
   evidenceStore?: LocalAgentEvidenceStore;
@@ -100,6 +101,7 @@ export class LocalAgentManager {
   private readonly loadProfiles: (workspaceRoot: string) => Promise<LocalAgentProfile[]>;
   private readonly agentDir?: string;
   private readonly allowedRoots?: readonly string[];
+  private readonly managedWorktrees?: ManagedWorktreeAuthorization;
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
   private readonly evidenceStore?: LocalAgentEvidenceStore;
@@ -115,6 +117,7 @@ export class LocalAgentManager {
     this.loadProfiles = options.loadProfiles;
     this.agentDir = options.agentDir;
     this.allowedRoots = options.allowedRoots;
+    this.managedWorktrees = options.managedWorktrees;
     this.logger = options.logger;
     this.subagents = options.subagents;
     this.evidenceStore = options.evidenceStore;
@@ -686,7 +689,12 @@ export class LocalAgentManager {
     const normalized = resolve(workspaceRoot);
     if (!workspaceId || !this.allowedRoots) return Result.ok(normalized);
     try {
-      return Result.ok(assertAllowedPath(normalized, [...this.allowedRoots]));
+      return Result.ok(authorizeAgentWorkspaceRoot({
+        workspaceRoot: normalized,
+        workspaceId,
+        allowedRoots: this.allowedRoots,
+        managedWorktrees: this.managedWorktrees,
+      }));
     } catch (cause) {
       return Result.err(new AgentScopeError({
         code: "WORKSPACE_NOT_ALLOWED",
