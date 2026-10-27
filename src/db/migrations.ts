@@ -6,6 +6,12 @@ interface Migration {
   up(sqlite: Database.Database): void;
 }
 
+interface AppliedMigration {
+  version: number;
+  name: string;
+  applied_at: string;
+}
+
 const migrations: Migration[] = [
   {
     version: 1,
@@ -74,36 +80,121 @@ export function migrateDatabase(sqlite: Database.Database): void {
       );
     `);
 
-    const appliedRows = sqlite
-      .prepare("select version, name from devspace_schema_migrations order by version")
-      .all() as Array<{ version: number; name: string }>;
-    const migrationsByVersion = new Map(migrations.map((migration) => [migration.version, migration]));
-    for (const row of appliedRows) {
-      const expected = migrationsByVersion.get(row.version);
-      if (!expected) {
-        throw new Error(
-          `Database migration history is incompatible: version ${row.version} (${JSON.stringify(row.name)}) is unknown to this build.`,
-        );
-      }
-      if (row.name !== expected.name) {
-        throw new Error(
-          `Database migration history is incompatible: version ${row.version} is recorded as ${JSON.stringify(row.name)}, but this build expects ${JSON.stringify(expected.name)}.`,
-        );
-      }
+    const appliedRows = readMigrationRows(sqlite, "devspace_schema_migrations");
+    if (usesLegacyWindowsLineage(appliedRows)) {
+      migrateLegacyWindowsLineage(sqlite, appliedRows);
+      return;
     }
-    const applied = new Set(appliedRows.map((row) => row.version));
-    const recordMigration = sqlite.prepare(
-      "insert into devspace_schema_migrations (version, name, applied_at) values (?, ?, ?)",
-    );
-
-    for (const migration of migrations) {
-      if (applied.has(migration.version)) continue;
-      migration.up(sqlite);
-      recordMigration.run(migration.version, migration.name, new Date().toISOString());
-    }
+    applyMigrationPlan(sqlite, "devspace_schema_migrations", migrations, appliedRows);
   });
 
   migrate.immediate();
+}
+
+function usesLegacyWindowsLineage(appliedRows: AppliedMigration[]): boolean {
+  const byVersion = new Map(appliedRows.map((row) => [row.version, row]));
+  const version8 = byVersion.get(8);
+  const version9 = byVersion.get(9);
+  return version8?.name === "local-agent-turns" || version9?.name === "workflow-sessions";
+}
+
+function migrateLegacyWindowsLineage(
+  sqlite: Database.Database,
+  appliedRows: AppliedMigration[],
+): void {
+  const byVersion = new Map(appliedRows.map((row) => [row.version, row]));
+  const version8 = byVersion.get(8);
+  const version9 = byVersion.get(9);
+  const hasLegacyVersion8 = version8?.name === "local-agent-turns";
+  const hasLegacyVersion9 = version9?.name === "workflow-sessions";
+
+  if (!hasLegacyVersion8 || (version9 && !hasLegacyVersion9)) {
+    throw new Error(
+      "Database migration history is incompatible: mixed legacy/current migration lineage at versions 8-9.",
+    );
+  }
+  const laterRows = appliedRows.filter((row) => row.version >= 10);
+  if (laterRows.length > 0) {
+    throw new Error(
+      "Database migration history is incompatible: legacy versions 8-9 cannot be combined with migrations version 10 or newer.",
+    );
+  }
+
+  const baseMigrations = migrations.filter((migration) => migration.version <= 7);
+  const baseRows = appliedRows.filter((row) => row.version <= 7);
+  applyMigrationPlan(sqlite, "devspace_schema_migrations", baseMigrations, baseRows);
+
+  assertLegacyMigrationTable(sqlite, "local_agent_turns", 8, "local-agent-turns");
+  if (hasLegacyVersion9) {
+    assertLegacyMigrationTable(sqlite, "workflow_sessions", 9, "workflow-sessions");
+  }
+
+  sqlite.exec(`
+    create table if not exists synrex_schema_migrations (
+      version integer primary key,
+      name text not null,
+      applied_at text not null
+    );
+  `);
+  const synrexMigrations = migrations.filter((migration) => migration.version >= 8);
+  const synrexRows = readMigrationRows(sqlite, "synrex_schema_migrations");
+  applyMigrationPlan(sqlite, "synrex_schema_migrations", synrexMigrations, synrexRows);
+}
+
+function readMigrationRows(
+  sqlite: Database.Database,
+  table: "devspace_schema_migrations" | "synrex_schema_migrations",
+): AppliedMigration[] {
+  return sqlite
+    .prepare(`select version, name, applied_at from ${table} order by version`)
+    .all() as AppliedMigration[];
+}
+
+function applyMigrationPlan(
+  sqlite: Database.Database,
+  table: "devspace_schema_migrations" | "synrex_schema_migrations",
+  plan: Migration[],
+  appliedRows: AppliedMigration[],
+): void {
+  const migrationsByVersion = new Map(plan.map((migration) => [migration.version, migration]));
+  for (const row of appliedRows) {
+    const expected = migrationsByVersion.get(row.version);
+    if (!expected) {
+      throw new Error(
+        `Database migration history is incompatible: version ${row.version} (${JSON.stringify(row.name)}) is unknown to this build.`,
+      );
+    }
+    if (row.name !== expected.name) {
+      throw new Error(
+        `Database migration history is incompatible: version ${row.version} is recorded as ${JSON.stringify(row.name)}, but this build expects ${JSON.stringify(expected.name)}.`,
+      );
+    }
+  }
+
+  const applied = new Set(appliedRows.map((row) => row.version));
+  const recordMigration = sqlite.prepare(
+    `insert into ${table} (version, name, applied_at) values (?, ?, ?)`,
+  );
+  for (const migration of plan) {
+    if (applied.has(migration.version)) continue;
+    migration.up(sqlite);
+    recordMigration.run(migration.version, migration.name, new Date().toISOString());
+  }
+}
+
+function assertLegacyMigrationTable(
+  sqlite: Database.Database,
+  table: string,
+  version: number,
+  name: string,
+): void {
+  const exists = sqlite
+    .prepare("select 1 from sqlite_master where type = 'table' and name = ?")
+    .get(table);
+  if (exists) return;
+  throw new Error(
+    `Database migration history is incompatible: legacy version ${version} (${JSON.stringify(name)}) is recorded, but table ${JSON.stringify(table)} is missing.`,
+  );
 }
 
 function migrateWorkspaceState(sqlite: Database.Database): void {
