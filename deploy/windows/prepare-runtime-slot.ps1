@@ -20,6 +20,15 @@ $currentActive = if (Test-Path -LiteralPath $activePointer -PathType Leaf) {
 } else {
     ''
 }
+$buildFreeSpaceReserveBytes = 512MB
+
+function Get-DirectoryBytes([string]$path) {
+    if (!(Test-Path -LiteralPath $path -PathType Container)) { return [long]0 }
+    $measurement = Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction Stop |
+        Measure-Object -Property Length -Sum
+    if ($null -eq $measurement.Sum) { return [long]0 }
+    return [long]$measurement.Sum
+}
 
 if ($SlotName -ne [IO.Path]::GetFileName($SlotName) -or -not $SlotName.StartsWith('synrex-windows-')) {
     throw "Invalid Synrex Windows slot name: $SlotName"
@@ -73,6 +82,15 @@ if ($LASTEXITCODE -ne 0 -or $nodeVersion -ne 'v22.22.3') {
 
 New-Item -ItemType Directory -Force $slots | Out-Null
 Remove-Item -LiteralPath $preparing -Recurse -Force -ErrorAction SilentlyContinue
+$sourceSlotRoot = Split-Path -Parent $nodeSource
+$sourceSlotBytes = Get-DirectoryBytes $sourceSlotRoot
+$drive = New-Object IO.DriveInfo([IO.Path]::GetPathRoot($root))
+$minimumFree = $sourceSlotBytes + $buildFreeSpaceReserveBytes
+if ($drive.AvailableFreeSpace -lt $minimumFree) {
+    throw ('Insufficient disk space to prepare a new Synrex Windows runtime slot. ' +
+        'free=' + $drive.AvailableFreeSpace + ' sourceSlotBytes=' + $sourceSlotBytes +
+        ' reserve=' + $buildFreeSpaceReserveBytes + '. Prune superseded slots or other disposable files before retrying.')
+}
 New-Item -ItemType Directory -Force $preparing | Out-Null
 
 try {

@@ -26,6 +26,10 @@ For a normal tested package promotion, prefer the single deployment entrypoint:
 It prepares a new immutable slot, activates it through the rollback-safe Group
 supervisor, installs the source-owned Synrex Console launcher/desktop shell, and
 runs the full Group readiness check. It never replaces the active slot in place.
+Slot preparation also performs a free-space preflight before copying Node.js or
+installing dependencies. The minimum is the current source slot's measured size
+plus 512 MiB build reserve, so a low-disk node fails before creating another
+half-built runtime. Superseded slots are never deleted automatically.
 
 The installed manual Console command is:
 

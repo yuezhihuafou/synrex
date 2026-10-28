@@ -13,6 +13,7 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   const installer = await readFile(resolve("deploy/windows/install-console-desktop.ps1"), "utf8");
   const launcher = await readFile(resolve("deploy/windows/start-synrex-console.ps1"), "utf8");
   const deploy = await readFile(resolve("deploy/windows/deploy-group.ps1"), "utf8");
+  const prepare = await readFile(resolve("deploy/windows/prepare-runtime-slot.ps1"), "utf8");
   const service = await readFile(resolve("deploy/windows/group-service.ps1"), "utf8");
   const desktop = await readFile(resolve("deploy/windows/desktop/main.cjs"), "utf8");
   assert.match(installer, /start-synrex-console\.ps1/);
@@ -26,6 +27,10 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(deploy, /prepare-runtime-slot\.ps1/);
   assert.match(deploy, /-Action Activate/);
   assert.match(deploy, /install-console-desktop\.ps1/);
+  assert.match(prepare, /buildFreeSpaceReserveBytes = 512MB/);
+  assert.match(prepare, /sourceSlotBytes = Get-DirectoryBytes/);
+  assert.match(prepare, /Insufficient disk space to prepare a new Synrex Windows runtime slot/);
+  assert.match(prepare, /Prune superseded slots or other disposable files before retrying/);
   assert.match(service, /Assert-StateBackupCapacity/);
   assert.match(service, /backupFreeSpaceReserveBytes = 256MB/);
   assert.match(service, /stateDirectoriesExcludedFromBackup = @\('compact-runs'\)/);
