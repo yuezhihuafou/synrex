@@ -40,34 +40,61 @@ if ((Get-Status 'http://127.0.0.1:17677/group/healthz') -ne 200) {
 }
 
 $controlUrl = 'http://127.0.0.1:17678'
-function Test-ControlReady {
+function Get-ControlState {
     try {
         $status = Invoke-WebRequest -UseBasicParsing -Uri ($controlUrl + '/api/status') -TimeoutSec 2
         $body = $status.Content | ConvertFrom-Json
         if ($status.StatusCode -ne 200 -or $body.schema_version -ne 2 -or $body.security.loopback_console_only -ne $true) {
-            return $false
+            return 'foreign'
+        }
+        if ([string]$body.instance -ne 'group') {
+            return 'foreign'
         }
         $configuredPackage = [IO.Path]::GetFullPath([string]$body.runtime.configured.package_root)
         $runtimeRoot = ([IO.Path]::GetFullPath((Join-Path $root 'runtime'))).TrimEnd('\') + '\'
-        return $configuredPackage.StartsWith($runtimeRoot, [StringComparison]::OrdinalIgnoreCase)
-    } catch { return $false }
+        if (!$configuredPackage.StartsWith($runtimeRoot, [StringComparison]::OrdinalIgnoreCase)) {
+            return 'foreign'
+        }
+        return 'ready'
+    } catch { return 'unavailable' }
 }
 
-if (!(Test-ControlReady)) {
-    if (Get-NetTCPConnection -State Listen -LocalPort 17678 -ErrorAction SilentlyContinue) {
-        throw 'Port 17678 is occupied by a Control instance that does not belong to this PlatformRoot.'
+$controlState = Get-ControlState
+if ($controlState -ne 'ready') {
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 17678 -ErrorAction SilentlyContinue
+    if ($listener) {
+        # A healthy local Control can briefly stop answering while its runtime
+        # view refreshes after slot activation. Do not misclassify that normal
+        # transition as a foreign port owner after a single HTTP timeout.
+        $deadline = [DateTime]::UtcNow.AddSeconds(8)
+        do {
+            if ($controlState -eq 'foreign') {
+                throw 'Port 17678 belongs to a Control instance that does not match this Group PlatformRoot.'
+            }
+            Start-Sleep -Milliseconds 400
+            $controlState = Get-ControlState
+        } while ($controlState -ne 'ready' -and [DateTime]::UtcNow -lt $deadline)
+        if ($controlState -ne 'ready') {
+            throw 'Existing Windows Control on 17678 did not become ready for this Group PlatformRoot.'
+        }
     }
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-        '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
-        '-File', ('"' + $startControl + '"'), '-PlatformRoot', ('"' + $root + '"'),
-        '-Port', '17678', '-Instance', 'group'
-    ) -WindowStyle Hidden | Out-Null
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    do {
-        if (Test-ControlReady) { break }
-        Start-Sleep -Milliseconds 500
-    } while ([DateTime]::UtcNow -lt $deadline)
-    if (!(Test-ControlReady)) { throw 'Windows Control did not become ready on 127.0.0.1:17678.' }
+    if ($controlState -ne 'ready') {
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @(
+            '-NoProfile', '-NonInteractive', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass',
+            '-File', ('"' + $startControl + '"'), '-PlatformRoot', ('"' + $root + '"'),
+            '-Port', '17678', '-Instance', 'group'
+        ) -WindowStyle Hidden | Out-Null
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            $controlState = Get-ControlState
+            if ($controlState -eq 'ready') { break }
+            if ($controlState -eq 'foreign') {
+                throw 'Windows Control started on 17678 with the wrong Group identity.'
+            }
+            Start-Sleep -Milliseconds 500
+        } while ([DateTime]::UtcNow -lt $deadline)
+        if ($controlState -ne 'ready') { throw 'Windows Control did not become ready on 127.0.0.1:17678.' }
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $profile | Out-Null
