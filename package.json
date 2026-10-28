@@ -72,6 +72,7 @@
   "author": "yuezhihuafou",
   "license": "MIT",
   "dependencies": {
+    "js-tiktoken": "^1.0.21",
     "@agentclientprotocol/sdk": "^1.1.0",
     "@anthropic-ai/claude-agent-sdk": "0.3.200",
     "@anthropic-ai/sandbox-runtime": "0.0.71",

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { analyzeBrowserTransport } from "../browser-transport-analysis.js";
 import { LegacyDiagnostics } from "./console-legacy-diagnostics.js";
@@ -35,6 +35,7 @@ type UsageTotals = { requests:number; completed:number; toolExecutions:number; i
   trends:Array<{day:string;requests:number;toolExecutions:number;addedLines:number;removedLines:number}> };
 type Snapshot = {
   generatedAt: string;
+  sourceHealth?:{available:boolean;unavailable:string[]};
   dataFreshness?: {sampledAt:string;nodes:string|null;workflows:string|null;tasks:string|null;
     diagnostics:string|null;runtime:string|null};
   snapshotStale?: boolean;
@@ -43,7 +44,9 @@ type Snapshot = {
     contract: { matching: number; missing: number; incompatible: number; total: number }; version: string | null }>;
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; checks:string[]; acceptanceCriteria:string[]; updatedAt: string }>;
-  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;
+    toolCalls?:number;inputTokens?:number|null;outputTokens?:number|null;measuredInputs?:number;measuredOutputs?:number;
+    requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   delegation?: DelegationMetrics;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?:number; exitCode?:number|null; statusSource:string }>;
   activeTaskUnits?: string[] | null;
@@ -61,7 +64,13 @@ type Snapshot = {
     latency:{completed:number;medianMs:number|null;p95Ms:number|null;maximumMs:number|null};
     lifecycle:{httpCompleted:number;closedEarly:number;handlerFailed:number;toolCompletedWithoutHttp:number;unknown:number};
     transfer:{observedInputBytes:number;observedOutputBytes:number;approximateInputTokens:number|null;approximateOutputTokens:number|null};
-    capacity?:{inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null} };
+    capacity?:{inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null};
+    recentTraffic?:{windowSeconds:60;inputBytesPerSecond:number|null;outputBytesPerSecond:number|null;
+      measuredResponses:number;lastObservedAt:string|null};
+    tokens?:{encoding:string;windowSeconds:number;inputTotal:number|null;outputTotal:number|null;
+      measuredInputs:number;measuredOutputs:number;outputTokensPerSecond:number|null;
+      toolCallsPerMinute:number|null;averageLatencyMs:number|null;lastObservedAt:string|null;
+      trend:Array<{minute:string;outputTokens:number;measuredOutputs:number}>} };
     requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
     conversationTitle?:string; conversationId?:string; runId?:string;
     classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
@@ -122,6 +131,52 @@ function Metric({ label, value, info, symbol }: { label:string; value:string|num
 }
 function Blank({ children }: { children:ReactNode }) {
   return <div className="blank"><span>◌</span><p>{children}</p></div>;
+}
+function RexPerformance({d}:{d:Snapshot}) {
+  const t=d.diagnostics.observability?.tokens;
+  const total=t&&(t.inputTotal!==null||t.outputTotal!==null)
+    ?(t.inputTotal??0)+(t.outputTotal??0):null;
+  const trend=t?.trend??[];
+  const hasTrend=trend.some(b=>b.measuredOutputs>0);
+  const maximum=Math.max(1,...trend.map(b=>b.outputTokens));
+  const points=trend.map((b,i)=>`${trend.length===1?0:i*600/(trend.length-1)},${110-100*b.outputTokens/maximum}`).join(" ");
+  return <Panel title="Rex Performance" hint="仅计算真实经过 Rex 的工具参数及文本结果 · 不等于 GPT 内部推理速度">
+    <div className="metrics performance-metrics">
+      <Metric label="工具输出吞吐" symbol="↑" value={t?.outputTokensPerSecond==null?"未测量":`${t.outputTokensPerSecond} Token/s`}
+        info="最近 60 秒已完成工具结果 ÷ 60"/>
+      <Metric label="可观测累计 Token" symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
+        info={`当前诊断窗口 · 输入 ${t?.measuredInputs??0} / 输出 ${t?.measuredOutputs??0} 次已计量`}/>
+      <Metric label="工具调用速率" symbol="⌘" value={t?.toolCallsPerMinute==null?"未知":`${t.toolCallsPerMinute} 次/min`}
+        info="最近 60 秒观察到的工具启动"/>
+      <Metric label="平均调用延迟" symbol="◷" value={t?.averageLatencyMs==null?"未测量":`${t.averageLatencyMs} ms`}
+        info="最近 60 秒有完整记录的调用"/>
+    </div>
+    <div className="performance-chart">
+      <p className="footnote">工具输出趋势 · 最近 10 分钟（每分钟已计量 Token）</p>
+      {hasTrend?<svg role="img" aria-label="最近十分钟工具输出 Token 趋势"
+        viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:125}}>
+        <line x1="0" y1="110" x2="600" y2="110" stroke="currentColor" opacity="0.2"/>
+        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
+      </svg>:<Blank>最近 10 分钟暂无可计量的文本输出。</Blank>}
+      <p className="footnote">编码器 {t?.encoding??"尚未接入"}；按完成时间统计工具结果，非实时生成速度。仅计入可读取文本，超过 256 KiB、非文本及旧版日志不按字节推算。{t?.lastObservedAt?` 最近 MCP 活动 ${time(t.lastObservedAt)}。`:""}</p>
+    </div>
+  </Panel>;
+}
+function SessionTokenUsage({d}:{d:Snapshot}) {
+  return <Panel title="会话 Token 与调用量" hint="只按有明确 conversationId 的 MCP 请求归类；累计范围限于当前诊断窗口">
+    {d.conversationSessions.length?<div className="table-scroll"><table>
+      <thead><tr><th>会话</th><th>工具调用</th><th>输入 Token</th><th>输出 Token</th><th>计量覆盖</th><th>最近活动</th></tr></thead>
+      <tbody>{d.conversationSessions.slice(0,20).map(s=><tr key={s.id}>
+        <td title={s.id}>{s.title===s.id?s.id.slice(0,16)+"…":s.title}</td>
+        <td>{s.toolCalls??"未知"}</td>
+        <td>{s.inputTokens==null?"未测量":s.inputTokens.toLocaleString("zh-CN")}</td>
+        <td>{s.outputTokens==null?"未测量":s.outputTokens.toLocaleString("zh-CN")}</td>
+        <td>{s.measuredInputs??0} / {s.measuredOutputs??0} 次输入/输出</td>
+        <td>{time(s.lastAt)}</td>
+      </tr>)}</tbody>
+    </table></div>:<Blank>暂无可明确关联到会话的请求；不按时间猜测会话归属。</Blank>}
+    <p className="footnote">上述为 o200k_base 工具内容 Token；不包含 GPT 的隐藏上下文、推理 Token，也不保证覆盖已滚动清理的日志。</p>
+  </Panel>;
 }
 function UsagePage(){
   const [data,setData]=useState<Usage|null>(null);
@@ -214,6 +269,7 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
     ["Core 资源采样",d.dataFreshness?.runtime],
   ] as const;
   return <div className="stack">
+    <RexPerformance d={d}/>
     <div className="metrics">
       <Metric label="在线节点" value={`${online} / ${d.nodes.length}`} info="计算网络" symbol="⌘"/>
       <Metric label="标记 active 的工作流" value={active} info="持久检查点，不代表当前进程" symbol="☷"/>
@@ -582,12 +638,24 @@ function Resources({d}:{d:Snapshot}) {
     .sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,30);
   const network=[...latest.values()].filter(e=>e.name.startsWith("system.network"))
     .sort((a,b)=>a.name.localeCompare(b.name)).slice(0,18);
+  const traffic=d.diagnostics.observability?.recentTraffic;
+  const transferRate=(n:number|null|undefined)=>n==null?"未知":n>=1048576
+    ?(n/1048576).toFixed(2)+" MiB/s":n>=1024?(n/1024).toFixed(1)+" KiB/s":n+" B/s";
 const tunnelFailures=d.diagnostics.events.filter(e=>e.event==="tunnel_auth_failed"||e.event==="tunnel_disconnected");
   return <div className="stack">
     <div className="notice"><strong>采集范围：可控主机与进程</strong><p>
 Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取（仅尾部窗口）":"尚无本地归档数据"}。
       gateway 元数据：{d.observability.peerSync.gateway==="current"?"最近同步":d.observability.peerSync.gateway==="stale"?"已过期":"尚无同步"}。
       网络计数器不能替代单次 MCP 请求 RTT；缺失数据显示“未知”。</p></div>
+    <Panel title="实际观测的 MCP 流量速率" hint="最近 60 秒 HTTP 请求/响应正文的字节数 ÷ 60 秒，不是模型 Token/s，也不是物理网卡带宽">
+      <div className="metrics">
+        <Metric symbol="↓" label="请求输入速率" value={transferRate(traffic?.inputBytesPerSecond)} info="本机已观测请求正文"/>
+        <Metric symbol="↑" label="响应输出速率" value={transferRate(traffic?.outputBytesPerSecond)} info="本机已观测响应正文"/>
+        <Metric symbol="⌁" label="有字节记录的响应" value={traffic?.measuredResponses??"未知"} info="最近 60 秒样本数"/>
+        <Metric symbol="◷" label="流量观测时间" value={time(traffic?.lastObservedAt??undefined)} info="源已停止上报时速率显示未知"/>
+      </div>
+      <p className="footnote">该速率为服务端实际记录到的 MCP HTTP 有效载荷平均吞吐，不包含 TCP/TLS 开销。不能推导 GPT 每秒生成 Token 或 GPU 生成速度。空闲期间的 0 B/s 仅表示观测窗口内无对应字节；来源过期时不填零。</p>
+    </Panel>
     <label>节点 <select className="filter" value={host} onChange={e=>setHost(e.target.value)}>
       <option value="swy1">swy1</option><option value="gateway">gateway（近一分钟元数据）</option>
     </select></label>
@@ -670,6 +738,7 @@ function Usage({d}:{d:Snapshot}) {
     link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
   return <div className="stack">
+    <SessionTokenUsage d={d}/>
     <Panel title="用量区间" hint="只读 · 已留存的 MCP 诊断和 Git 审阅记录；时间窗可能不完整"
       extra={<div className="usage-actions"><div className="usage-range" role="group" aria-label="统计周期">
         {(["24h","7d","30d"] as const).map(p=><button key={p} type="button" className={period===p?"selected":""}
@@ -761,18 +830,34 @@ function App() {
   const [clock,setClock]=useState(Date.now());
   const [clockOffsetMs,setClockOffsetMs]=useState<number|null>(null);
   const [clockUncertaintyMs,setClockUncertaintyMs]=useState<number|null>(null);
-  const refresh=useCallback(async()=>{
+  const inflight=useRef<AbortController|null>(null);
+  const refresh=useCallback(async(force=false)=>{
+    if(inflight.current){
+      if(!force)return; // Auto-refresh never creates concurrent pending requests.
+      inflight.current.abort(); // Manual retry supersedes a stalled request.
+    }
+    const controller=new AbortController();
+    inflight.current=controller;
+    const timeout=window.setTimeout(()=>controller.abort(),8000);
     setLoading(true);
-    try { const response=await getJson<Snapshot>("/console/api/snapshot");
-      setData(response);setAuth(true);setError(""); }
-    catch(e) { if(e instanceof Error&&e.message==="AUTH_REQUIRED")setAuth(false);
-      else setError("读取系统状态失败，请手动刷新。"); }
-    finally {setLoading(false);}
+    try { const response=await getJson<Snapshot>("/console/api/snapshot",{signal:controller.signal});
+      if(inflight.current===controller){setData(response);setAuth(true);setError("");} }
+    catch(e) { if(inflight.current===controller){
+      if(e instanceof Error&&e.message==="AUTH_REQUIRED")setAuth(false);
+      else {setAuth(true);setError(controller.signal.aborted
+        ?"快照请求超时（8 秒），仍显示上次成功的数据。":"快照服务暂不可用，仍显示上次成功的数据。");}
+    }}
+    finally {window.clearTimeout(timeout);if(inflight.current===controller){inflight.current=null;setLoading(false);}}
   },[]);
   useEffect(()=>{void refresh();},[refresh]);
   useEffect(()=>{if(!auth) return; const timer=window.setInterval(()=>{
     if(!document.hidden)void refresh();
-  },10000);return ()=>window.clearInterval(timer);},[auth,refresh]);
+  },10000);
+    const onVisible=()=>{if(!document.hidden)void refresh(true);};
+    document.addEventListener("visibilitychange",onVisible);
+    return ()=>{window.clearInterval(timer);document.removeEventListener("visibilitychange",onVisible);};
+  },[auth,refresh]);
+  useEffect(()=>()=>{inflight.current?.abort();inflight.current=null;},[]);
   useEffect(()=>{const timer=window.setInterval(()=>setClock(Date.now()),5000);
     return ()=>window.clearInterval(timer);},[]);
   useEffect(()=>{
@@ -801,7 +886,7 @@ try{
   if(!auth) return <Login done={()=>void refresh()}/>;
   const meta=menus.find(x=>x.id===view)!;
   const ageMs=clock-Date.parse(data?.generatedAt??"");
-  const stale=Boolean(data?.snapshotStale)||!Number.isFinite(ageMs)||ageMs>45000;
+  const stale=!data||Boolean(data.snapshotStale)||data.sourceHealth?.available===false||!Number.isFinite(ageMs)||ageMs>45000||Boolean(error);
   return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">S</div>
 <div><strong>SYNREX<span>.</span></strong><small>CONTROL PLANE</small></div></div>
     <p className="sidebar-label">WORKSPACE</p><nav aria-label="Synrex 管理导航">
@@ -811,13 +896,16 @@ try{
     <div className="sidebar-bottom"><div className="owner"><span className="round-symbol">♙</span><div><strong>Owner Access</strong><small>只读控制台</small></div></div>
       <button onClick={()=>void logout()}>退出登录 ↗</button></div>
   </aside><main className="main"><header className="topbar"><span>Synrex Console <b>/</b> <strong>{meta.title}</strong></span>
-    <div><span className="online-dot"/> {stale?"数据过期":"数据新鲜"} <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
+    <div><span className={`online-dot ${stale?"offline-dot":""}`}/> {stale?"数据不可确认":"快照正常"} <button className="refresh" onClick={()=>void refresh(true)}>{loading?"↻ 重新请求":"↻ 刷新"}</button></div>
   </header><div className="content"><div className="heading"><p className="eyebrow">SYNREX OPERATIONS / {view.toUpperCase()}</p>
     <h1>{view==="overview"?"开发环境，一目了然。":meta.title}</h1>
     <div className="heading-line"><p>{view==="overview"?"主机、执行、工作流与诊断，一站式掌控。":meta.caption+" · 显示已有的真实数据"}</p>
       <span>更新于 {time(data?.generatedAt)} · {Number.isFinite(ageMs)?Math.max(0,Math.round(ageMs/1000))+" 秒前":"时间未知"}</span></div></div>
-    {stale&&<div className="error-banner" role="alert">Console 快照已过期。当前为历史数据，不代表实时进程状态；请检查独立快照服务。</div>}
-    {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh()}>重试</button></div>}
+    {stale&&<div className="error-banner" role="alert">Console 数据不可确认：当前为历史数据或采集失败，不代表实时进程状态。请检查独立快照服务。</div>}
+    {data?.sourceHealth?.available===false&&<div className="error-banner" role="alert">
+      以下数据源未能读取，受影响的空列表和 0 不代表实际为零：{data.sourceHealth.unavailable.join("、")}。
+    </div>}
+    {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh(true)}>重试</button></div>}
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
       {view==="usage"&&<Usage d={data}/>}
       {view==="workflows"&&<Workflows d={data}/>}

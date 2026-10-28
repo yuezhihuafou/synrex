@@ -28,6 +28,8 @@ interface TaskRow {
 
 export interface ConsoleSnapshot {
   generatedAt: string;
+  /** An unavailable SQLite source must never be presented as a verified zero. */
+  sourceHealth: { available: boolean; unavailable: string[] };
   /** Collection time is not evidence of recent source activity. */
   dataFreshness: {
     sampledAt: string;
@@ -48,7 +50,9 @@ export interface ConsoleSnapshot {
     revision: number; phase: string; summary: string; nextSteps: string[]; blockers: string[];
     taskIds: string[]; checks: string[]; acceptanceCriteria: string[]; updatedAt: string;
   }>;
-  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;
+    toolCalls:number;inputTokens:number|null;outputTokens:number|null;measuredInputs:number;measuredOutputs:number;
+    requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?: number; exitCode?: number | null; statusSource: "local_file" | "unavailable" }>;
   activeTaskUnits: string[] | null;
   activeTaskProcesses: Array<{ unit: string; pid: number | null; memoryBytes: number | null; cpuTimeMs: number | null }> | null;
@@ -91,10 +95,19 @@ export interface ConsoleSnapshot {
   };
 }
 
-function readOnly<T>(file: string, fallback: T, query: (db: Database.Database) => T): T {
-  if (!existsSync(file)) return fallback;
-  const db = new Database(file, { readonly: true, fileMustExist: true });
-  try { return query(db); } finally { db.close(); }
+function readOnly<T>(file: string, fallback: T, query: (db: Database.Database) => T, unavailable: string[]): T {
+  const name = path.basename(file);
+  if (!existsSync(file)) { unavailable.push(`${name}:missing`); return fallback; }
+  let db: Database.Database | undefined;
+  try {
+    db = new Database(file, { readonly: true, fileMustExist: true });
+    return query(db);
+  } catch {
+    // SQLite may fail transiently during a WAL/checkpoint or disk I/O error.
+    // Fail the individual data source, not the entire out-of-process snapshot.
+    unavailable.push(`${name}:read_failed`);
+    return fallback;
+  } finally { try { db?.close(); } catch { unavailable.push(`${name}:close_failed`); } }
 }
 
 function parseObject(text: string): Record<string, unknown> {
@@ -182,6 +195,7 @@ function readActiveTaskProcesses(units: string[] | null): ConsoleSnapshot["activ
 export function readConsoleSnapshot(stateDir: string, release: string): ConsoleSnapshot {
   const mainDb = path.join(stateDir, "devspace.sqlite");
   const workflowDb = path.join(stateDir, "coding-workflows.sqlite");
+  const unavailable: string[] = [];
   const { nodes, tasks, memory, usageEpisodes, usageEpisodesCapped, storedUsage } = readOnly(mainDb, {
     nodes: [] as ConsoleSnapshot["nodes"], tasks: [] as ConsoleSnapshot["tasks"],
     memory: { episodes: 0, successful: 0, notes: 0, candidates: 0, promoted: 0 },
@@ -235,7 +249,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       })(),
       storedUsage: readStoredUsage(db),
     };
-  });
+  }, unavailable);
   const workflows = readOnly(workflowDb, [] as ConsoleSnapshot["workflows"], (db) =>
     (db.prepare("select workflow_id, workspace_root, title, goal, status, revision, checkpoint_json, acceptance_json, updated_at from coding_workflows order by updated_at desc limit 40").all() as WorkflowRow[])
       .map((row) => {
@@ -250,8 +264,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
           acceptanceCriteria: strings(JSON.parse(row.acceptance_json), 12),
           updatedAt: row.updated_at,
         };
-      }),
-  );
+      }), unavailable);
   const archive = readOtelFileTail(stateDir);
   const peer = readPeerSnapshot(stateDir);
   const recent = new DiagnosticTrace(stateDir).read({ minutes: 24 * 60, limit: 2000 });
@@ -268,6 +281,12 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   }));
   const allEvents = new DiagnosticTrace(stateDir).read({ minutes: 30 * 24 * 60, limit: 20000 });
   const byConversation = new Map<string, typeof requests>();
+  const eventsByRequest = new Map<string, typeof events>();
+  for(const event of events){
+    const id=event.traceId??event.requestId;
+    if(!id)continue;
+    const group=eventsByRequest.get(id)??[];group.push(event);eventsByRequest.set(id,group);
+  }
   for (const request of requests) {
     if (!request.conversationId) continue;
     const existing = byConversation.get(request.conversationId) ?? [];
@@ -278,7 +297,22 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
     const ordered=items.sort((a,b)=>b.lastAt.localeCompare(a.lastAt));
     const recent=ordered[0]!;
     const runningTasks=items.filter(x=>x.taskId && tasks.some(t=>t.id===x.taskId && (t.status==="working"||t.status==="input_required"))).length;
+    let toolCalls=0,inputTokens=0,outputTokens=0,measuredInputs=0,measuredOutputs=0;
+    for(const request of ordered){
+      const events=eventsByRequest.get(request.requestId)??[];
+      const body=events.find(e=>e.event==="mcp_body_ready" && e.rpcMethod==="tools/call");
+      if(body || events.some(e=>e.event==="tool_execution_started"))toolCalls++;
+      if(body){if(typeof body.inputTokens==="number"){
+        inputTokens+=body.inputTokens;measuredInputs++;
+      }}
+      const finish=events.find(e=>e.event==="mcp_finished" && typeof e.outputTokens==="number");
+      if(body && finish && typeof finish.outputTokens==="number"){
+        outputTokens+=finish.outputTokens;measuredOutputs++;
+      }
+    }
     return {id,title:recent.conversationTitle??id,lastAt:recent.lastAt,requestCount:items.length,runningTasks,
+      toolCalls,inputTokens:measuredInputs?inputTokens:null,outputTokens:measuredOutputs?outputTokens:null,
+      measuredInputs,measuredOutputs,
       state:runningTasks?"task_running":Date.now()-Date.parse(recent.lastAt)<30000?"recent_mcp_activity":"no_recent_mcp_activity",
       requests:ordered.slice(0,80).map(r=>({requestId:r.requestId,tool:r.tool,lastAt:r.lastAt,taskId:r.taskId,runId:r.runId,classification:r.classification}))};
   }).sort((a,b)=>b.lastAt.localeCompare(a.lastAt)).slice(0,40);
@@ -306,6 +340,7 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
   const sampledAt = new Date().toISOString();
   return {
     generatedAt: sampledAt,
+    sourceHealth: { available: unavailable.length===0, unavailable },
     dataFreshness: {
       sampledAt,
       nodes: latestObservedAt(nodes.map((node) => node.lastSeenAt)),

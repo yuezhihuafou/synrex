@@ -8,7 +8,8 @@ import path from "node:path";
 import express from "express";
 import type { Server } from "node:http";
 import type { ServerConfig } from "./config.js";
-import { requestTraceMiddleware } from "./http-trace.js";
+import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
+import { countToolInputTokens, countToolOutputTokens } from "./console-token-meter.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 
 test("MCP HTTP tracing counts streamed body bytes and retains valid W3C parent context", async t => {
@@ -71,4 +72,35 @@ test("MCP response byte count includes chunked string and binary writes without 
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test("real MCP tool text counts are recorded without storing prompt or response content", async t => {
+  const root=await mkdtemp(path.join(tmpdir(),"synrex-meter-http-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const diagnostics=new DiagnosticTrace(root);
+  const app=express();
+  app.use(requestTraceMiddleware({logging:{requests:false}} as ServerConfig,diagnostics,()=>({})));
+  app.use(express.json());app.use(bodyReadyTrace);
+  const body={jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"read",arguments:{path:"private file"}}};
+  const response={jsonrpc:"2.0",id:1,result:{content:[{type:"text",text:"secret result"}]}};
+  app.post("/mcp",(_req,res)=>{
+    res.setHeader("Content-Type","text/event-stream");
+    res.write("event: message\n");
+    res.end(`data: ${JSON.stringify(response)}\n\n`);
+  });
+  const server=app.listen(0,"127.0.0.1");await once(server,"listening");
+  try {
+    const port=(server.address() as AddressInfo).port;
+    const res=await fetch(`http://127.0.0.1:${port}/mcp`,{
+      method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body),
+    });
+    assert.equal(res.status,200);await res.text();
+    const events=diagnostics.read();
+    assert.equal(events.find(e=>e.event==="mcp_body_ready")?.inputTokens,countToolInputTokens(body));
+    assert.equal(events.find(e=>e.event==="mcp_finished")?.outputTokens,
+      countToolOutputTokens(`event: message\ndata: ${JSON.stringify(response)}\n\n`,"sse"));
+    const {readFile}=await import("node:fs/promises");
+    const raw=await readFile(diagnostics.file,"utf8");
+    assert.ok(!raw.includes("private file")&&!raw.includes("secret result"));
+  } finally {server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
 });

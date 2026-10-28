@@ -6,6 +6,7 @@ import { currentRequestLogContext, logEvent, oauthPhaseForPath, requestPath, run
 import { traceEvent } from "./trace-stages.js";
 import { newOtelContext } from "./otel-context.js";
 import { emitNativeSpan } from "./native-otel.js";
+import { MAX_TOOL_METER_BYTES, countToolInputTokens, countToolOutputTokens } from "./console-token-meter.js";
 
 /** Mount BEFORE the SDK JSON parser and host checks, so body upload/parse and
  * rejected requests are included. HTTP finish means local flush, not host receipt. */
@@ -31,10 +32,21 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     const base = { requestId, traceId: requestId, ...otel, method: req.method };
     const elapsed = () => Math.round(performance.now() - started);
     let responseBodyBytes = 0;
+    let meterBytes = 0;
+    let meterOverflow = false;
+    const meterChunks: Buffer[] = [];
     const countChunk = (chunk: unknown, encoding?: unknown) => {
       if (Buffer.isBuffer(chunk) || chunk instanceof Uint8Array) responseBodyBytes += chunk.byteLength;
       else if (typeof chunk === "string") responseBodyBytes += Buffer.byteLength(chunk,
         typeof encoding === "string" ? encoding as BufferEncoding : "utf8");
+      if (!isMcp || !res.locals.mcpToolTokenMeter || meterOverflow || chunk == null) return;
+      const part = typeof chunk === "string"
+        ? Buffer.from(chunk, typeof encoding === "string" ? encoding as BufferEncoding : "utf8")
+        : chunk instanceof Uint8Array ? Buffer.from(chunk) : null;
+      if (!part) { meterOverflow = true; meterChunks.length = 0; return; }
+      meterBytes += part.byteLength;
+      if (meterBytes > MAX_TOOL_METER_BYTES) { meterOverflow = true; meterChunks.length = 0; }
+      else meterChunks.push(part);
     };
     const originalWrite = res.write;
     res.write = function(this: typeof res, ...args: any[]) {
@@ -53,31 +65,6 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
       const type = String(res.getHeader("content-type") ?? "").toLowerCase();
       return type.includes("text/event-stream") ? "sse" : type.includes("json") ? "json" : "unknown";
     };
-    // Most MCP JSON/SSE responses are chunked and do not set Content-Length.
-    // Count bytes as the response is written, without buffering tool content
-    // or depending on the proxy's transfer encoding.
-    let outputBytes = 0;
-    if (isMcp) {
-      const countChunk = (chunk: unknown, encoding?: unknown) => {
-        if (typeof chunk === "string") {
-          outputBytes += Buffer.byteLength(chunk, typeof encoding === "string" ? encoding as BufferEncoding : "utf8");
-        } else if (chunk instanceof Uint8Array) {
-          outputBytes += chunk.byteLength;
-        }
-      };
-      const originalWrite = res.write;
-      res.write = function (this: typeof res, ...args: Parameters<typeof originalWrite>) {
-        const result = originalWrite.apply(this, args);
-        countChunk(args[0], args[1]);
-        return result;
-      } as typeof res.write;
-      const originalEnd = res.end;
-      res.end = function (this: typeof res, ...args: Parameters<typeof originalEnd>) {
-        const result = originalEnd.apply(this, args);
-        countChunk(args[0], args[1]);
-        return result;
-      } as typeof res.end;
-    }
     const originalWriteHead = res.writeHead;
     res.writeHead = function (this: typeof res, ...args: Parameters<typeof originalWriteHead>) {
       if (isMcp) diagnostics.record("mcp_headers_sent", { ...base, elapsedMs: elapsed(), status: args[0] });
@@ -94,9 +81,12 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     });
     res.once("finish", () => {
       if (timer) clearInterval(timer);
+      const outputTokens = isMcp && res.locals.mcpToolTokenMeter && !meterOverflow
+        ? countToolOutputTokens(Buffer.concat(meterChunks).toString("utf8"), mode()) : null;
       if (isMcp) diagnostics.record("mcp_finished", {
         ...base, stage, responseMode: mode(), durationMs: elapsed(), status: res.statusCode,
         outputBytes: responseBodyBytes,
+        ...(outputTokens !== null ? { outputTokens } : {}),
       });
       if (isMcp) emitNativeSpan({ name: "mcp.http", context: otel,
         startMs: wallStart, endMs: Date.now(),
@@ -114,15 +104,19 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
   };
 }
 
-export const bodyReadyTrace: RequestHandler = (req, _res, next) => {
+export const bodyReadyTrace: RequestHandler = (req, res, next) => {
   if (requestPath(req) === "/mcp") {
     const body = req.body;
     const method = Array.isArray(body) ? "batch" : typeof body?.method === "string" ? body.method : "unknown";
     // Hash arbitrary JSON-RPC IDs; never persist prompts or arbitrary client labels.
     const id = typeof body?.id === "string" || typeof body?.id === "number" ? createHash("sha256").update(String(body.id)).digest("hex").slice(0, 24) : undefined;
+    const isTool = body?.method === "tools/call";
+    if (isTool) res.locals.mcpToolTokenMeter = true;
+    const inputTokens = isTool ? countToolInputTokens(body) : null;
     traceEvent("mcp_body_ready", { stage: "body", rpcMethod: method, rpcIdHash: id,
       durationMs: Math.round(performance.now() - (currentRequestLogContext()?.startedAt ?? performance.now())),
       tool: body?.method === "tools/call" && typeof body?.params?.name === "string" ? body.params.name : undefined,
+      ...(inputTokens !== null ? { inputTokens } : {}),
     });
   }
   next();

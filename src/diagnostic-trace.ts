@@ -88,6 +88,8 @@ export interface DiagnosticEntry {
   errorCode?: string;
   inputBytes?: number;
   outputBytes?: number;
+  inputTokens?: number;
+  outputTokens?: number;
   queuedMs?: number;
   exitCode?: number;
   signal?: string;
@@ -160,7 +162,7 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     const value = boundedString(fields[key], pattern!);
     if (value) (item as unknown as Record<string, unknown>)[key] = value;
   }
-  for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs",
+  for (const key of ["pid", "inputBytes", "outputBytes", "inputTokens", "outputTokens", "queuedMs",
     "rssBytes", "heapUsedBytes", "cpuUserMicros", "cpuSystemMicros", "eventLoopLagMs",
     "eventLoopP95Ms", "eventLoopUtilizationPermille", "gcDurationMs", "gcCount", "activeToolCount",
     "otelSpanPending", "otelSpanDropped"] as const) {
