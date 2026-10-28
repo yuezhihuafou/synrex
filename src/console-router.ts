@@ -160,7 +160,7 @@ export function consoleAssetBase(config: ServerConfig, hostHeader: string | unde
     `localhost:${config.port}`,
     `[::1]:${config.port}`,
   ]);
-  if (localHosts.has(host)) return "/mcp-app-assets";
+  if (localHosts.has(host)) return `${new URL(config.publicBaseUrl).pathname.replace(/\/+$/, "")}/mcp-app-assets`;
   return `${config.publicBaseUrl.replace(/\/+$/, "")}/mcp-app-assets`;
 }
 

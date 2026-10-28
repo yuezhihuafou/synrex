@@ -39,6 +39,15 @@ const code = new URL(result.res.headers.get('location')).searchParams.get('code'
 assert.ok(code);
 result = await fetchProbe(localBase + '/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ grant_type: 'authorization_code', client_id: clientId, code, code_verifier: verifier, redirect_uri: redirect, resource }) });
 assert.equal(result.res.status, 200);
+const consoleBase = new URL('/console', localBase);
+const consoleResponse = await fetchProbe(consoleBase);
+assert.equal(consoleResponse.res.status, 200);
+const assets = [...consoleResponse.body.matchAll(/(?:src|href)=["']([^"']+\.(?:js|css)(?:\?[^"']*)?)["']/g)].map(m => new URL(m[1], consoleBase));
+assert.ok(assets.length > 0, 'Console bundle references are missing');
+for (const asset of assets) {
+  assert.equal(asset.origin, consoleBase.origin);
+  assert.equal((await fetchProbe(asset)).res.status, 200);
+}
 const token = JSON.parse(result.body).access_token;
 assert.ok(token);
 console.log(JSON.stringify({ oauth: 'authorization_code+PKCE', resource, scope: JSON.parse(result.body).scope }));

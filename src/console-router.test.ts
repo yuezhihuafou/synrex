@@ -102,9 +102,10 @@ test("local desktop console accepts its exact loopback origin", async t => {
 
 test("console assets stay same-origin for local desktop and use the configured public base remotely", () => {
   const config={port:17677,publicBaseUrl:"https://dev.sanqi.org/group"} as ServerConfig;
-  assert.equal(consoleAssetBase(config,"127.0.0.1:17677"),"/mcp-app-assets");
-  assert.equal(consoleAssetBase(config,"localhost:17677"),"/mcp-app-assets");
-  assert.equal(consoleAssetBase(config,"[::1]:17677"),"/mcp-app-assets");
+  assert.equal(consoleAssetBase(config,"127.0.0.1:17677"),"/group/mcp-app-assets");
+  assert.equal(consoleAssetBase(config,"localhost:17677"),"/group/mcp-app-assets");
+  assert.equal(consoleAssetBase(config,"[::1]:17677"),"/group/mcp-app-assets");
+  assert.equal(consoleAssetBase({...config,publicBaseUrl:"https://dev.sanqi.org/"},"127.0.0.1:17677"),"/mcp-app-assets");
   assert.equal(consoleAssetBase(config,"dev.sanqi.org"),"https://dev.sanqi.org/group/mcp-app-assets");
   assert.equal(consoleAssetBase(config,"evil.example.test"),"https://dev.sanqi.org/group/mcp-app-assets");
 });
