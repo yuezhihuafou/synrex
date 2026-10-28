@@ -121,3 +121,32 @@ test("upgrading an existing ledger adds runtime stats without resetting historic
   assert.equal(upgraded.runtime.averageTokensPerSecond,50);
   assert.equal(upgraded.runtime.measuredCalls,1);
 });
+
+test("correlated concurrent MCP calls retain union metrics across timer restart and log rotation",async t=>{
+  const root=await mkdtemp(path.join(tmpdir(),"synrex-effective-ledger-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  await mkdir(path.join(root,"diagnostics"));
+  const file=path.join(root,"diagnostics","recent.jsonl");
+  const events=(id:string,conversation:string|undefined,ms:number,output:number)=>[
+    {event:"mcp_received",requestId:id,ts:new Date(now.getTime()-ms).toISOString()},
+    {event:"mcp_body_ready",requestId:id,rpcMethod:"tools/call",ts:new Date(now.getTime()-ms+1).toISOString()},
+    {event:"tool_execution_started",requestId:id,ts:new Date(now.getTime()-ms+2).toISOString()},
+    ...(conversation?[{event:"conversation_seen",requestId:id,conversationId:conversation,ts:new Date(now.getTime()-ms+2).toISOString()}]:[]),
+    {event:"mcp_finished",requestId:id,durationMs:ms,ts:now.toISOString()},
+    {event:"tool_tokens_measured",requestId:id,outputTokens:output,ts:new Date(now.getTime()+1).toISOString()},
+  ].map(e=>JSON.stringify(e)+"\n").join("");
+  const conv="conv_"+"a".repeat(32);
+  await writeFile(file,events("a",conv,4000,1000)+events("b",conv,2000,1000)+events("unknown",undefined,4000,90000));
+  let s=tokenHistorySummary(updateTokenHistory(root,new Date(now.getTime()+15000)));
+  assert.equal(s.effective.matchedCalls,2);
+  assert.equal(s.effective.unknownCalls,1);
+  assert.equal(s.effective.perSessionActiveMs,4000);
+  assert.equal(s.effective.perSessionTokensPerSecond,500);
+  assert.equal(s.effective.globalActiveTokensPerSecond,500);
+  assert.equal(s.effective.outputTokens,2000);
+  await rename(file,file+".1");await writeFile(file,"");
+  s=tokenHistorySummary(updateTokenHistory(root,new Date(now.getTime()+30000)));
+  assert.equal(s.effective.matchedCalls,2);
+  assert.equal(s.effective.unknownCalls,1);
+  assert.equal(s.totals.outputTokens,92000);
+});

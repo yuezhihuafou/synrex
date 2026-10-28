@@ -1,6 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { DiagnosticEntry } from "./diagnostic-trace.js";
+import { summarizeEffectiveThroughput, type EffectiveCall } from "./console-effective-throughput.js";
 
 // Exclusively called from the 15-second snapshot sidecar, never by MCP/Console HTTP.
 // Keep a single small JSON ledger in the existing private observability directory.
@@ -9,7 +10,8 @@ type Bucket = { input: number; output: number; calls: number; inputSamples: numb
 type Peak = { at: string; tokens: number; tokensPerSecond: number };
 type CallPeak = { at: string; tokens: number };
 type Cursor = { offset: number; lastSeenAt: string };
-type PendingRun = { outputTokens?: number; durationMs?: number; finishedAt?: string; sampledAt?: string };
+type PendingRun = { outputTokens?: number; durationMs?: number; finishedAt?: string; sampledAt?: string;
+  receivedAt?: string; rpcTool?: boolean; toolStarted?: boolean; conversationId?: string };
 type RuntimeTotal = { outputTokens: number; durationMs: number; samples: number; observedFrom: string | null };
 export interface TokenHistory {
   schemaVersion: 1; encoding: "o200k_base"; startedAt: string; observedFrom?: string; updatedAt: string;
@@ -20,6 +22,11 @@ export interface TokenHistory {
   runtime?: RuntimeTotal;
   pendingRuns?: Record<string, PendingRun>;
   completedRuns?: Record<string,string>;
+  /** Rolling correlation evidence. No prompts or tool text. Not retrofitted from legacy totals. */
+  effectiveCalls?: EffectiveCall[];
+  pendingEffective?: Record<string,PendingRun>;
+  completedEffective?: Record<string,string>;
+  effectiveTruncated?: number;
 }
 const empty = (): Bucket => ({ input: 0, output: 0, calls: 0, inputSamples: 0, outputSamples: 0 });
 const isCount = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
@@ -54,6 +61,34 @@ function applyEvent(history: TokenHistory, entry: DiagnosticEntry): void {
   const isCall=entry.event === "tool_execution_started";
   const isFinish=entry.event === "mcp_finished" && typeof entry.durationMs === "number"
     && Number.isFinite(entry.durationMs) && entry.durationMs>0;
+  if (entry.requestId && ["mcp_received","mcp_body_ready","conversation_seen","tool_execution_started","mcp_finished","tool_tokens_measured"].includes(entry.event)) {
+    history.pendingEffective??={};history.completedEffective??={};history.effectiveCalls??=[];
+    const requestId=entry.requestId;
+    const earlier=history.completedEffective[requestId];
+    if (!earlier) {
+      const p=history.pendingEffective[requestId]??(history.pendingEffective[requestId]={});
+      if(entry.event==="mcp_received"&&!p.receivedAt)p.receivedAt=iso;
+      if(entry.event==="mcp_body_ready"&&entry.rpcMethod==="tools/call")p.rpcTool=true;
+      if(entry.event==="tool_execution_started")p.toolStarted=true;
+      if(entry.event==="conversation_seen"&&entry.conversationId)p.conversationId=entry.conversationId;
+      if(isOutput&&p.outputTokens===undefined)p.outputTokens=entry.outputTokens;
+      if(isFinish&&p.durationMs===undefined){p.durationMs=entry.durationMs;p.finishedAt=iso;}
+      if(p.receivedAt&&p.rpcTool&&p.toolStarted&&p.finishedAt&&p.durationMs&&isCount(p.outputTokens)) {
+        const endMs=Date.parse(p.finishedAt);
+        const startMs=endMs-p.durationMs;
+        if(Number.isFinite(startMs)&&startMs<=endMs){
+          history.effectiveCalls.push({requestId,startMs,endMs,outputTokens:p.outputTokens,
+            ...(p.conversationId?{conversationId:p.conversationId}:{})});
+          history.completedEffective[requestId]=p.finishedAt;
+          delete history.pendingEffective[requestId];
+        }
+      }
+    } else if(entry.event==="conversation_seen"&&entry.conversationId){
+      // The host association can be delivered asynchronously after completion.
+      const existing=history.effectiveCalls.find(c=>c.requestId===requestId);
+      if(existing)existing.conversationId=entry.conversationId;
+    }
+  }
   if (!isInput && !isOutput && !isCall && !isFinish) return;
   if(!history.observedFrom || iso<history.observedFrom)history.observedFrom=iso;
   const minuteBucket=history.minute[minute]??(history.minute[minute]=empty());
@@ -118,6 +153,20 @@ function applyEvent(history: TokenHistory, entry: DiagnosticEntry): void {
 }
 
 function prune(history: TokenHistory, now: Date): void {
+  const recent=history.effectiveCalls?.filter(c=>c.endMs>now.getTime()-86400000&&c.endMs<=now.getTime()+60000)??[];
+  if(recent.length>4096)history.effectiveTruncated=(history.effectiveTruncated??0)+(recent.length-4096);
+  history.effectiveCalls=recent.slice(-4096);
+  const pendingEffective=history.pendingEffective??{};
+  for(const [id,r] of Object.entries(pendingEffective)) {
+    const at=Date.parse(r.finishedAt??r.receivedAt??r.sampledAt??"");
+    if(!Number.isFinite(at)||at<now.getTime()-86400000)delete pendingEffective[id];
+  }
+  const pendingIds=Object.keys(pendingEffective);
+  if(pendingIds.length>4096)for(const id of pendingIds.slice(0,pendingIds.length-4096))delete pendingEffective[id];
+  const effectiveCompleted=history.completedEffective??{};
+  for(const [id,t] of Object.entries(effectiveCompleted))if(Date.parse(t)<now.getTime()-86400000)delete effectiveCompleted[id];
+  const completeIds=Object.keys(effectiveCompleted);
+  if(completeIds.length>4096)for(const id of completeIds.slice(0,completeIds.length-4096))delete effectiveCompleted[id];
   for (const [unit, entries, keep] of [
     ["minute",history.minute,24*3600_000],
     ["hour",history.hour,30*86400_000],
@@ -231,5 +280,7 @@ export function tokenHistorySummary(s: TokenHistory) {
     runtime:{averageTokensPerSecond:average(total?.outputTokens??0,total?.durationMs??0),
       matchedOutputTokens:total?.outputTokens??0,matchedDurationMs:total?.durationMs??0,
       measuredCalls:total?.samples??0,observedFrom:total?.observedFrom??null},
+    effective:{...summarizeEffectiveThroughput(s.effectiveCalls??[],Date.parse(s.updatedAt)),
+      truncatedCalls:s.effectiveTruncated??0},
     minute:series(s.minute),hour:series(s.hour),day:series(s.day)};
 }
