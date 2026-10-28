@@ -167,6 +167,20 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     res.setHeader("X-Content-Type-Options", "nosniff");
     next();
   };
+  const sendBrowserExtension = (res: Response, filename: string): void => {
+    const archive = fileURLToPath(new URL("../browser-extension/synrex-browser-trace.zip", import.meta.url));
+    if (!existsSync(archive)) { res.status(404).json({ error: "Extension package unavailable" }); return; }
+    const size = statSync(archive).size;
+    if (size <= 0 || size > 4 * 1024 * 1024) {
+      res.status(503).json({ error: "Extension package invalid" }); return;
+    }
+    // The archive is a small immutable release asset. Sending the bytes
+    // directly avoids Express sendFile/download path-root differences between
+    // tsx source tests and compiled immutable releases.
+    res.type("application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(readFileSync(archive));
+  };
   app.use("/console", noStore);
   app.get(["/console", "/console/"], (req, res) => {
     const cookie = readCookie(req);
@@ -182,9 +196,7 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     res.type("html").send(serveConsoleHtml(config));
   });
   app.get("/console/browser-extension.zip", auth, (_req, res) => {
-    const archive = fileURLToPath(new URL("../browser-extension/synrex-browser-trace.zip", import.meta.url));
-    if (!existsSync(archive)) { res.status(404).json({ error: "Extension archive not included in this release" }); return; }
-    res.download(archive, "synrex-browser-trace.zip");
+    sendBrowserExtension(res, "synrex-browser-trace.zip");
   });
   app.post("/console/api/login", express.json({ limit: "2kb" }), (req, res) => {
     const origin = sameOrigin(req);
@@ -237,9 +249,10 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     }catch{res.status(404).json({error:"Run log unavailable"});}
   });
   app.get("/console/api/browser-extension", auth, (_req, res) => {
-    const archive = fileURLToPath(new URL("../deploy/observability/browser-extension.zip",import.meta.url));
-    if(!existsSync(archive)){res.status(404).json({error:"Extension package unavailable"});return;}
-    res.download(archive,"synrex-browser-observer.zip");
+    // Keep the API route and the legacy direct-download route on the same
+    // packaged artifact. The old deploy/observability/browser-extension.zip
+    // path was never part of the immutable release and always returned 404.
+    sendBrowserExtension(res, "synrex-browser-observer.zip");
   });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }

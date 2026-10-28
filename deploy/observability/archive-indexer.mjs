@@ -72,6 +72,20 @@ const insertSpan=db.prepare(`INSERT OR IGNORE INTO spans
 const insertMetric=db.prepare(`INSERT OR IGNORE INTO metrics(minute,name,node,dimension,value) VALUES(?,?,?,?,?)`);
 const saveOffset=db.prepare("INSERT INTO checkpoints(source,offset) VALUES(?,?) ON CONFLICT(source) DO UPDATE SET offset=excluded.offset");
 const getOffset=db.prepare("SELECT offset FROM checkpoints WHERE source=?");
+function persistDiagnosticEvent(record, source, offset, ordinal=0) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) return false;
+  if (!allowedEvents.has(record.event)) return false;
+  const ts=date(record.ts);
+  if (!ts) return false;
+  const clean=Object.fromEntries(eventKeys.filter(k => record[k]!==undefined && (
+    typeof record[k]==="number" && Number.isFinite(record[k]) ||
+    typeof record[k]==="string" && record[k].length<150)).map(k=>[k,record[k]]));
+  clean.ts=ts;
+  insertEvent.run(source,offset,ordinal,ts,record.event,clean.requestId??null,
+    clean.otelTraceId??clean.traceId??null,clean.nodeRequestId??null,clean.nodeId??null,
+    clean.tool??null,JSON.stringify(clean));
+  return true;
+}
 function persist(document, kind, source, offset) {
   let ordinal=0;
   if (kind==="logs") for(const resource of list(document.resourceLogs)){
@@ -127,6 +141,49 @@ function persist(document, kind, source, offset) {
       }
     }
   }
+}
+/**
+ * The Core already writes a bounded, metadata-only diagnostic JSONL. Index it
+ * directly so seven-day Console history does not depend on an optional OTLP
+ * collector being installed. OTLP files remain additive sources for native
+ * spans and host metrics when available.
+ */
+function scanDiagnostics() {
+  const diagnostics=path.join(root,"diagnostics");
+  if(!existsSync(diagnostics))return 0;
+  const files=readdirSync(diagnostics).filter(name=>/^recent\.jsonl(?:\.\d+)?$/.test(name))
+    .map(name=>path.join(diagnostics,name)).sort((a,b)=>statSync(a).mtimeMs-statSync(b).mtimeMs);
+  let accepted=0;
+  for(const file of files){
+    const stats=statSync(file),source=`diagnostic:${stats.dev}:${stats.ino}`;
+    let at=Number(getOffset.get(source)?.offset??0);
+    if(at>stats.size)at=0;
+    const fd=openSync(file,"r"),chunk=Buffer.alloc(128*1024);
+    let cursor=at,carry=Buffer.alloc(0),lineStart=at;
+    try{
+      db.exec("BEGIN");
+      while(cursor<stats.size){
+        const size=readSync(fd,chunk,0,Math.min(chunk.length,stats.size-cursor),cursor);
+        if(size<=0)break;
+        const buf=Buffer.concat([carry,chunk.subarray(0,size)]);let begin=0;
+        while(true){
+          const end=buf.indexOf(10,begin);if(end<0)break;
+          const line=buf.subarray(begin,end);
+          if(line.length && line.length<=64*1024){
+            try{if(persistDiagnosticEvent(JSON.parse(line.toString("utf8")),source,lineStart))accepted++;}catch{}
+          }
+          lineStart+=end+1-begin;begin=end+1;
+        }
+        carry=buf.subarray(begin);
+        if(carry.length>64*1024){carry=Buffer.alloc(0);lineStart=cursor+size;}
+        cursor+=size;
+      }
+      saveOffset.run(source,lineStart);
+      db.exec("COMMIT");
+    }catch(e){db.exec("ROLLBACK");throw e;}
+    finally{closeSync(fd);}
+  }
+  return accepted;
 }
 function scan(kind) {
   if(!existsSync(data))return 0;
@@ -197,9 +254,9 @@ function query(args) {
   }else {throw Error("Invalid index query");}
 }
 if(process.argv[2]==="serve"){
-  function update(){try{for(const k of ["logs","traces","metrics"])scan(k);prune();}catch(e){console.error("Index scan failed",e?.name??"unknown");}}
+  function update(){try{scanDiagnostics();for(const k of ["logs","traces","metrics"])scan(k);prune();}catch(e){console.error("Index scan failed",e?.name??"unknown");}}
   update();setInterval(update,15000);
 }else if(process.argv[2]==="scan") {
-  const counts=Object.fromEntries(["logs","traces","metrics"].map(k=>[k,scan(k)]));prune();
+  const counts={diagnostics:scanDiagnostics(),...Object.fromEntries(["logs","traces","metrics"].map(k=>[k,scan(k)]))};prune();
   console.log(JSON.stringify(counts));
 }else query(process.argv.slice(2));

@@ -12,9 +12,12 @@ const rows=db.prepare("SELECT event,request_id,ts,data FROM events WHERE ts>=? A
 const calls=new Map();
 for(const row of rows){
   if(!row.request_id)continue;
-  const record=calls.get(row.request_id)??{id:row.request_id,inputBytes:null,outputBytes:null,wallMs:null,toolCalls:0,status:"incomplete"};
+  const record=calls.get(row.request_id)??{id:row.request_id,inputBytes:null,outputBytes:null,wallMs:null,toolCalls:0,status:"incomplete",received:false};
   const data=JSON.parse(row.data);
-  if(row.event==="mcp_received"&&Number.isFinite(data.inputBytes))record.inputBytes=data.inputBytes;
+  if(row.event==="mcp_received"){
+    record.received=true;
+    if(Number.isFinite(data.inputBytes))record.inputBytes=data.inputBytes;
+  }
   if(row.event==="mcp_finished"){
     record.status="completed";
     if(Number.isFinite(data.outputBytes))record.outputBytes=data.outputBytes;
@@ -24,7 +27,7 @@ for(const row of rows){
   if(row.event==="tool_execution_finished")record.toolCalls++;
   calls.set(row.request_id,record);
 }
-const all=[...calls.values()],sum=(key)=>all.reduce((n,x)=>n+(x[key]??0),0);
+const observed=[...calls.values()],all=observed.filter(x=>x.received),sum=(key,rows=all)=>rows.reduce((n,x)=>n+(x[key]??0),0);
 // The MCP wire includes JSON envelopes, not model tokens. Report bytes and
 // explicitly labeled rough equivalents only; never present as token usage.
 const bytesIn=sum("inputBytes"),bytesOut=sum("outputBytes");
@@ -46,7 +49,7 @@ if(repo){
 }
 const report={schema:"synrex.usage.v1",generatedAt:new Date().toISOString(),windowDays:7,
   requests:all.length,completed:all.filter(x=>x.status==="completed").length,
-  failed:all.filter(x=>x.status==="failed").length,toolCalls:sum("toolCalls"),
+  failed:all.filter(x=>x.status==="failed").length,toolCalls:sum("toolCalls",observed),
   mcpWire:{inputBytes:bytesIn,outputBytes:bytesOut,observedInputRequests:all.filter(x=>x.inputBytes!==null).length,
     observedOutputRequests:all.filter(x=>x.outputBytes!==null).length},
   duration:{observedRequests:all.filter(x=>x.wallMs!==null).length,

@@ -144,6 +144,25 @@ test("owner-only HTTP snapshot exposes usage while unauthenticated clients are r
   assert.equal((await fetch(endpoint,{headers:{cookie:`rev_console=${createConsoleSession(ownerToken,scope)}`}})).status,503);
 });
 
+test("authenticated browser extension API serves the packaged archive", async t => {
+  const stateDir=await mkdtemp(path.join(tmpdir(),"synrex-console-extension-"));
+  t.after(()=>rm(stateDir,{recursive:true,force:true}));
+  const app=express(),ownerToken="extension-owner-secret";
+  const config={stateDir,publicBaseUrl:"http://127.0.0.1:12345",oauth:{ownerToken}} as ServerConfig;
+  registerSynrexConsole(app,config);
+  const server=app.listen(0,"127.0.0.1");
+  t.after(()=>new Promise<void>(resolve=>server.close(()=>resolve())));
+  await new Promise<void>(resolve=>server.once("listening",resolve));
+  const port=(server.address() as {port:number}).port;
+  const origin=`http://127.0.0.1:${port}`;
+  const scope=consoleSessionScope(config,origin);
+  const cookie=`rev_console=${createConsoleSession(ownerToken,scope)}`;
+  const response=await fetch(origin+"/console/api/browser-extension",{headers:{cookie}});
+  assert.equal(response.status,200,await response.clone().text());
+  assert.match(response.headers.get("content-disposition")??"",/synrex-browser-observer\.zip/);
+  assert.ok((await response.arrayBuffer()).byteLength>1000);
+});
+
 test("loopback Console uses same-origin assets and local session cookies while public sessions stay secure", async t => {
   const stateDir=await mkdtemp(path.join(tmpdir(),"synrex-console-local-"));
   t.after(()=>rm(stateDir,{recursive:true,force:true}));

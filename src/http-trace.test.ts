@@ -74,6 +74,30 @@ test("MCP response byte count includes chunked string and binary writes without 
   }
 });
 
+test("MCP tracing follows configured public path prefix", async t => {
+  const root=await mkdtemp(path.join(tmpdir(),"synrex-http-prefix-"));
+  t.after(()=>rm(root,{recursive:true,force:true}));
+  const diagnostics=new DiagnosticTrace(root),app=express();
+  const config={publicBaseUrl:"https://owner.example/server",logging:{requests:false,assets:false}} as ServerConfig;
+  app.use(requestTraceMiddleware(config,diagnostics,()=>({})));
+  app.use(express.json());app.use(bodyReadyTrace);
+  app.post("/server/mcp",(_req,res)=>res.json({ok:true}));
+  const server=app.listen(0,"127.0.0.1");await once(server,"listening");
+  try{
+    const port=(server.address() as AddressInfo).port;
+    const response=await fetch(`http://127.0.0.1:${port}/server/mcp`,{
+      method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({jsonrpc:"2.0",id:1,method:"tools/call",params:{name:"read",arguments:{path:"x"}}}),
+    });
+    assert.equal(response.status,200);await response.text();
+    await new Promise(resolve=>setImmediate(resolve));
+    const events=diagnostics.read();
+    assert.ok(events.some(e=>e.event==="mcp_received"));
+    assert.ok(events.some(e=>e.event==="mcp_body_ready"));
+    assert.ok(events.some(e=>e.event==="mcp_finished"));
+  }finally{server.closeAllConnections();await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
+
 test("real MCP tool text counts are recorded without storing prompt or response content", async t => {
   const root=await mkdtemp(path.join(tmpdir(),"synrex-meter-http-"));
   t.after(()=>rm(root,{recursive:true,force:true}));

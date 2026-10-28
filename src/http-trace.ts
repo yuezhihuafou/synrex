@@ -19,8 +19,16 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     const started = performance.now();
     const wallStart = Date.now();
     const path = requestPath(req);
-    const oauthPhase = oauthPhaseForPath(path);
-    const isMcp = path === "/mcp";
+    let publicPath = "";
+    try {
+      publicPath = new URL(config.publicBaseUrl).pathname.replace(/\/+$/, "");
+      if (publicPath === "/") publicPath = "";
+    } catch { /* Partial test configs and legacy root deployments use /mcp. */ }
+    const relativePath = publicPath && (path === publicPath || path.startsWith(`${publicPath}/`))
+      ? path.slice(publicPath.length) || "/" : path;
+    const oauthPhase = oauthPhaseForPath(relativePath);
+    const isMcp = relativePath === "/mcp";
+    res.locals.synrexMcpRequest = isMcp;
     let stage = "body";
     const context = { requestId, traceId: requestId, ...otel, path, oauthPhase, startedAt: started,
       emitDiagnostic: (event: import("./diagnostic-trace.js").DiagnosticEvent, fields: Record<string, unknown>) => {
@@ -108,7 +116,10 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
 }
 
 export const bodyReadyTrace: RequestHandler = (req, res, next) => {
-  if (requestPath(req) === "/mcp") {
+  // requestTraceMiddleware resolves a configured public path prefix before the
+  // JSON parser runs. Do not re-derive MCP identity from originalUrl here:
+  // production may expose /server/mcp rather than root /mcp.
+  if (res.locals.synrexMcpRequest === true) {
     const body = req.body;
     const method = Array.isArray(body) ? "batch" : typeof body?.method === "string" ? body.method : "unknown";
     // Hash arbitrary JSON-RPC IDs; never persist prompts or arbitrary client labels.
