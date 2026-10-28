@@ -169,6 +169,8 @@ function RexPerformance({d}:{d:Snapshot}) {
   const windowRuntimeMs=trend.reduce((n,b)=>n+(b.runtimeDurationMs??0),0);
   const windowRuntimeCalls=trend.reduce((n,b)=>n+(b.runtimeSamples??0),0);
   const windowRuntimeRate=windowRuntimeMs>0?Math.round(windowRuntimeTokens*10000/windowRuntimeMs)/10:null;
+  const recentWindowRate=t?.recentOutputTokens!=null&&t.windowSeconds>0
+    ?Math.round(t.recentOutputTokens/t.windowSeconds*10)/10:null;
   return <Panel title="Rex Performance" hint="主机会话关联与 Subagent 独立统计 · 不是 GPT 模型的解码速度">
     <div className="metrics performance-metrics">
       <Metric label="可关联会话" symbol="⇄" value={effective?.sessionCount??"未测量"}
@@ -216,10 +218,10 @@ function RexPerformance({d}:{d:Snapshot}) {
         {plot.length===1?<circle cx="300" cy={110-100*(curve==="volume"?plot[0]!.outputTokens:(plot[0]!.runtimeAverageTokensPerSecond??0))/maximum} r="4" fill="currentColor"/>:
           <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>}
       </svg>:<Blank>该时间范围暂无相关完整观测样本。</Blank>}
-      <p className="footnote">最近 60 秒记录到的工具输出：{t?.recentOutputTokens==null?"未测量":`${t.recentOutputTokens.toLocaleString("zh-CN")} Token（${t.recentOutputSamples??0} 个已计量输出）`}。历史完成调用折算：{history?.runtime?.averageTokensPerSecond==null?"未测量":`${history.runtime.averageTokensPerSecond} Token/调用秒`}；所选时段：{windowRuntimeRate===null?"未测量":`${windowRuntimeRate} Token/调用秒`}（{windowRuntimeCalls} 次）。后二者是输出量 ÷ 请求耗时，不是逐秒生成速率。</p>
+      <p className="footnote">最近 60 秒记录到的工具输出：{t?.recentOutputTokens==null?"未测量":`${t.recentOutputTokens.toLocaleString("zh-CN")} Token（${t.recentOutputSamples??0} 个已计量输出）`}；对应墙钟窗口平均 {recentWindowRate===null?"未测量":`${recentWindowRate} Token/s`}。历史完成调用折算：{history?.runtime?.averageTokensPerSecond==null?"未测量":`${history.runtime.averageTokensPerSecond} Token/调用秒`}；所选时段：{windowRuntimeRate===null?"未测量":`${windowRuntimeRate} Token/调用秒`}（{windowRuntimeCalls} 次）。后两项是输出量 ÷ 请求耗时；60 秒平均也只是 Synrex 工具输出吞吐，都不是 GPT 模型解码速度。</p>
       <div className="metrics performance-peaks">
-        <Metric symbol="⌁" label="单分钟记录输出峰值" value={history?.peakMinute?`${history.peakMinute.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
-          info={history?.peakMinute?`该分钟桶内记录的输出总量 · ${time(history.peakMinute.at)}`:"不除以 60，不冒充逐秒生成速度"}/>
+        <Metric symbol="⌁" label="最近 60 秒平均工具输出" value={recentWindowRate===null?"未测量":`${recentWindowRate} Token/s`}
+          info={t?.recentOutputTokens==null?"当前 60 秒窗口没有已计量输出":`${t.recentOutputTokens.toLocaleString("zh-CN")} Token ÷ ${t.windowSeconds} 秒 · ${t.recentOutputSamples??0} 个样本`}/>
         <Metric symbol="↑" label="最大单次工具输出" value={history?.peakOutputCall?`${history.peakOutputCall.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
           info={history?.peakOutputCall?time(history.peakOutputCall.at):"仅计量文本结果"}/>
       </div>
