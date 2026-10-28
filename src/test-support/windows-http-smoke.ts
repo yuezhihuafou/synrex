@@ -19,6 +19,7 @@ if (!baseUrl || !configDir || !workspacePath) {
   throw new Error("usage: windows-http-smoke <base-url> <config-dir> <workspace-path>");
 }
 if (process.platform !== "win32") process.exit(0);
+const skipWorktree = process.env.SYNREX_WINDOWS_SMOKE_SKIP_WORKTREE === "1";
 
 const auth = JSON.parse(await readFile(join(configDir, "auth.json"), "utf8")) as {
   ownerToken?: string;
@@ -224,26 +225,31 @@ if (!durableOutput.includes("candidate-durable-ok")) {
   throw new Error(`candidate durable output verification failed: ${JSON.stringify(durableOutput)}`);
 }
 
-const worktreeOpened = await callTool("open_workspace", {
-  path: workspacePath,
-  mode: "worktree",
-  base_ref: "HEAD",
-}, "windows-http-smoke-worktree");
-const worktreeResult = recordValue(worktreeOpened.structuredContent);
-const worktreeWorkspaceId = worktreeResult.workspaceId;
-if (typeof worktreeWorkspaceId !== "string" || worktreeWorkspaceId === workspaceId) {
-  throw new Error(`candidate worktree smoke did not return an isolated workspace: ${JSON.stringify(worktreeResult)}`);
-}
-const worktreeCommand = await callTool("exec_command", {
-  workspaceId: worktreeWorkspaceId,
-  cmd: "git rev-parse --is-inside-work-tree",
-});
-const worktreeCommandResult = recordValue(worktreeCommand.structuredContent);
-if (
-  worktreeCommandResult.exitCode !== 0
-  || !String(worktreeCommandResult.result ?? worktreeCommandResult.output ?? "").includes("true")
-) {
-  throw new Error(`candidate worktree command smoke failed: ${JSON.stringify(worktreeCommandResult)}`);
+let worktreeWorkspaceId: string | null = null;
+if (!skipWorktree) {
+  const worktreeOpened = await callTool("open_workspace", {
+    path: workspacePath,
+    mode: "worktree",
+    base_ref: "HEAD",
+  }, "windows-http-smoke-worktree");
+  const worktreeResult = recordValue(worktreeOpened.structuredContent);
+  worktreeWorkspaceId = typeof worktreeResult.workspaceId === "string"
+    ? worktreeResult.workspaceId
+    : null;
+  if (!worktreeWorkspaceId || worktreeWorkspaceId === workspaceId) {
+    throw new Error(`candidate worktree smoke did not return an isolated workspace: ${JSON.stringify(worktreeResult)}`);
+  }
+  const worktreeCommand = await callTool("exec_command", {
+    workspaceId: worktreeWorkspaceId,
+    cmd: "git rev-parse --is-inside-work-tree",
+  });
+  const worktreeCommandResult = recordValue(worktreeCommand.structuredContent);
+  if (
+    worktreeCommandResult.exitCode !== 0
+    || !String(worktreeCommandResult.result ?? worktreeCommandResult.output ?? "").includes("true")
+  ) {
+    throw new Error(`candidate worktree command smoke failed: ${JSON.stringify(worktreeCommandResult)}`);
+  }
 }
 
 console.log(JSON.stringify({
@@ -254,7 +260,7 @@ console.log(JSON.stringify({
   command: "passed",
   pty: "passed",
   durable: "passed",
-  worktree: "passed",
+  worktree: skipWorktree ? "skipped-by-request" : "passed",
   worktreeWorkspaceId,
   artifactNativeE2e: "not-run-without-host-native-file",
   toolNames,

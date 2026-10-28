@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,14 @@ function testPackedPackageLaunchers(): void {
       stdio: "pipe",
       shell: process.platform === "win32",
     });
+
+    const koffiPackage = JSON.parse(readFileSync(join(
+      installRoot,
+      "node_modules",
+      "koffi",
+      "package.json",
+    ), "utf8")) as { version?: string };
+    assert.equal(koffiPackage.version, "3.2.1");
 
     const configRoot = join(root, "config");
     const env = writeTestDevspaceConfig(configRoot, {

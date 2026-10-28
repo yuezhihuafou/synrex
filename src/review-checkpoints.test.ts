@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -8,6 +8,35 @@ import { promisify } from "node:util";
 import { createReviewCheckpointManager, readReviewRef } from "./review-checkpoints.js";
 
 const execFileAsync = promisify(execFile);
+
+test("untracked runtime directories do not snapshot their ancestor repository", async (t) => {
+  const gitRoot = await committedRepository(t);
+  const root = join(gitRoot, "runtime-state");
+  await mkdir(root);
+  await writeFile(join(root, "private.txt"), "must not enter a review snapshot\n");
+  const manager = createReviewCheckpointManager();
+  const availability = await manager.initializeWorkspace({ workspaceId: "ws_runtime", root });
+  assert.equal(availability.available, false);
+  if (!availability.available) assert.match(availability.reason, /no tracked files/);
+  assert.equal(await gitOutput(gitRoot, ["for-each-ref", "refs/devspace/review/ws_runtime"]), "");
+});
+
+test("subdirectory review snapshots exclude sibling changes", async (t) => {
+  const gitRoot = await committedRepository(t);
+  const root = join(gitRoot, "project");
+  await mkdir(root);
+  await writeFile(join(root, "source.txt"), "before\n");
+  await gitOutput(gitRoot, ["add", "project"]);
+  await gitOutput(gitRoot, ["commit", "-m", "project"]);
+  const manager = createReviewCheckpointManager();
+  await writeFile(join(gitRoot, "outside.txt"), "unrelated private file\n");
+  await manager.initializeWorkspace({ workspaceId: "ws_subdir", root });
+  await writeFile(join(root, "source.txt"), "after\n");
+  await writeFile(join(gitRoot, "README.md"), "unrelated edit\n");
+  const review = await manager.reviewChanges({ workspaceId: "ws_subdir", root });
+  assert.deepEqual(review.files.map(file => file.path), ["project/source.txt"]);
+  assert.equal(await gitOutput(gitRoot, ["ls-tree", "-r", "--name-only", review.reviewRef, "outside.txt"]), "");
+});
 
 test("a clean workspace reports no changes from the last-shown checkpoint", async (t) => {
   const root = await committedRepository(t);

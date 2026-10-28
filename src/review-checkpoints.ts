@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { git, getGitEligibility, safeWorkspaceRefSegment } from "./git.js";
 
 export type ReviewSince = "last_shown" | "workspace_open";
@@ -129,7 +129,7 @@ export function createReviewCheckpointManager(): ReviewCheckpointManager {
 
       const baselineRef = effectiveSince === "workspace_open" ? state.openRef : state.baselineRef;
       const baseline = (await git(state.gitRoot, ["rev-parse", "--verify", `${baselineRef}^{commit}`])).stdout.trim();
-      const current = await createWorkingTreeSnapshot(state.gitRoot, baseline);
+      const current = await createWorkingTreeSnapshot(state.gitRoot, baseline, root);
       const review = await readReviewBetween(state.gitRoot, baseline, current);
 
       if (markReviewed) {
@@ -234,6 +234,13 @@ async function initializeWorkspaceState(
       return;
     }
 
+    // Runtime/data directories must not inherit a collection folder's Git snapshot.
+    if (relative(eligibility.gitRoot, root) !== ""
+      && !(await git(root, ["ls-files", "--", "."])).stdout.trim()) {
+      state.diagnostic = "This workspace has no tracked files in the ancestor repository; open the actual project repository for review.";
+      return;
+    }
+
     const [openCommit, baselineCommit] = await Promise.all([
       commitForRef(eligibility.gitRoot, state.openRef),
       commitForRef(eligibility.gitRoot, state.baselineRef),
@@ -241,7 +248,7 @@ async function initializeWorkspaceState(
 
     if (!openCommit && !baselineCommit) {
       const head = (await git(eligibility.gitRoot, ["rev-parse", "--verify", "HEAD^{commit}"])).stdout.trim();
-      const initialCommit = await createWorkingTreeSnapshot(eligibility.gitRoot, head);
+      const initialCommit = await createWorkingTreeSnapshot(eligibility.gitRoot, head, root);
       await git(eligibility.gitRoot, ["update-ref", state.openRef, initialCommit]);
       await git(eligibility.gitRoot, ["update-ref", state.baselineRef, initialCommit]);
       state.openRefAvailable = true;
@@ -290,14 +297,14 @@ function reviewRefs(
   };
 }
 
-async function createWorkingTreeSnapshot(gitRoot: string, parent: string): Promise<string> {
+async function createWorkingTreeSnapshot(gitRoot: string, parent: string, workspaceRoot: string): Promise<string> {
   const tempDir = await mkdtemp(join(tmpdir(), "devspace-review-index-"));
   const indexPath = join(tempDir, "index");
   const env = checkpointEnv(indexPath);
 
   try {
-    await git(gitRoot, ["read-tree", "HEAD"], { env });
-    await git(gitRoot, ["add", "-A", "--", "."], { env });
+    await git(gitRoot, ["read-tree", parent], { env });
+    await git(workspaceRoot, ["add", "-A", "--", "."], { env });
     const tree = (await git(gitRoot, ["write-tree"], { env })).stdout.trim();
     return (await git(gitRoot, ["commit-tree", tree, "-p", parent, "-m", "Synrex review snapshot"], { env })).stdout.trim();
   } finally {

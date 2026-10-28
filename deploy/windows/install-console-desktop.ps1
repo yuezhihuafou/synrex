@@ -36,7 +36,28 @@ if (-not $text.Contains('$env:SYNREX_CONSOLE_URL')) {
 if ($Restart) {
     Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe' OR Name='DevSpaceForgeDesktop.exe'" -ErrorAction SilentlyContinue |
         ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    $stopDeadline = [DateTime]::UtcNow.AddSeconds(8)
+    do {
+        $remaining = @(Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe' OR Name='DevSpaceForgeDesktop.exe'" -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) { break }
+        Start-Sleep -Milliseconds 200
+    } while ([DateTime]::UtcNow -lt $stopDeadline)
+    if ($remaining.Count -ne 0) {
+        throw 'Previous desktop shell processes did not exit before Synrex Console restart.'
+    }
+    # The launcher owns a named mutex while it waits for Electron. Give the
+    # previous launcher a brief chance to observe Electron exit and release it.
+    Start-Sleep -Milliseconds 500
     Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',('"' + $launcher + '"'),'-PlatformRoot',('"' + $root + '"')) -WindowStyle Hidden | Out-Null
+    $startDeadline = [DateTime]::UtcNow.AddSeconds(12)
+    do {
+        Start-Sleep -Milliseconds 250
+        $started = @(Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe'" -ErrorAction SilentlyContinue)
+        if ($started.Count -gt 0) { break }
+    } while ([DateTime]::UtcNow -lt $startDeadline)
+    if ($started.Count -eq 0) {
+        throw 'Synrex Console launcher returned without starting SynrexConsole.exe.'
+    }
 }
 
 [PSCustomObject]@{

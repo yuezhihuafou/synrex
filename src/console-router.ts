@@ -153,10 +153,20 @@ function consoleManifest(): { file: string; css?: string[] } {
   return entry;
 }
 
-function serveConsoleHtml(config: ServerConfig): string {
+export function consoleAssetBase(config: ServerConfig, hostHeader: string | undefined): string {
+  const host = hostHeader?.trim().toLowerCase() ?? "";
+  const localHosts = new Set([
+    `127.0.0.1:${config.port}`,
+    `localhost:${config.port}`,
+    `[::1]:${config.port}`,
+  ]);
+  if (localHosts.has(host)) return "/mcp-app-assets";
+  return `${config.publicBaseUrl.replace(/\/+$/, "")}/mcp-app-assets`;
+}
+
+function serveConsoleHtml(config: ServerConfig, hostHeader: string | undefined): string {
   const entry = consoleManifest();
-  const origin = config.publicBaseUrl.replace(/\/+$/, "");
-  const base = `${origin}/mcp-app-assets`;
+  const base = consoleAssetBase(config, hostHeader);
   const resources = [entry.file, ...(entry.css ?? [])];
   if (resources.some((file) => !/^[a-zA-Z0-9/_-]+\.[a-zA-Z0-9._-]+$/.test(file))) {
     throw new Error("Invalid console asset path");
@@ -202,13 +212,13 @@ export function registerSynrexConsole(app: Express, config: ServerConfig, servic
     next();
   };
   app.use("/console", noStore);
-  app.get(["/console", "/console/"], (_req, res) => {
+  app.get(["/console", "/console/"], (req, res) => {
     res.setHeader("Content-Security-Policy", [
       "default-src 'none'", "script-src 'self'", "style-src 'self'",
       "connect-src 'self'", "img-src 'self' data:", "font-src 'self'",
       "base-uri 'none'", "frame-ancestors 'none'", "form-action 'self'",
     ].join("; "));
-    res.type("html").send(serveConsoleHtml(config));
+    res.type("html").send(serveConsoleHtml(config, req.header("host")));
   });
   app.get("/console/browser-extension.zip", auth, (_req, res) => {
     const archive = fileURLToPath(new URL("../browser-extension/synrex-browser-trace.zip", import.meta.url));
