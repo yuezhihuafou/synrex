@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import http from 'node:http';
 import { createServer as createTcpServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -58,6 +59,39 @@ let gate;
 let stderr = '';
 const publicOrigin = 'https://synrex.example.test';
 
+function publicFetch(pathname, init = {}) {
+  const body = init.body == null ? null : Buffer.from(String(init.body));
+  return new Promise((resolve, reject) => {
+    const headers = {
+      host: new URL(publicOrigin).host,
+      ...(init.headers ?? {}),
+      ...(body ? { 'content-length': String(body.byteLength) } : {}),
+    };
+    const req = http.request({
+      hostname: '127.0.0.1', port: outerPort, path: pathname,
+      method: init.method ?? 'GET', headers,
+    }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(Buffer.from(chunk)));
+      res.on('end', () => {
+        const payload = Buffer.concat(chunks);
+        resolve({
+          status: res.statusCode ?? 0,
+          headers: { get: name => {
+            const value = res.headers[String(name).toLowerCase()];
+            return Array.isArray(value) ? value.join('; ') : value == null ? null : String(value);
+          } },
+          text: async () => payload.toString('utf8'),
+          json: async () => JSON.parse(payload.toString('utf8')),
+        });
+      });
+    });
+    req.once('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
 try {
   await mkdir(confDir, { recursive: true });
   await mkdir(stateDir, { recursive: true });
@@ -93,14 +127,14 @@ try {
   });
   await gate.start();
   const entry = 'http://127.0.0.1:' + outerPort;
-  const discovery = await fetch(entry + '/.well-known/oauth-authorization-server');
+  const discovery = await publicFetch('/.well-known/oauth-authorization-server');
   assert.equal(discovery.status, 200, 'proxy must preserve public OAuth discovery');
   const metadata = await discovery.json();
   assert.equal(new URL(metadata.issuer).origin, publicOrigin, 'port relocation cannot change the OAuth issuer');
-  assert.equal((await fetch(entry + '/mcp')).status, 401, 'unauthenticated MCP remains protected');
-  assert.equal((await fetch(entry + '/console')).status, 200, 'Console remains available');
-  assert.equal((await fetch(entry + '/console/api/snapshot')).status, 401, 'Console JSON remains private');
-  const cookieResponse = await fetch(entry + '/console/api/login', {
+  assert.equal((await publicFetch('/mcp')).status, 401, 'unauthenticated MCP remains protected');
+  assert.equal((await publicFetch('/console')).status, 200, 'Console remains available');
+  assert.equal((await publicFetch('/console/api/snapshot')).status, 401, 'Console JSON remains private');
+  const cookieResponse = await publicFetch('/console/api/login', {
     method: 'POST', headers: { origin: publicOrigin, 'content-type': 'application/json' },
     body: JSON.stringify({ password: env.DEVSPACE_OAUTH_OWNER_TOKEN }),
   });
@@ -110,19 +144,19 @@ try {
   const cookie = cookieHeader.split(';')[0];
   // A disposable Core does not run the independent snapshot collector.
   // Absence must degrade to 503 rather than triggering database scans on Core.
-  const unavailable = await fetch(entry + '/console/api/snapshot', {headers: {cookie}});
+  const unavailable = await publicFetch('/console/api/snapshot', {headers: {cookie}});
   assert.equal(unavailable.status, 503, 'missing collector must not invoke inline snapshot reads');
   assert.equal((await unavailable.json()).snapshotStale, true);
   const {readConsoleSnapshot} = await import(join(release, 'dist/console-snapshot.js'));
   await mkdir(join(stateDir, 'observability'), {recursive: true});
   await writeFile(join(stateDir, 'observability', 'console-snapshot.json'),
     JSON.stringify(readConsoleSnapshot(stateDir, 'isolated-qa')), {mode: 0o600});
-  assert.equal((await fetch(entry + '/console/api/snapshot', {
+  assert.equal((await publicFetch('/console/api/snapshot', {
     headers: { cookie },
   })).status, 200);
   const originalPid = core.pid;
   await sendIngressCommand(controlSocket, 'PAUSE');
-  const pending = fetch(entry + '/healthz');
+  const pending = publicFetch('/healthz');
   await delay(140);
   const stats = await sendIngressCommand(controlSocket, 'STATUS');
   assert.equal(stats.paused, true);
@@ -133,8 +167,8 @@ try {
   await waitHealthy('http://127.0.0.1:' + innerPort, core);
   await sendIngressCommand(controlSocket, 'RESUME');
   assert.equal((await pending).status, 200);
-  assert.equal((await fetch(entry + '/.well-known/oauth-authorization-server')).status, 200);
-  assert.equal((await fetch(entry + '/console/api/snapshot', {headers: {cookie}})).status, 200);
+  assert.equal((await publicFetch('/.well-known/oauth-authorization-server')).status, 200);
+  assert.equal((await publicFetch('/console/api/snapshot', {headers: {cookie}})).status, 200);
   console.log(JSON.stringify({
     qa: 'passed', entry: 'ephemeral loopback only', singleCoreWriter: true,
     oldCorePid: originalPid, newCorePid: core.pid, publicIssuerPreserved: true,
