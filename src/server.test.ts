@@ -1506,6 +1506,54 @@ test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) =
   assert.ok(finished.every((entry) => ["json", "sse", "unknown"].includes(entry.responseMode ?? "unknown")));
 });
 
+test("HTTP routes preserve a configured public base path", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-base-path-test-"));
+  const config = loadConfig(writeTestDevspaceConfig(join(root, ".config"), {
+    server: {
+      port: 1,
+      publicBaseUrl: "https://example.test/server",
+    },
+    workspaces: {
+      allowedRoots: [root],
+      worktreeRoot: join(root, ".worktrees"),
+    },
+    storage: { stateDir: join(root, ".state") },
+  }));
+  const running = createServer(config, { incomingArtifactAdapters: [] });
+  const httpServer = running.app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => httpServer.once("listening", resolve));
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.close((error) => error ? reject(error) : resolve());
+    });
+    await running.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const address = httpServer.address();
+  assert.ok(address && typeof address === "object");
+  const localBaseUrl = `http://127.0.0.1:${address.port}`;
+
+  assert.equal((await fetch(`${localBaseUrl}/server/healthz`)).status, 200);
+  assert.equal((await fetch(`${localBaseUrl}/healthz`)).status, 404);
+  assert.equal((await fetch(`${localBaseUrl}/server/mcp`)).status, 401);
+  assert.equal((await fetch(`${localBaseUrl}/mcp`)).status, 404);
+
+  const metadataResponse = await fetch(
+    `${localBaseUrl}/.well-known/oauth-authorization-server/server`,
+  );
+  assert.equal(metadataResponse.status, 200, await metadataResponse.clone().text());
+  const metadata = await metadataResponse.json() as {
+    issuer?: string;
+    authorization_endpoint?: string;
+    token_endpoint?: string;
+    registration_endpoint?: string;
+  };
+  assert.equal(metadata.issuer, "https://example.test/server");
+  assert.equal(metadata.authorization_endpoint, "https://example.test/server/authorize");
+  assert.equal(metadata.token_endpoint, "https://example.test/server/token");
+  assert.equal(metadata.registration_endpoint, "https://example.test/server/register");
+});
+
 test("HTTP tracing starts before body upload, covers auth and parser failures", async (t) => {
   const { root, localBaseUrl, accessToken } = await httpServerFixture(t, "synrex-http-chain-");
   const { request } = await import("node:http");
