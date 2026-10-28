@@ -17,6 +17,29 @@ Run PowerShell as the owner, elevated for installation, activation or restart:
 & .\deploy\windows\group-service.ps1 -Action Check -PlatformRoot $groupRoot
 ```
 
+For a normal tested package promotion, prefer the single deployment entrypoint:
+
+```powershell
+& .\deploy\windows\deploy-group.ps1 -PlatformRoot $groupRoot -RuntimePackagePath $runtimePackage -SourceRevision $revision
+```
+
+It prepares a new immutable slot, activates it through the rollback-safe Group
+supervisor, installs the source-owned Synrex Console launcher/desktop shell, and
+runs the full Group readiness check. It never replaces the active slot in place.
+
+The installed manual Console command is:
+
+```powershell
+& "$groupRoot\ops\start-synrex-console.ps1" -PlatformRoot $groupRoot
+```
+
+Installation also creates `Synrex Console.lnk` on the owner's desktop. The
+launcher starts the existing `Synrex Group Core` task only when local health is
+down, verifies that Windows Control on 17678 belongs to this PlatformRoot, and
+then opens the desktop shell. Each PlatformRoot gets its own Electron profile.
+Console session cookies are also scoped to the configured public Synrex identity,
+so Group, Personal and legacy local Console sessions do not share authentication.
+
 `Activate` requires an already prepared, authenticated-MCP-tested immutable slot.
 It backs up the task XML, active pointer, config and stopped Core state, installs
 the packaged supervisor and performs readiness gates. Failure restores the old

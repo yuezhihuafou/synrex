@@ -8,6 +8,25 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 const exec = promisify(execFile);
+
+test("Windows deployment uses source-owned launchers and per-node Console identity", async () => {
+  const installer = await readFile(resolve("deploy/windows/install-console-desktop.ps1"), "utf8");
+  const launcher = await readFile(resolve("deploy/windows/start-synrex-console.ps1"), "utf8");
+  const deploy = await readFile(resolve("deploy/windows/deploy-group.ps1"), "utf8");
+  const desktop = await readFile(resolve("deploy/windows/desktop/main.cjs"), "utf8");
+  assert.match(installer, /start-synrex-console\.ps1/);
+  assert.match(installer, /Synrex Console\.lnk/);
+  assert.doesNotMatch(installer, /\.Replace\(/);
+  assert.match(launcher, /Synrex Group Core/);
+  assert.match(launcher, /SYNREX_CONSOLE_PROFILE_DIR/);
+  assert.match(launcher, /17678/);
+  assert.match(deploy, /prepare-runtime-slot\.ps1/);
+  assert.match(deploy, /-Action Activate/);
+  assert.match(deploy, /install-console-desktop\.ps1/);
+  assert.match(desktop, /app\.setPath\("userData", profileRoot\)/);
+  assert.match(desktop, /DEVSPACE_PLATFORM_ROOT/);
+});
+
 test("Windows Group startup rejects wrong credentials, endpoints and occupied ports", { skip: process.platform !== "win32" }, async t => {
   const root = await mkdtemp(join(tmpdir(), "synrex-group-startup-"));
   t.after(() => rm(root, { recursive: true, force: true }));

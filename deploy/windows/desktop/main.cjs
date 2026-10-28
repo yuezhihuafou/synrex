@@ -5,8 +5,17 @@ const path = require("node:path");
 const DEFAULT_CONSOLE_URL = "http://127.0.0.1:17677/console";
 const consoleUrl = process.env.SYNREX_CONSOLE_URL || DEFAULT_CONSOLE_URL;
 const allowed = new URL(consoleUrl);
+const platformRoot = process.env.DEVSPACE_PLATFORM_ROOT;
+const profileRoot = process.env.SYNREX_CONSOLE_PROFILE_DIR
+  || (platformRoot ? path.join(platformRoot, "state", "synrex-console-profile") : null);
 let win = null;
 let tray = null;
+
+app.setName("Synrex Console");
+if (profileRoot) {
+  fs.mkdirSync(profileRoot, { recursive: true });
+  app.setPath("userData", profileRoot);
+}
 
 function isAllowedNavigation(raw) {
   try {
@@ -65,7 +74,6 @@ function createTray(icon) {
 
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
-  app.setName("Synrex Console");
   app.on("second-instance", () => { win?.show(); win?.focus(); });
   app.whenReady().then(async () => {
     const icon = await appIcon();

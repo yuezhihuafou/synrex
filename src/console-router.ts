@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, existsSync, openSync, closeSync, readSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -11,7 +11,7 @@ import { readOtelFileTail } from "./otel-file-reader.js";
 import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
 import { assignConversationLabel, readConversationLabels } from "./conversation-labels.js";
 
-const COOKIE_NAME = "rev_console";
+const LEGACY_COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 60_000;
@@ -29,28 +29,46 @@ function equal(a: string, b: string): boolean {
   return first.length === second.length && timingSafeEqual(first, second);
 }
 
-export function createConsoleSession(ownerToken: string, now = Date.now()): string {
-  const expires = Math.floor(now / 1000) + SESSION_SECONDS;
-  const payload = `${expires}.${randomBytes(12).toString("hex")}`;
-  return `${payload}.${createHmac("sha256", ownerToken).update("rev-console-v1:" + payload).digest("base64url")}`;
+export function consoleSessionAudience(publicBaseUrl: string): string {
+  return new URL(publicBaseUrl).toString().replace(/\/$/, "");
 }
 
-export function verifyConsoleSession(value: string | undefined, ownerToken: string, now = Date.now()): boolean {
+export function consoleCookieName(publicBaseUrl: string): string {
+  const suffix = createHash("sha256")
+    .update(consoleSessionAudience(publicBaseUrl))
+    .digest("hex")
+    .slice(0, 12);
+  return `rev_console_${suffix}`;
+}
+
+export function createConsoleSession(ownerToken: string, now = Date.now(), audience = "default"): string {
+  const expires = Math.floor(now / 1000) + SESSION_SECONDS;
+  const payload = `${expires}.${randomBytes(12).toString("hex")}`;
+  return `${payload}.${createHmac("sha256", ownerToken)
+    .update(`rev-console-v2:${audience}:${payload}`).digest("base64url")}`;
+}
+
+export function verifyConsoleSession(
+  value: string | undefined,
+  ownerToken: string,
+  now = Date.now(),
+  audience = "default",
+): boolean {
   if (!value || value.length > 250 || !/^\d{10,12}\.[a-f0-9]{24}\.[a-zA-Z0-9_-]{43}$/.test(value)) return false;
   const [expires, nonce, signature] = value.split(".");
   const end = Number(expires);
   if (!Number.isSafeInteger(end) || end * 1000 <= now || end * 1000 > now + SESSION_SECONDS * 1000) return false;
   const expected = createHmac("sha256", ownerToken)
-    .update(`rev-console-v1:${expires}.${nonce}`).digest("base64url");
+    .update(`rev-console-v2:${audience}:${expires}.${nonce}`).digest("base64url");
   return equal(signature!, expected);
 }
 
-function readCookie(request: Request): string | undefined {
+function readCookie(request: Request, name: string): string | undefined {
   const header = request.header("cookie") ?? "";
   if (header.length > 2000) return undefined;
   const cookie = header.split(";").map((part) => part.trim())
-    .find((part) => part.startsWith(`${COOKIE_NAME}=`));
-  return cookie?.slice(COOKIE_NAME.length + 1);
+    .find((part) => part.startsWith(`${name}=`));
+  return cookie?.slice(name.length + 1);
 }
 
 function loopbackAddress(value: string | undefined): boolean {
@@ -196,8 +214,10 @@ function actualRelease(): string {
  */
 export function registerSynrexConsole(app: Express, config: ServerConfig, services: ConsoleServices = {}): void {
   const attempts = new Map<string, { count: number; until: number }>();
+  const sessionAudience = consoleSessionAudience(config.publicBaseUrl);
+  const cookieName = consoleCookieName(config.publicBaseUrl);
   const auth = (req: Request, res: Response, next: () => void): void => {
-    if (!verifyConsoleSession(readCookie(req), config.oauth.ownerToken)) {
+    if (!verifyConsoleSession(readCookie(req, cookieName), config.oauth.ownerToken, Date.now(), sessionAudience)) {
       res.setHeader("Cache-Control", "no-store");
       res.status(401).json({ error: "Login required" });
       return;
@@ -244,7 +264,11 @@ export function registerSynrexConsole(app: Express, config: ServerConfig, servic
       return;
     }
     attempts.delete(remote);
-    res.cookie(COOKIE_NAME, createConsoleSession(config.oauth.ownerToken), consoleCookieOptions(config, req));
+    res.cookie(
+      cookieName,
+      createConsoleSession(config.oauth.ownerToken, Date.now(), sessionAudience),
+      consoleCookieOptions(config, req),
+    );
     res.status(200).json({ authenticated: true });
   });
   app.get("/console/api/session", auth, (_req, res) => {
@@ -280,7 +304,11 @@ export function registerSynrexConsole(app: Express, config: ServerConfig, servic
   });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
-    res.clearCookie(COOKIE_NAME, consoleCookieOptions(config, req));
+    res.clearCookie(cookieName, consoleCookieOptions(config, req));
+    // Clear the pre-isolation cookie too. It is never accepted for auth after
+    // this release, but removing it avoids stale identity state in browsers
+    // that previously opened more than one local Synrex instance.
+    res.clearCookie(LEGACY_COOKIE_NAME, consoleCookieOptions(config, req));
     res.json({ authenticated: false });
   });
   app.get("/console/api/snapshot", auth, (_req, res) => {

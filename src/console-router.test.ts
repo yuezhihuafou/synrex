@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { consoleAssetBase, createConsoleSession, verifyConsoleSession } from "./console-router.js";
+import {
+  consoleAssetBase,
+  consoleCookieName,
+  consoleSessionAudience,
+  createConsoleSession,
+  verifyConsoleSession,
+} from "./console-router.js";
 import { registerSynrexConsole } from "./console-router.js";
 import express from "express";
 import type { Server } from "node:http";
@@ -12,14 +18,23 @@ import type { ServerConfig } from "./config.js";
 
 test("owner console session is signed, expiring and isolated from another secret", () => {
   const now = Date.now();
-  const token = createConsoleSession("owner-secret-1", now);
-  assert.ok(verifyConsoleSession(token, "owner-secret-1", now));
-  assert.equal(verifyConsoleSession(token, "owner-secret-2", now), false);
-  assert.equal(verifyConsoleSession(token, "owner-secret-1", now + 9 * 60 * 60_000), false);
-  assert.equal(verifyConsoleSession(token + "changed", "owner-secret-1", now), false);
-  assert.equal(verifyConsoleSession("../../", "owner-secret-1", now), false);
+  const group = consoleSessionAudience("https://dev.sanqi.org/group");
+  const personal = consoleSessionAudience("https://dev.sanqi.org/personal");
+  const token = createConsoleSession("owner-secret-1", now, group);
+  assert.ok(verifyConsoleSession(token, "owner-secret-1", now, group));
+  assert.equal(verifyConsoleSession(token, "owner-secret-2", now, group), false);
+  assert.equal(verifyConsoleSession(token, "owner-secret-1", now, personal), false);
+  assert.equal(verifyConsoleSession(token, "owner-secret-1", now + 9 * 60 * 60_000, group), false);
+  assert.equal(verifyConsoleSession(token + "changed", "owner-secret-1", now, group), false);
+  assert.equal(verifyConsoleSession("../../", "owner-secret-1", now, group), false);
+  assert.notEqual(consoleCookieName(group), consoleCookieName(personal));
   assert.ok(!token.includes("owner-secret"));
 });
+
+function consoleAuthCookie(ownerToken: string, publicBaseUrl: string): string {
+  const audience = consoleSessionAudience(publicBaseUrl);
+  return `${consoleCookieName(publicBaseUrl)}=${createConsoleSession(ownerToken, Date.now(), audience)}`;
+}
 
 test("browser trace query stays owner-authenticated, bounded and read-only", async t => {
   const dir = await mkdtemp(path.join(tmpdir(), "synrex-console-trace-"));
@@ -29,8 +44,9 @@ test("browser trace query stays owner-authenticated, bounded and read-only", asy
   diagnostics.record("mcp_finished", { requestId: "request-1", durationMs: 24, status: 200 });
   const app = express();
   const secret = "owner-test-token";
+  const publicBaseUrl = "https://console.example.test";
   registerSynrexConsole(app, {
-    stateDir: dir, publicBaseUrl: "https://console.example.test",
+    stateDir: dir, publicBaseUrl,
     oauth: { ownerToken: secret },
   } as ServerConfig);
   const server = await new Promise<Server>(resolve => {
@@ -40,7 +56,7 @@ test("browser trace query stays owner-authenticated, bounded and read-only", asy
     server.close(error=>error?reject(error):resolve())));
   const base = `http://127.0.0.1:${(server.address() as {port:number}).port}/console/api/trace`;
   assert.equal((await fetch(base+"?requestId=request-1")).status, 401);
-  const cookie = "rev_console="+createConsoleSession(secret);
+  const cookie = consoleAuthCookie(secret, publicBaseUrl);
   const missing = await fetch(base+"?requestId=../../secret", { headers: {cookie} });
   assert.equal(missing.status, 400);
   const response = await fetch(base+"?requestId=request-1", { headers: {cookie} });
@@ -55,15 +71,15 @@ test("explicit title binding requires authenticated, same-origin request and kno
   const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-title-"));
   t.after(()=>rm(dir,{recursive:true,force:true}));
   new DiagnosticTrace(dir).record("mcp_finished",{requestId:"req-0001",status:200});
-  const app=express(),ownerToken="owner-test-secret";
-  registerSynrexConsole(app,{stateDir:dir,publicBaseUrl:"https://console.example.test",
+  const app=express(),ownerToken="owner-test-secret",publicBaseUrl="https://console.example.test";
+  registerSynrexConsole(app,{stateDir:dir,publicBaseUrl,
     oauth:{ownerToken}} as ServerConfig);
   const server=await new Promise<Server>(resolve=>{
     const s=app.listen(0,"127.0.0.1",()=>resolve(s));
   });
   t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
   const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/console/api`;
-  const cookie="rev_console="+createConsoleSession(ownerToken);
+  const cookie=consoleAuthCookie(ownerToken, publicBaseUrl);
   const body=JSON.stringify({requestId:"req-0001",conversationTitle:"评估全链路日志"});
   const send=(id:string,headers:Record<string,string>,json=body)=>fetch(base+id,{
     method:"POST",headers:{"content-type":"application/json",...headers},body:json,
@@ -82,13 +98,13 @@ test("explicit title binding requires authenticated, same-origin request and kno
 test("local desktop console accepts its exact loopback origin", async t => {
   const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-local-"));
   t.after(()=>rm(dir,{recursive:true,force:true}));
-  const app=express(),ownerToken="owner-test-token";
+  const app=express(),ownerToken="owner-test-token",publicBaseUrl="https://console.example.test";
   const server=await new Promise<Server>(resolve=>{
     const s=app.listen(0,"127.0.0.1",()=>resolve(s));
   });
   t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
   const port=(server.address() as {port:number}).port;
-  registerSynrexConsole(app,{stateDir:dir,port,publicBaseUrl:"https://console.example.test",
+  registerSynrexConsole(app,{stateDir:dir,port,publicBaseUrl,
     oauth:{ownerToken}} as ServerConfig);
   const response=await fetch(`http://127.0.0.1:${port}/console/api/login`,{
     method:"POST",headers:{origin:`http://127.0.0.1:${port}`,"content-type":"application/json"},
@@ -96,7 +112,8 @@ test("local desktop console accepts its exact loopback origin", async t => {
   });
   assert.equal(response.status,200);
   const cookie=response.headers.get("set-cookie")??"";
-  assert.match(cookie,/rev_console=/);
+  assert.match(cookie,new RegExp(`${consoleCookieName(publicBaseUrl)}=`));
+  assert.doesNotMatch(cookie,/rev_console=/);
   assert.doesNotMatch(cookie,/; Secure/i);
 });
 
@@ -121,15 +138,15 @@ test("Windows bridge obtains the Control action token server-side", async t => {
     if(url.endsWith("/api/management/service"))return new Response(JSON.stringify({ok:true}),{status:200});
     return new Response(JSON.stringify({error:"not found"}),{status:404});
   };
-  const app=express(),ownerToken="owner-test-token";
-  registerSynrexConsole(app,{stateDir:dir,port:17677,publicBaseUrl:"https://console.example.test",
+  const app=express(),ownerToken="owner-test-token",publicBaseUrl="https://console.example.test";
+  registerSynrexConsole(app,{stateDir:dir,port:17677,publicBaseUrl,
     oauth:{ownerToken}} as ServerConfig,{windowsControlBaseUrl:"http://127.0.0.1:17678",fetchImpl:fakeFetch});
   const server=await new Promise<Server>(resolve=>{
     const s=app.listen(0,"127.0.0.1",()=>resolve(s));
   });
   t.after(()=>new Promise<void>((resolve,reject)=>server.close(e=>e?reject(e):resolve())));
   const base=`http://127.0.0.1:${(server.address() as {port:number}).port}/console/api/windows`;
-  const cookie="rev_console="+createConsoleSession(ownerToken);
+  const cookie=consoleAuthCookie(ownerToken, publicBaseUrl);
   assert.equal((await fetch(base+"/status",{headers:{cookie}})).status,200);
   assert.equal(calls.some(call=>call.url.endsWith("/api/action-token")),false);
   const response=await fetch(base+"/service",{method:"POST",headers:{cookie,origin:"https://console.example.test",

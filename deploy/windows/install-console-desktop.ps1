@@ -7,31 +7,36 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath($PlatformRoot).TrimEnd('\')
 $desktopRoot = Join-Path $root 'desktop'
 $appRoot = Join-Path $desktopRoot 'resources\app'
-$launcher = Join-Path $root 'ops\start-modern-desktop.ps1'
+$launcherSource = Join-Path $PSScriptRoot 'start-synrex-console.ps1'
+$launcher = Join-Path $root 'ops\start-synrex-console.ps1'
 $legacyExe = Join-Path $desktopRoot 'DevSpaceForgeDesktop.exe'
 $synrexExe = Join-Path $desktopRoot 'SynrexConsole.exe'
+$shortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Synrex Console.lnk'
 $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
 $backup = Join-Path $root "state\runtime-rollback\synrex-console-desktop-$stamp"
 
-foreach ($file in @($launcher, $legacyExe)) {
+foreach ($file in @($launcherSource, $legacyExe)) {
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Required Windows Console asset missing: $file" }
 }
 New-Item -ItemType Directory -Force -Path $backup | Out-Null
-Copy-Item -LiteralPath $launcher -Destination (Join-Path $backup 'start-modern-desktop.ps1')
+if (Test-Path -LiteralPath $launcher) { Copy-Item -LiteralPath $launcher -Destination (Join-Path $backup 'start-synrex-console.ps1') }
+if (Test-Path -LiteralPath $shortcut) { Copy-Item -LiteralPath $shortcut -Destination (Join-Path $backup 'Synrex Console.lnk') }
 if (Test-Path -LiteralPath $appRoot) { Copy-Item -LiteralPath $appRoot -Destination (Join-Path $backup 'app') -Recurse }
 
 New-Item -ItemType Directory -Force -Path $appRoot | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'desktop\main.cjs') -Destination (Join-Path $appRoot 'main.cjs') -Force
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'desktop\package.json') -Destination (Join-Path $appRoot 'package.json') -Force
+Copy-Item -LiteralPath $launcherSource -Destination $launcher -Force
 if (-not (Test-Path -LiteralPath $synrexExe)) { Copy-Item -LiteralPath $legacyExe -Destination $synrexExe }
 
-$text = Get-Content -Raw -LiteralPath $launcher
-$text = $text.Replace("`$desktop = Join-Path `$root 'desktop\DevSpaceForgeDesktop.exe'", "`$desktop = Join-Path `$root 'desktop\SynrexConsole.exe'")
-$needle = "`$env:DEVSPACE_CONTROL_URL = `$url"
-if (-not $text.Contains('$env:SYNREX_CONSOLE_URL')) {
-    $text = $text.Replace($needle, $needle + "`r`n    `$env:SYNREX_CONSOLE_URL = 'http://127.0.0.1:17677/console'")
-}
-[IO.File]::WriteAllText($launcher, $text, [Text.UTF8Encoding]::new($false))
+$shell = New-Object -ComObject WScript.Shell
+$link = $shell.CreateShortcut($shortcut)
+$link.TargetPath = (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')
+$link.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $launcher + '" -PlatformRoot "' + $root + '"'
+$link.WorkingDirectory = $root
+$link.IconLocation = $synrexExe + ',0'
+$link.Description = 'Open Synrex Console for this Windows node'
+$link.Save()
 
 if ($Restart) {
     Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe' OR Name='DevSpaceForgeDesktop.exe'" -ErrorAction SilentlyContinue |
@@ -48,7 +53,7 @@ if ($Restart) {
     # The launcher owns a named mutex while it waits for Electron. Give the
     # previous launcher a brief chance to observe Electron exit and release it.
     Start-Sleep -Milliseconds 500
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',('"' + $launcher + '"'),'-PlatformRoot',('"' + $root + '"')) -WindowStyle Hidden | Out-Null
+    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $launcher + '"'),'-PlatformRoot',('"' + $root + '"')) -WindowStyle Hidden | Out-Null
     $startDeadline = [DateTime]::UtcNow.AddSeconds(12)
     do {
         Start-Sleep -Milliseconds 250
@@ -64,5 +69,7 @@ if ($Restart) {
     product = 'Synrex Console'
     executable = $synrexExe
     console_url = 'http://127.0.0.1:17677/console'
+    launcher = $launcher
+    shortcut = $shortcut
     backup = $backup
 }
