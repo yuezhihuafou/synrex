@@ -75,9 +75,9 @@ type Snapshot = {
         totals:{inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number};
         peakMinute:{at:string;tokens:number;tokensPerSecond:number}|null;
         peakOutputCall:{at:string;tokens:number}|null;
-        minute:Array<{at:string;inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number}>;
-        hour:Array<{at:string;inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number}>;
-        day:Array<{at:string;inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number}>}|null} };
+        runtime?:{averageTokensPerSecond:number|null;matchedOutputTokens:number;matchedDurationMs:number;
+          measuredCalls:number;observedFrom:string|null};
+        minute:Array<TokenHistoryPoint>;hour:Array<TokenHistoryPoint>;day:Array<TokenHistoryPoint>}|null} };
     requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
     conversationTitle?:string; conversationId?:string; runId?:string;
     classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
@@ -111,6 +111,9 @@ const menus: Array<{ id: View; title: string; symbol: string; caption: string }>
   { id: "resources", title: "资源与网络", symbol: "▥", caption: "进程 / CPU / 网络" },
   { id: "memory", title: "记忆与治理", symbol: "◇", caption: "学习证据" },
 ];
+type TokenHistoryPoint={at:string;inputTokens:number;outputTokens:number;calls:number;
+  measuredInputs:number;measuredOutputs:number;runtimeMatchedTokens?:number;runtimeDurationMs?:number;
+  runtimeSamples?:number;runtimeAverageTokensPerSecond?:number|null};
 const statusText: Record<string,string> = {
   online:"在线", offline:"离线", suspect:"连接异常", draining:"停止调度", active:"进行中",
   blocked:"阻塞", completed:"已完成", cancelled:"已取消",
@@ -143,16 +146,26 @@ function RexPerformance({d}:{d:Snapshot}) {
   const t=d.diagnostics.observability?.tokens;
   const history=t?.history;
   const [range,setRange]=useState<"24h"|"30d"|"365d">("24h");
+  const [curve,setCurve]=useState<"volume"|"active">("volume");
   const total=history?history.totals.inputTokens+history.totals.outputTokens:t&&(t.inputTotal!==null||t.outputTotal!==null)
     ?(t.inputTotal??0)+(t.outputTotal??0):null;
   const trend=history?(range==="24h"?history.minute:range==="30d"?history.hour:history.day):[];
-  const hasTrend=trend.some(b=>b.measuredOutputs>0);
-  const maximum=Math.max(1,...trend.map(b=>b.outputTokens));
-  const points=trend.map((b,i)=>`${trend.length===1?0:i*600/(trend.length-1)},${110-100*b.outputTokens/maximum}`).join(" ");
+  const hasTrend=trend.some(b=>curve==="volume"?b.measuredOutputs>0:(b.runtimeSamples??0)>0);
+  const plot=trend.filter(b=>curve==="volume"?b.measuredOutputs>0:(b.runtimeSamples??0)>0);
+  const maximum=Math.max(1,...plot.map(b=>curve==="volume"?b.outputTokens:(b.runtimeAverageTokensPerSecond??0)));
+  const first=trend.length?Date.parse(trend[0]!.at):0;
+  const last=trend.length?Date.parse(trend[trend.length-1]!.at):0;
+  const points=plot.map((b,i)=>`${last>first?600*(Date.parse(b.at)-first)/(last-first):300},${110-100*(curve==="volume"?b.outputTokens:(b.runtimeAverageTokensPerSecond??0))/maximum}`).join(" ");
+  const windowRuntimeTokens=trend.reduce((n,b)=>n+(b.runtimeMatchedTokens??0),0);
+  const windowRuntimeMs=trend.reduce((n,b)=>n+(b.runtimeDurationMs??0),0);
+  const windowRuntimeCalls=trend.reduce((n,b)=>n+(b.runtimeSamples??0),0);
+  const windowRuntimeRate=windowRuntimeMs>0?Math.round(windowRuntimeTokens*10000/windowRuntimeMs)/10:null;
   return <Panel title="Rex Performance" hint="仅计算真实经过 Rex 的工具参数及文本结果 · 不等于 GPT 内部推理速度">
     <div className="metrics performance-metrics">
       <Metric label="工具输出吞吐" symbol="↑" value={t?.outputTokensPerSecond==null?"未测量":`${t.outputTokensPerSecond} Token/s`}
         info="最近 60 秒已完成工具结果 ÷ 60"/>
+      <Metric label="运行期间平均吞吐" symbol="⇄" value={history?.runtime?.averageTokensPerSecond==null?"未测量":`${history.runtime.averageTokensPerSecond} Token/s`}
+        info={history?.runtime?.measuredCalls?`${history.runtime.measuredCalls} 次完整配对 · ${time(history.runtime.observedFrom??undefined)} 起`:"只统计 Token 与调用耗时均可观测的完成请求"}/>
       <Metric label={history?"持久累计 Token":"当前可观测 Token"} symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
         info={history?`可观测自 ${time(history.observedFrom??history.startedAt)} · 输入 ${history.totals.measuredInputs} / 输出 ${history.totals.measuredOutputs} 次已计量`:"尚无历史账本；仅展示有限日志窗口"}/>
       <Metric label="工具调用速率" symbol="⌘" value={t?.toolCallsPerMinute==null?"未知":`${t.toolCallsPerMinute} 次/min`}
@@ -161,23 +174,29 @@ function RexPerformance({d}:{d:Snapshot}) {
         info="最近 60 秒有完整记录的调用"/>
     </div>
     <div className="performance-chart">
-      <div className="usage-actions"><p className="footnote">持久化工具输出趋势（按分钟 / 小时 / 天）</p>
+      <div className="usage-actions"><p className="footnote">持久化工具统计趋势</p>
         <div className="usage-range" role="group" aria-label="Token 历史范围">
           {(["24h","30d","365d"] as const).map(v=><button key={v} type="button" className={range===v?"selected":""}
             aria-pressed={range===v} onClick={()=>setRange(v)}>{v==="24h"?"24 小时":v==="30d"?"30 天":"365 天"}</button>)}
         </div></div>
-      {hasTrend?<svg role="img" aria-label={`${range} 工具输出 Token 历史趋势`}
+      <div className="usage-range" role="group" aria-label="Token 趋势指标">
+        <button type="button" className={curve==="volume"?"selected":""} aria-pressed={curve==="volume"} onClick={()=>setCurve("volume")}>输出 Token</button>
+        <button type="button" className={curve==="active"?"selected":""} aria-pressed={curve==="active"} onClick={()=>setCurve("active")}>运行平均 Token/s</button>
+      </div>
+      {hasTrend?<svg role="img" aria-label={`${range} ${curve==="volume"?"输出 Token":"调用耗时加权吞吐"}历史趋势`}
         viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:125}}>
         <line x1="0" y1="110" x2="600" y2="110" stroke="currentColor" opacity="0.2"/>
-        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
-      </svg>:<Blank>该时间范围暂无已计量的工具文本输出。</Blank>}
+        {plot.length===1?<circle cx="300" cy={110-100*(curve==="volume"?plot[0]!.outputTokens:(plot[0]!.runtimeAverageTokensPerSecond??0))/maximum} r="4" fill="currentColor"/>:
+          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>}
+      </svg>:<Blank>该时间范围暂无相关完整观测样本。</Blank>}
+      <p className="footnote">本时段运行均速：{windowRuntimeRate===null?"未测量":`${windowRuntimeRate} Token/s`}（{windowRuntimeCalls} 次完成调用）；仅统计已配对请求的累计输出量 ÷ 累计调用耗时，不包含两次调用之间的空闲时间。</p>
       <div className="metrics performance-peaks">
-        <Metric symbol="⌁" label="历史分钟吞吐峰值" value={history?.peakMinute?`${history.peakMinute.tokensPerSecond} Token/s`:"未测量"}
-          info={history?.peakMinute?`最高完整分钟桶 · ${time(history.peakMinute.at)}`:"每分钟输出量 ÷ 60"}/>
+        <Metric symbol="⌁" label="历史分钟交付峰值" value={history?.peakMinute?`${history.peakMinute.tokensPerSecond} Token/s`:"未测量"}
+          info={history?.peakMinute?`最高有记录分钟桶 · ${time(history.peakMinute.at)}`:"每分钟完成输出量 ÷ 60"}/>
         <Metric symbol="↑" label="最大单次工具输出" value={history?.peakOutputCall?`${history.peakOutputCall.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
           info={history?.peakOutputCall?time(history.peakOutputCall.at):"仅计量文本结果"}/>
       </div>
-      <p className="footnote">编码器 {t?.encoding??"尚未接入"}；从留存诊断日志开始累计，缺失的早期 Token 无法补算。{history?.coverageGaps?`检测到 ${history.coverageGaps} 次日志缺口，累计为已观测下限。`:""}统计仅在独立快照进程写入，当前速率仍是最近 60 秒完成量，不是模型内部生成速度。</p>
+      <p className="footnote">编码器 {t?.encoding??"尚未接入"}；运行均速是按 HTTP 调用耗时加权的工具交付效率，不是模型解码速度或物理链路吞吐。旧版缺失的 Token 和调用耗时不会补算。{history?.coverageGaps?`检测到 ${history.coverageGaps} 次日志缺口。`:"日志缺口 0 不代表 Token 覆盖率 100%。"}统计由独立快照进程持久记录，不调用模型。</p>
     </div>
   </Panel>;
 }

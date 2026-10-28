@@ -4,15 +4,22 @@ import type { DiagnosticEntry } from "./diagnostic-trace.js";
 
 // Exclusively called from the 15-second snapshot sidecar, never by MCP/Console HTTP.
 // Keep a single small JSON ledger in the existing private observability directory.
-type Bucket = { input: number; output: number; calls: number; inputSamples: number; outputSamples: number };
+type Bucket = { input: number; output: number; calls: number; inputSamples: number; outputSamples: number;
+  runtimeOutputTokens?: number; runtimeDurationMs?: number; runtimeSamples?: number };
 type Peak = { at: string; tokens: number; tokensPerSecond: number };
 type CallPeak = { at: string; tokens: number };
 type Cursor = { offset: number; lastSeenAt: string };
+type PendingRun = { outputTokens?: number; durationMs?: number; finishedAt?: string; sampledAt?: string };
+type RuntimeTotal = { outputTokens: number; durationMs: number; samples: number; observedFrom: string | null };
 export interface TokenHistory {
   schemaVersion: 1; encoding: "o200k_base"; startedAt: string; observedFrom?: string; updatedAt: string;
   totals: Bucket; peakMinute: Peak | null; peakOutputCall: CallPeak | null;
   minute: Record<string, Bucket>; hour: Record<string, Bucket>; day: Record<string, Bucket>;
   cursors: Record<string, Cursor>; gaps: number;
+  /** Added without resetting existing persisted totals or their cursors. */
+  runtime?: RuntimeTotal;
+  pendingRuns?: Record<string, PendingRun>;
+  completedRuns?: Record<string,string>;
 }
 const empty = (): Bucket => ({ input: 0, output: 0, calls: 0, inputSamples: 0, outputSamples: 0 });
 const isCount = (n: unknown): n is number => typeof n === "number" && Number.isSafeInteger(n) && n >= 0;
@@ -45,12 +52,14 @@ function applyEvent(history: TokenHistory, entry: DiagnosticEntry): void {
     (entry.event === "mcp_body_ready" && entry.rpcMethod === "tools/call")) && isCount(entry.inputTokens);
   const isOutput=(entry.event === "tool_tokens_measured" || entry.event === "mcp_finished") && isCount(entry.outputTokens);
   const isCall=entry.event === "tool_execution_started";
-  if (!isInput && !isOutput && !isCall) return;
+  const isFinish=entry.event === "mcp_finished" && typeof entry.durationMs === "number"
+    && Number.isFinite(entry.durationMs) && entry.durationMs>0;
+  if (!isInput && !isOutput && !isCall && !isFinish) return;
   if(!history.observedFrom || iso<history.observedFrom)history.observedFrom=iso;
-  const buckets=[history.totals,
-    history.minute[minute]??(history.minute[minute]=empty()),
-    history.hour[hour]??(history.hour[hour]=empty()),
-    history.day[day]??(history.day[day]=empty())];
+  const minuteBucket=history.minute[minute]??(history.minute[minute]=empty());
+  const hourBucket=history.hour[hour]??(history.hour[hour]=empty());
+  const dayBucket=history.day[day]??(history.day[day]=empty());
+  const buckets=[history.totals,minuteBucket,hourBucket,dayBucket];
   for (const b of buckets) {
     if (isInput) { b.input+=entry.inputTokens!; b.inputSamples++; }
     if (isOutput) { b.output+=entry.outputTokens!; b.outputSamples++; }
@@ -64,6 +73,46 @@ function applyEvent(history: TokenHistory, entry: DiagnosticEntry): void {
     }
     if (!history.peakOutputCall || tokens>history.peakOutputCall.tokens) {
       history.peakOutputCall={at:iso,tokens};
+    }
+  }
+  // Pair asynchronous Token-worker results with the original completed request.
+  // Never persist tool text or invent a duration for missing/unfinished calls.
+  const requestId=entry.requestId??entry.traceId;
+  if (requestId && (isOutput||isFinish) && !history.completedRuns?.[requestId]) {
+    history.runtime??={outputTokens:0,durationMs:0,samples:0,observedFrom:null};
+    history.pendingRuns??={};
+    const pending=history.pendingRuns[requestId]??(history.pendingRuns[requestId]={});
+    if (isOutput && pending.outputTokens===undefined) {
+      pending.outputTokens=entry.outputTokens;
+      pending.sampledAt=iso;
+    }
+    if (isFinish && pending.durationMs===undefined) {
+      pending.durationMs=entry.durationMs;
+      pending.finishedAt=iso;
+    }
+    if (isCount(pending.outputTokens) && typeof pending.durationMs==="number" && pending.durationMs>0) {
+      // Charge a complete call once, at its finish timestamp, even when its
+      // output measurement arrives in a later snapshot/timer cycle.
+      const completedAt=pending.finishedAt??iso;
+      const completedMinute=completedAt.slice(0,16)+":00.000Z";
+      const completedHour=completedAt.slice(0,13)+":00:00.000Z";
+      const completedDay=completedAt.slice(0,10);
+      const matchedBuckets=[history.totals,
+        history.minute[completedMinute]??(history.minute[completedMinute]=empty()),
+        history.hour[completedHour]??(history.hour[completedHour]=empty()),
+        history.day[completedDay]??(history.day[completedDay]=empty())];
+      for (const b of matchedBuckets) {
+        b.runtimeOutputTokens=(b.runtimeOutputTokens??0)+pending.outputTokens;
+        b.runtimeDurationMs=(b.runtimeDurationMs??0)+pending.durationMs;
+        b.runtimeSamples=(b.runtimeSamples??0)+1;
+      }
+      history.runtime.outputTokens+=pending.outputTokens;
+      history.runtime.durationMs+=pending.durationMs;
+      history.runtime.samples++;
+      if (!history.runtime.observedFrom || completedAt<history.runtime.observedFrom) history.runtime.observedFrom=completedAt;
+      delete history.pendingRuns[requestId];
+      history.completedRuns??={};
+      history.completedRuns[requestId]=completedAt;
     }
   }
 }
@@ -84,6 +133,31 @@ function prune(history: TokenHistory, now: Date): void {
   for (const [inode,cursor] of Object.entries(history.cursors)) {
     if (Date.parse(cursor.lastSeenAt) < now.getTime()-2*86400_000) delete history.cursors[inode];
   }
+  const pending=history.pendingRuns??{};
+  for (const [id,run] of Object.entries(pending)) {
+    const at=Date.parse(run.finishedAt??run.sampledAt??"");
+    if (!Number.isFinite(at)||at<now.getTime()-86400_000) delete pending[id];
+  }
+  // Bound sidecar memory in case repeated unfinished requests accumulate.
+  const ids=Object.keys(pending);
+  if(ids.length>2048) {
+    ids.sort((a,b)=>Date.parse(pending[a]?.finishedAt??pending[a]?.sampledAt??"")-
+      Date.parse(pending[b]?.finishedAt??pending[b]?.sampledAt??""));
+    for(const id of ids.slice(0,ids.length-2048))delete pending[id];
+  }
+  const completed=history.completedRuns??{};
+  for(const [id,ts] of Object.entries(completed)) {
+    if(Date.parse(ts)<now.getTime()-86400_000)delete completed[id];
+  }
+  const completedIds=Object.keys(completed);
+  if(completedIds.length>2048) {
+    completedIds.sort((a,b)=>Date.parse(completed[a]!)-Date.parse(completed[b]!));
+    for(const id of completedIds.slice(0,completedIds.length-2048))delete completed[id];
+  }
+}
+
+function average(tokens:number,durationMs:number):number|null {
+  return durationMs>0?Math.round(tokens*10000/durationMs)/10:null;
 }
 
 /** Tail only appended complete lines. State/cursors and counters commit atomically. */
@@ -145,10 +219,17 @@ export function updateTokenHistory(stateDir: string, now=new Date()): TokenHisto
 export function tokenHistorySummary(s: TokenHistory) {
   const series=(o: Record<string,Bucket>)=>Object.entries(o).sort(([a],[b])=>a.localeCompare(b))
     .map(([at,b])=>({at,inputTokens:b.input,outputTokens:b.output,calls:b.calls,
-      measuredInputs:b.inputSamples,measuredOutputs:b.outputSamples}));
+      measuredInputs:b.inputSamples,measuredOutputs:b.outputSamples,
+      runtimeMatchedTokens:b.runtimeOutputTokens??0,runtimeDurationMs:b.runtimeDurationMs??0,
+      runtimeSamples:b.runtimeSamples??0,
+      runtimeAverageTokensPerSecond:average(b.runtimeOutputTokens??0,b.runtimeDurationMs??0)}));
+  const total=s.runtime;
   return {startedAt:s.startedAt,observedFrom:s.observedFrom??null,updatedAt:s.updatedAt,coverageGaps:s.gaps,
     totals:{inputTokens:s.totals.input,outputTokens:s.totals.output,calls:s.totals.calls,
       measuredInputs:s.totals.inputSamples,measuredOutputs:s.totals.outputSamples},
     peakMinute:s.peakMinute,peakOutputCall:s.peakOutputCall,
+    runtime:{averageTokensPerSecond:average(total?.outputTokens??0,total?.durationMs??0),
+      matchedOutputTokens:total?.outputTokens??0,matchedDurationMs:total?.durationMs??0,
+      measuredCalls:total?.samples??0,observedFrom:total?.observedFrom??null},
     minute:series(s.minute),hour:series(s.hour),day:series(s.day)};
 }

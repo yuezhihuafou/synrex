@@ -67,3 +67,57 @@ test("detected log gaps are explicit and damaged history is not reset to zero",a
   assert.throws(()=>updateTokenHistory(dir,new Date(now.getTime()+30000)));
   assert.equal(await readFile(history,"utf8"),"{broken");
 });
+
+test("runtime-average throughput pairs Token-worker output with completed HTTP durations across snapshots",async t=>{
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-runtime-throughput-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const logs=path.join(dir,"diagnostics");await mkdir(logs);
+  const file=path.join(logs,"recent.jsonl");
+  const at=(id:string,event:DiagnosticEntry["event"],ts:string,fields:Partial<DiagnosticEntry>={})=>
+    JSON.stringify({event,ts,requestId:id,...fields})+"\n";
+  await writeFile(file,
+    at("a","mcp_finished","2026-10-28T12:09:04Z",{durationMs:3000})+
+    at("b","tool_tokens_measured","2026-10-28T12:09:04Z",{outputTokens:300})+
+    at("skip","tool_tokens_measured","2026-10-28T12:09:04Z",{outputTokens:500}));
+  let h=tokenHistorySummary(updateTokenHistory(dir,now));
+  assert.equal(h.runtime.averageTokensPerSecond,null,"unmatched calls cannot claim a throughput");
+  assert.equal(h.totals.outputTokens,800,"unpaired counts stay in the usual cumulative total");
+
+  // Outputs and finish events may arrive in either order and across timer runs.
+  await appendFile(file,
+    at("a","tool_tokens_measured","2026-10-28T12:09:10Z",{outputTokens:200})+
+    at("b","mcp_finished","2026-10-28T12:09:12Z",{durationMs:2000})+
+    at("zero","mcp_finished","2026-10-28T12:09:12Z",{durationMs:0,outputTokens:100}));
+  h=tokenHistorySummary(updateTokenHistory(dir,new Date(now.getTime()+15000)));
+  assert.equal(h.runtime.averageTokensPerSecond,100,"500 output tokens / 5 observed seconds");
+  assert.deepEqual({calls:h.runtime.measuredCalls,tokens:h.runtime.matchedOutputTokens,ms:h.runtime.matchedDurationMs},
+    {calls:2,tokens:500,ms:5000});
+  assert.equal(h.minute[0]?.runtimeAverageTokensPerSecond,100);
+  assert.equal(h.minute[0]?.runtimeSamples,2);
+  assert.equal(h.runtime.observedFrom,"2026-10-28T12:09:04.000Z");
+
+  await rename(file,file+".1");
+  await writeFile(file,at("a","mcp_finished","2026-10-28T12:09:40Z",{durationMs:3000})+
+    at("a","tool_tokens_measured","2026-10-28T12:09:41Z",{outputTokens:200})+
+    at("legacy","mcp_finished","2026-10-28T12:09:45Z",{durationMs:1000,outputTokens:100}));
+  h=tokenHistorySummary(updateTokenHistory(dir,new Date(now.getTime()+30000)));
+  assert.equal(h.runtime.measuredCalls,3,"duplicate request ID never double counts matched runtime");
+  assert.equal(h.runtime.averageTokensPerSecond,100);
+  assert.equal(tokenHistorySummary(updateTokenHistory(dir,new Date(now.getTime()+45000))).runtime.measuredCalls,3);
+});
+
+test("upgrading an existing ledger adds runtime stats without resetting historical Token totals",async t=>{
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-runtime-upgrade-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  await mkdir(path.join(dir,"observability"));
+  await mkdir(path.join(dir,"diagnostics"));
+  const file=path.join(dir,"diagnostics","recent.jsonl");
+  await writeFile(file,e("tool_tokens_measured","2026-10-28T12:09:02Z",{outputTokens:150}));
+  const old=updateTokenHistory(dir,now);
+  assert.equal(old.totals.output,150);
+  await appendFile(file,e("mcp_finished","2026-10-28T12:09:05Z",{durationMs:3000}));
+  const upgraded=tokenHistorySummary(updateTokenHistory(dir,new Date(now.getTime()+15000)));
+  assert.equal(upgraded.totals.outputTokens,150);
+  assert.equal(upgraded.runtime.averageTokensPerSecond,50);
+  assert.equal(upgraded.runtime.measuredCalls,1);
+});
