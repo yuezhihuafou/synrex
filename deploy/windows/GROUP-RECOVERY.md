@@ -9,7 +9,7 @@ executable name alone. Occupied ports fail closed. A named mutex prevents duplic
 supervisors; an exited Tunnel is restarted, and a failed Core is recovered by the
 scheduled task. No token value is passed to a command or written to logs.
 
-Run PowerShell as the owner, elevated for installation or activation:
+Run PowerShell as the owner, elevated for installation, activation or restart:
 
 ```powershell
 & .\deploy\windows\group-service.ps1 -Action Activate -PlatformRoot $groupRoot -SlotName $verifiedCandidate
@@ -29,3 +29,7 @@ requires elevated installation and cannot start before the user logs in.
 Default S4U tasks have boot and logon triggers and retry
 failures every minute. Real reboot and host-native connector results must be
 reported separately from a successful task restart.
+
+The supervisor records its Core PID, creation time and immutable slot. Restart
+and crash recovery validate all three plus the executable/CLI before stopping
+leftover Core children. A reused PID or unrelated listener is never adopted.

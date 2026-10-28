@@ -11,6 +11,7 @@ $tunnelId = 'edbf2dd7-2cc1-434c-979a-2f6b387eebe3'
 $tokenFile = Join-Path $root 'state\secrets\cloudflare-tunnel-token.txt'
 $pointer = Join-Path $root 'runtime\active-slot.txt'
 $installedScript = Join-Path $root 'ops\group-service.ps1'
+$processReceipt = Join-Path $root 'state\group-service-core.json'
 $utf8 = New-Object Text.UTF8Encoding($false)
 
 function Get-Slot([string]$name) {
@@ -55,6 +56,19 @@ function Get-HttpStatus([string]$url) {
     catch { if ($_.Exception.Response) { return [int]$_.Exception.Response.StatusCode }; return 0 }
 }
 
+function Stop-OwnedCore {
+    if (!(Test-Path -LiteralPath $processReceipt)) { return }
+    $receipt = Get-Content -LiteralPath $processReceipt -Raw | ConvertFrom-Json
+    $ownedSlot = Get-Slot $receipt.slot
+    $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$receipt.pid)
+    if (!$process -or $process.CreationDate.ToUniversalTime().ToString('o') -ne $receipt.created) { return }
+    if ($process.ExecutablePath -ne $ownedSlot.Node -or !$process.CommandLine.Contains(('"' + $ownedSlot.Cli + '" serve'))) {
+        throw 'Recorded Group Core identity does not match; refusing to stop it.'
+    }
+    Stop-Process -Id $process.ProcessId -ErrorAction Stop
+    Wait-Process -Id $process.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+}
+
 function Wait-Endpoint([string]$url, [int]$expected, [int]$seconds = 90) {
     $deadline = [DateTime]::UtcNow.AddSeconds($seconds)
     do {
@@ -90,6 +104,7 @@ function Stop-Group {
         }
         Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
     }
+    Stop-OwnedCore
     # Match only the Group token file; Qwen uses the same executable.
     foreach ($process in Get-GroupTunnels) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
@@ -129,12 +144,17 @@ if ($Action -eq 'Run') {
     try {
         try { $ownsMutex = $mutex.WaitOne(0) } catch [Threading.AbandonedMutexException] { $ownsMutex = $true }
         if (!$ownsMutex) { Write-Output 'Group supervisor already owns the startup chain.'; exit 0 }
+        # Task Scheduler can leave Start-Process children alive after stopping the supervisor.
+        Stop-OwnedCore
+        foreach ($process in Get-GroupTunnels) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
         Assert-FreePort 17677
         Assert-FreePort 20243
         if (@(Get-GroupTunnels).Count -gt 0) { throw 'A standalone Group Tunnel is running; use Restart to transfer ownership.' }
         $env:DEVSPACE_CONFIG_DIR = Join-Path $root 'state\devspace-config'
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
         $core = Start-Process -FilePath $slot.Node -ArgumentList @(('"' + $slot.Cli + '"'), 'serve') -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root ('logs\group-core-' + $stamp + '.stdout.log')) -RedirectStandardError (Join-Path $root ('logs\group-core-' + $stamp + '.stderr.log')) -PassThru
+        $identity = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $core.Id)
+        @{ slot = $slot.Name; pid = $core.Id; created = $identity.CreationDate.ToUniversalTime().ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $processReceipt -Encoding UTF8
         Wait-Endpoint 'http://127.0.0.1:17677/group/healthz' 200
         if ($core.HasExited -or (Get-NetTCPConnection -State Listen -LocalPort 17677).OwningProcess -ne $core.Id) { throw 'Core listener is not owned by the launched process.' }
         do {
@@ -158,6 +178,10 @@ if ($Action -eq 'Run') {
     }
 }
 
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Run Install, Activate or Restart from elevated PowerShell; production has not been stopped.'
+}
 if ($Action -eq 'Restart') {
     $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if (!$currentTask.Actions[0].Arguments.Contains($installedScript)) { throw 'Install the Group supervisor before restarting it.' }
@@ -165,10 +189,6 @@ if ($Action -eq 'Restart') {
     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
     Test-Chain
     exit 0
-}
-$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Run Install or Activate from elevated PowerShell; production has not been stopped.'
 }
 if ($Action -eq 'Activate' -and !$SlotName) { throw 'Activate requires a candidate SlotName.' }
 $backup = Join-Path $root ('runtime-backups\group-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
@@ -199,7 +219,7 @@ try {
     Write-Output ('Group chain ready; rollback snapshot: ' + $backup)
 } catch {
     $failure = $_
-    if ($taskChanged) { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
+    if ($taskChanged) { Stop-Group }
     [IO.File]::WriteAllText($pointer, $oldSlot + [Environment]::NewLine, $utf8)
     if (Test-Path -LiteralPath (Join-Path $backup 'group-service.ps1')) { Copy-Item -LiteralPath (Join-Path $backup 'group-service.ps1') -Destination $installedScript -Force }
     if ($oldTask) {

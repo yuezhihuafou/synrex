@@ -29,6 +29,12 @@ test("Windows Group startup rejects wrong credentials, endpoints and occupied po
   await assert.rejects(invoke, /non-Group endpoint/);
   config.server.port = 17677;
   await writeFile(join(configDir, "config.jsonc"), JSON.stringify(config));
+  const identity = await exec("powershell.exe", ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter 'ProcessId=${process.pid}').CreationDate.ToUniversalTime().ToString('o')`]);
+  const receipt = join(root, "state/group-service-core.json");
+  await writeFile(receipt, JSON.stringify({ slot: "synrex-windows-test", pid: process.pid, created: identity.stdout.trim() }));
+  await assert.rejects(invoke);
+  assert.match(await readFile(join(root, "logs/group-service.log"), "utf8"), /Recorded Group Core identity does not match/);
+  await rm(receipt);
   const listener = createServer();
   await new Promise<void>((done, reject) => {
     listener.once("error", (error: NodeJS.ErrnoException) => error.code === "EADDRINUSE" ? done() : reject(error));
