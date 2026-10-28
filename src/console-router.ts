@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
 import type { ServerConfig } from "./config.js";
-import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { DiagnosticTrace, diagnosticRuntime } from "./diagnostic-trace.js";
 import { readOtelFileTail } from "./otel-file-reader.js";
 import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
 import { assignConversationLabel, readConversationLabels } from "./conversation-labels.js";
@@ -14,6 +14,7 @@ const COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_WINDOW_MS = 60_000;
+const SESSION_VERSION = "2";
 
 function equal(a: string, b: string): boolean {
   const first = Buffer.from(a);
@@ -21,20 +22,63 @@ function equal(a: string, b: string): boolean {
   return first.length === second.length && timingSafeEqual(first, second);
 }
 
-export function createConsoleSession(ownerToken: string, now = Date.now()): string {
+export function createConsoleSession(ownerToken: string, scope: string, now = Date.now()): string {
   const expires = Math.floor(now / 1000) + SESSION_SECONDS;
   const payload = `${expires}.${randomBytes(12).toString("hex")}`;
-  return `${payload}.${createHmac("sha256", ownerToken).update("rev-console-v1:" + payload).digest("base64url")}`;
+  const signature = createHmac("sha256", ownerToken)
+    .update(`synrex-console-v2\0${scope}\0${payload}`).digest("base64url");
+  return `${SESSION_VERSION}.${payload}.${signature}`;
 }
 
-export function verifyConsoleSession(value: string | undefined, ownerToken: string, now = Date.now()): boolean {
-  if (!value || value.length > 250 || !/^\d{10,12}\.[a-f0-9]{24}\.[a-zA-Z0-9_-]{43}$/.test(value)) return false;
-  const [expires, nonce, signature] = value.split(".");
+export function verifyConsoleSession(
+  value: string | undefined,
+  ownerToken: string,
+  scope: string,
+  now = Date.now(),
+): boolean {
+  if (!value || value.length > 280 || !/^2\.\d{10,12}\.[a-f0-9]{24}\.[a-zA-Z0-9_-]{43}$/.test(value)) return false;
+  const [version, expires, nonce, signature] = value.split(".");
+  if (version !== SESSION_VERSION) return false;
   const end = Number(expires);
   if (!Number.isSafeInteger(end) || end * 1000 <= now || end * 1000 > now + SESSION_SECONDS * 1000) return false;
   const expected = createHmac("sha256", ownerToken)
-    .update(`rev-console-v1:${expires}.${nonce}`).digest("base64url");
+    .update(`synrex-console-v2\0${scope}\0${expires}.${nonce}`).digest("base64url");
   return equal(signature!, expected);
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[/, "").replace(/\]$/, "");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+/**
+ * Resolve the browser-visible Console origin without trusting a mutable
+ * frontend cache. The configured public origin is authoritative for its host;
+ * direct HTTP access is permitted only on loopback.
+ */
+function requestConsoleOrigin(req: Request, config: ServerConfig): URL | undefined {
+  const host = req.header("host")?.trim();
+  if (!host || host.length > 255) return undefined;
+  let hostUrl: URL;
+  try { hostUrl = new URL(`http://${host}`); } catch { return undefined; }
+  const publicUrl = new URL(config.publicBaseUrl);
+  if (host.toLowerCase() === publicUrl.host.toLowerCase()) return new URL(publicUrl.origin);
+  if (!isLoopbackHostname(hostUrl.hostname)) return undefined;
+  return new URL(`${req.secure ? "https" : "http"}://${host}`);
+}
+
+export function consoleSessionScope(
+  config: Pick<ServerConfig, "publicBaseUrl" | "stateDir">,
+  consoleOrigin: string,
+  revision = diagnosticRuntime.revision ?? "unversioned",
+): string {
+  return [
+    "synrex-console-session-v2",
+    `origin=${consoleOrigin}`,
+    `public=${config.publicBaseUrl}`,
+    `state=${config.stateDir}`,
+    `revision=${revision}`,
+  ].join("\n");
 }
 
 function readCookie(request: Request): string | undefined {
@@ -53,10 +97,17 @@ function consoleManifest(): { file: string; css?: string[] } {
   return entry;
 }
 
+export function consoleAssetBasePath(publicBaseUrl: string): string {
+  const publicPath = new URL(publicBaseUrl).pathname.replace(/\/+$/, "");
+  // Assets must stay on the origin that served /console. Using an absolute
+  // public URL makes a direct loopback Console violate its own CSP and render
+  // a blank page. Only the deployment path prefix is shared with MCP assets.
+  return `${publicPath === "/" ? "" : publicPath}/mcp-app-assets`.replace(/\/{2,}/g, "/");
+}
+
 function serveConsoleHtml(config: ServerConfig): string {
   const entry = consoleManifest();
-  const origin = config.publicBaseUrl.replace(/\/+$/, "");
-  const base = `${origin}/mcp-app-assets`;
+  const base = consoleAssetBasePath(config.publicBaseUrl);
   const resources = [entry.file, ...(entry.css ?? [])];
   if (resources.some((file) => !/^[a-zA-Z0-9/_-]+\.[a-zA-Z0-9._-]+$/.test(file))) {
     throw new Error("Invalid console asset path");
@@ -77,29 +128,52 @@ function serveConsoleHtml(config: ServerConfig): string {
  */
 export function registerSynrexConsole(app: Express, config: ServerConfig): void {
   const attempts = new Map<string, { count: number; until: number }>();
-  const expectedOrigin = new URL(config.publicBaseUrl).origin;
-  const https = expectedOrigin.startsWith("https:");
-  const sessionCookieOptions = {
-    httpOnly: true, sameSite: "strict" as const, secure: https,
+  const cookieOptions = (origin: URL) => ({
+    httpOnly: true, sameSite: "strict" as const, secure: origin.protocol === "https:",
     path: "/console", maxAge: SESSION_SECONDS * 1000,
+  });
+  const clearSession = (req: Request, res: Response): void => {
+    const origin = requestConsoleOrigin(req, config);
+    if (!origin) return;
+    const { maxAge: _maxAge, ...options } = cookieOptions(origin);
+    res.clearCookie(COOKIE_NAME, options);
+  };
+  const sessionScope = (req: Request): string | undefined => {
+    const origin = requestConsoleOrigin(req, config);
+    return origin ? consoleSessionScope(config, origin.origin) : undefined;
   };
   const auth = (req: Request, res: Response, next: () => void): void => {
-    if (!verifyConsoleSession(readCookie(req), config.oauth.ownerToken)) {
+    const cookie = readCookie(req);
+    const scope = sessionScope(req);
+    if (!scope || !verifyConsoleSession(cookie, config.oauth.ownerToken, scope)) {
+      if (cookie) clearSession(req, res);
       res.setHeader("Cache-Control", "no-store");
       res.status(401).json({ error: "Login required" });
       return;
     }
     next();
   };
-  const sameOrigin = (req: Request): boolean =>
-    req.header("origin") === expectedOrigin && req.is("application/json") === "application/json";
+  const sameOrigin = (req: Request): URL | undefined => {
+    const expected = requestConsoleOrigin(req, config);
+    const raw = req.header("origin");
+    if (!expected || !raw || req.is("application/json") !== "application/json") return undefined;
+    try {
+      const origin = new URL(raw);
+      return origin.origin === expected.origin ? expected : undefined;
+    } catch { return undefined; }
+  };
   const noStore = (_req: Request, res: Response, next: () => void) => {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("X-Content-Type-Options", "nosniff");
     next();
   };
   app.use("/console", noStore);
-  app.get(["/console", "/console/"], (_req, res) => {
+  app.get(["/console", "/console/"], (req, res) => {
+    const cookie = readCookie(req);
+    const scope = sessionScope(req);
+    if (cookie && (!scope || !verifyConsoleSession(cookie, config.oauth.ownerToken, scope))) {
+      clearSession(req, res);
+    }
     res.setHeader("Content-Security-Policy", [
       "default-src 'none'", "script-src 'self'", "style-src 'self'",
       "connect-src 'self'", "img-src 'self' data:", "font-src 'self'",
@@ -113,7 +187,8 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     res.download(archive, "synrex-browser-trace.zip");
   });
   app.post("/console/api/login", express.json({ limit: "2kb" }), (req, res) => {
-    if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
+    const origin = sameOrigin(req);
+    if (!origin) { res.status(403).json({ error: "Origin rejected" }); return; }
     const remote = req.ip ?? "unknown";
     const now = Date.now();
     const entry = attempts.get(remote);
@@ -131,8 +206,9 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
       return;
     }
     attempts.delete(remote);
-    res.cookie(COOKIE_NAME, createConsoleSession(config.oauth.ownerToken), sessionCookieOptions);
-    res.status(200).json({ authenticated: true });
+    const scope = consoleSessionScope(config, origin.origin);
+    res.cookie(COOKIE_NAME, createConsoleSession(config.oauth.ownerToken, scope), cookieOptions(origin));
+    res.status(200).json({ authenticated: true, deploymentRevision: diagnosticRuntime.revision ?? null });
   });
   app.get("/console/api/session", auth, (_req, res) => {
     res.json({ authenticated: true });
@@ -167,7 +243,7 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   });
   app.post("/console/api/logout", (req, res) => {
     if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
-    res.clearCookie(COOKIE_NAME, sessionCookieOptions);
+    clearSession(req, res);
     res.json({ authenticated: false });
   });
   app.get("/console/api/snapshot", auth, (_req, res) => {
