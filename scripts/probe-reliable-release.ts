@@ -114,10 +114,14 @@ try {
     server: Record<string, unknown>;
     storage: Record<string, unknown>;
     oauth: Record<string, unknown>;
-    cluster: Record<string, unknown>;
+    cluster?: Record<string, unknown>;
     workspaces: Record<string, unknown>;
   };
-  assert.ok(config?.server && config.storage && config.oauth && config.cluster && config.workspaces);
+  assert.ok(config?.server && config.storage && config.oauth && config.workspaces);
+  // Current owner configs may omit sections that are supplied by schema
+  // defaults at runtime. QA must construct the disposable standalone section
+  // explicitly instead of rejecting a valid production config file.
+  config.cluster ??= {};
   const port = await freePort();
   const localBase = `http://127.0.0.1:${port}`;
   Object.assign(config.server, {
