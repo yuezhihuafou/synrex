@@ -46,6 +46,7 @@ import {
 import { readFileTool } from "./pi-tools.js";
 import { isImagePath, readBoundedImagePreview } from "./image-preview.js";
 import { isVideoPath, parseVideoReadPath, readVideoFrames } from "./media-read.js";
+import { registerMediaCompatibilityTools } from "./media-compat-tools.js";
 import { readRosImage } from "./ros2-camera-read.js";
 import { captureObservation, withObservationEvidence } from "./observation/evidence.js";
 import { readBatch, validateBatchFiles } from "./batch-read.js";
@@ -909,6 +910,8 @@ function registerMcpSurface(
       };
     },
   );
+
+  registerMediaCompatibilityTools(registrationTarget, { config, workspaces });
 
   registerProjectIntelligenceTools({
     server: registrationTarget,

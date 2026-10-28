@@ -649,7 +649,7 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
   const tools = await context.client.listTools();
   const names = tools.tools.map((tool) => tool.name);
   for (const required of [
-    "open_workspace", "read", "project", "apply_patch", "exec_command",
+    "open_workspace", "read", "read_image", "read_images", "read_video", "project", "apply_patch", "exec_command",
     "task_get", "task_wait", "task_update", "task_cancel", "process_status", "write_stdin",
     "semantic_code", "semantic_edit", "show_changes",
   ]) {
@@ -666,8 +666,9 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
     (sum, tool) => sum + Buffer.byteLength(JSON.stringify(tool), "utf8"),
     0,
   );
-  // Persistent workflow creation/status/checkpoint add three explicit tools.
-  assert.ok(totalBytes <= 21_000, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
+  // Persistent workflow creation/status/checkpoint plus the three transitional
+  // media aliases stay bounded while connected hosts refresh their tool list.
+  assert.ok(totalBytes <= 22_000, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
   const opened = structuredContent(await callOpen(context.client, context.project));
   const semanticResponse = await context.client.callTool({
     name: "semantic_code",

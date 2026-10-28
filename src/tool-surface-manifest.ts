@@ -5,6 +5,9 @@ const TOOL_NAMES: Record<ToolMode, readonly string[]> = {
   claude: [
     "open_workspace",
     "read",
+    "read_image",
+    "read_images",
+    "read_video",
     "project",
     "write",
     "edit",
@@ -17,6 +20,9 @@ const TOOL_NAMES: Record<ToolMode, readonly string[]> = {
   codex: [
     "open_workspace",
     "read",
+    "read_image",
+    "read_images",
+    "read_video",
     "project",
     "apply_patch",
     "exec_command",

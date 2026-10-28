@@ -10,6 +10,9 @@ export const WORKSPACE_APP_URI = "ui://devspace/workspace-app.html";
 export const toolNames = {
   openWorkspace: "open_workspace",
   read: "read",
+  readImage: "read_image",
+  readImages: "read_images",
+  readVideo: "read_video",
   write: "write",
   edit: "edit",
   shell: "bash",
