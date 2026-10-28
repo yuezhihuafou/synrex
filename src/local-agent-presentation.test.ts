@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import type { LocalAgentCatalog } from "./local-agent-catalog.js";
 import {
+  agentGoalHandoff,
+  formatAgentObservation,
   presentAgentObservation,
   presentAgentReceipt,
   presentAgentSummary,
@@ -42,7 +44,10 @@ assert.deepEqual(completed, {
   id: "agt_test",
   status: "completed",
   response: "Found one issue.",
+  ...agentGoalHandoff("completed"),
 });
+assert.match(formatAgentObservation(completed), /not the user's goal/);
+assert.equal(completed.goalVerified,false);
 
 const failed = presentAgentObservation({
   ...record,
@@ -55,12 +60,15 @@ const failed = presentAgentObservation({
 assert.deepEqual(failed, {
   id: "agt_test",
   status: "failed",
+  ...agentGoalHandoff("failed"),
   error: {
     code: "PROVIDER_EXECUTION_ERROR",
     message: "Provider disconnected.",
     retryable: true,
   },
 });
+assert.match(formatAgentObservation(failed), /inspect the error\/evidence/i);
+assert.equal(failed.goalVerified,false);
 
 const catalog: LocalAgentCatalog = {
   enabled: true,

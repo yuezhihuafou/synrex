@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { assignConversationLabel, readConversationLabels } from "./conversation-labels.js";
@@ -25,4 +25,11 @@ test("explicit owner title persists by exact request without leaking to neighbor
   ]);
   assert.equal(summary.requests.find(r=>r.requestId==="request-a")?.conversationTitle,"评估全链路日志");
   assert.equal(summary.requests.find(r=>r.requestId==="request-b")?.conversationTitle,undefined);
+});
+
+test("reading missing optional labels never creates a writable SQLite store",t=>{
+  const dir=mkdtempSync(path.join(tmpdir(),"synrex-label-read-"));
+  t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  assert.deepEqual(readConversationLabels(dir,["request-a"]),[]);
+  assert.equal(existsSync(path.join(dir,"observability","conversation-labels.sqlite")),false);
 });

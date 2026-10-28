@@ -9,6 +9,7 @@ import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { createServer as createTcpServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { parse } from "jsonc-parser";
 
@@ -175,14 +176,23 @@ try {
   assert.ok(cookie?.startsWith("rev_console="));
   assert.match(loggedIn.headers.get("set-cookie") ?? "", /HttpOnly/i);
   assert.match(loggedIn.headers.get("set-cookie") ?? "", /SameSite=Strict/i);
+  const missingSnapshot = await fetch(`${localBase}/console/api/snapshot`, { headers: {cookie} });
+  assert.equal(missingSnapshot.status, 503, "QA runs without a collector; missing snapshots must degrade safely");
+  assert.equal((await missingSnapshot.json() as {snapshotStale:boolean}).snapshotStale,true);
+  const {readConsoleSnapshot} = await import(pathToFileURL(join(release,"dist/console-snapshot.js")).href);
+  await mkdir(join(stateDir,"observability"),{recursive:true});
+  await writeFile(join(stateDir,"observability","console-snapshot.json"),
+    JSON.stringify(readConsoleSnapshot(stateDir,"isolated-qa")),{mode:0o600});
   const dashboard = await fetch(`${localBase}/console/api/snapshot`, {
     headers: { cookie },
   });
   assert.equal(dashboard.status, 200);
-  const dashboardData = await dashboard.json() as { nodes: unknown[]; workflows: unknown[]; diagnostics: unknown };
+  const dashboardData = await dashboard.json() as { nodes: unknown[]; workflows: unknown[];
+    diagnostics: {observability?:{tokens?:{encoding?:string}}} };
   assert.ok(Array.isArray(dashboardData.nodes));
   assert.ok(Array.isArray(dashboardData.workflows));
   assert.ok(dashboardData.diagnostics);
+  assert.equal(dashboardData.diagnostics.observability?.tokens?.encoding,"o200k_base");
   const invalidSession = await fetch(`${localBase}/console/api/snapshot`, {
     headers: { cookie: `${cookie}invalid` },
   });

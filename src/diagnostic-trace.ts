@@ -25,7 +25,7 @@ const DIAGNOSTIC_DIR = "diagnostics";
 const DIAGNOSTIC_FILE = "recent.jsonl";
 
 export type DiagnosticEvent =
-  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent"
+  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent" | "tool_tokens_measured"
   | "request_stalled" | "runtime_started" | "runtime_stopping"
   | "runtime_sampled"
   | "network_sampled" | "tunnel_registered" | "tunnel_disconnected" | "tunnel_retry" | "tunnel_auth_failed"
@@ -88,6 +88,8 @@ export interface DiagnosticEntry {
   errorCode?: string;
   inputBytes?: number;
   outputBytes?: number;
+  inputTokens?: number;
+  outputTokens?: number;
   queuedMs?: number;
   exitCode?: number;
   signal?: string;
@@ -124,7 +126,7 @@ const EVENT_NAMES: readonly string[] = [
   "task_created", "task_runner_started", "task_spawned", "task_first_output", "task_finished", "task_notification",
   "mailbox_registered", "mailbox_delivered", "mailbox_acknowledged", "mailbox_error", "learning_error",
   "conversation_labeled", "conversation_seen", "node_request_timeout", "node_late_completion",
-  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
+  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed", "tool_tokens_measured",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
 
@@ -160,7 +162,7 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     const value = boundedString(fields[key], pattern!);
     if (value) (item as unknown as Record<string, unknown>)[key] = value;
   }
-  for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs",
+  for (const key of ["pid", "inputBytes", "outputBytes", "inputTokens", "outputTokens", "queuedMs",
     "rssBytes", "heapUsedBytes", "cpuUserMicros", "cpuSystemMicros", "eventLoopLagMs",
     "eventLoopP95Ms", "eventLoopUtilizationPermille", "gcDurationMs", "gcCount", "activeToolCount",
     "otelSpanPending", "otelSpanDropped"] as const) {
@@ -334,7 +336,9 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
       classification: observed.get(request.requestId)?.has("mcp_finished")
         ? "rev_http_completed"
         : observed.get(request.requestId)?.has("mcp_closed_early")
-          ? "connection_closed_early"
+          ? observed.get(request.requestId)?.has("tool_execution_finished")
+            ? "tool_completed_connection_closed"
+            : "connection_closed_early"
           : observed.get(request.requestId)?.has("mcp_failed")
             ? "rev_handler_error"
             : observed.get(request.requestId)?.has("tool_execution_finished")

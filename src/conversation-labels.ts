@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdirSync, chmodSync } from "node:fs";
+import { mkdirSync, chmodSync, existsSync } from "node:fs";
 import Database from "better-sqlite3";
 import { safeConversationTitle } from "./request-meta.js";
 
@@ -61,7 +61,13 @@ export function assignConversationLabel(
 export function readConversationLabels(stateDir: string, requestIds: string[]): ConversationLabel[] {
   const safe = [...new Set(requestIds.filter(x => SAFE_REQUEST.test(x)))].slice(0, 1000);
   if (!safe.length) return [];
-  return withDb(stateDir, db => {
+  // The read path is called by the independent Console collector every 15s.
+  // It must not create a database, change WAL mode, or take a write lock.
+  const file=path.join(stateDir,"observability","conversation-labels.sqlite");
+  if (!existsSync(file)) return [];
+  let db: Database.Database|undefined;
+  try {
+    db=new Database(file,{readonly:true,fileMustExist:true,timeout:250});
     const statement = db.prepare("SELECT request_id,conversation_title,conversation_id,source,updated_at FROM conversation_labels WHERE request_id=?");
     return safe.flatMap(id => {
       const row = statement.get(id) as {
@@ -72,5 +78,8 @@ export function readConversationLabels(stateDir: string, requestIds: string[]): 
         ...(row.conversation_id ? {conversationId:row.conversation_id}:{}),
         source:row.source, updatedAt:row.updated_at }] : [];
     });
-  });
+  } catch {
+    // Optional owner labels cannot make the entire snapshot unavailable.
+    return [];
+  } finally { try { db?.close(); } catch { /* Optional read connection failed to close. */ } }
 }

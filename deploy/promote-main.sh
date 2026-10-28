@@ -111,12 +111,23 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
 {
   echo '--- clean source / typecheck / build ---'
   pnpm install --frozen-lockfile
+  # Worktrees may have been created with --ignore-scripts. A present JS
+  # package is not proof its native PTY addon is loadable. Rebuild and smoke
+  # before packaging node_modules into an immutable release.
+  pnpm rebuild node-pty
+  "$node" -e 'const p=require("node-pty");if(typeof p.spawn!=="function")process.exit(1)'
   pnpm typecheck
   pnpm build
   pnpm release:source-check
   pnpm architecture:check
   echo '--- regression ---'
-  pnpm exec tsx --test --test-concurrency=1 $(find src -name '*.test.ts' ! -name 'local-agent-pi-sandbox.test.ts' | sort)
+  python3 -m unittest discover -s tests -p 'test_node_test_summary.py'
+  regression_log="$backup/regression.log"
+  pnpm exec tsx --test --test-concurrency=1 $(find src -name '*.test.ts' ! -name 'local-agent-pi-sandbox.test.ts' | sort) >"$regression_log" 2>&1
+  cat "$regression_log"
+  # Some tsx/Node combinations incorrectly return status 0 even when TAP
+  # reports failed tests. Never accept the process exit alone as QA proof.
+  /bin/bash deploy/check-node-test-summary.sh "$regression_log"
   python3 -m unittest discover -s tests -p 'test_*p0.py'
   python3 -m unittest discover -s tests -p 'test_release_provenance.py'
   python3 -m unittest discover -s tests -p 'test_activate_owner_release.py'

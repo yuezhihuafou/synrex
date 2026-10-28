@@ -47,6 +47,7 @@ test("console uses existing database read-only and does not invent process statu
   assert.equal(snapshot.workflows[0]?.title, "Build");
   assert.equal(snapshot.diagnostics.requests[0]?.classification, "rev_http_completed");
   assert.equal(snapshot.service.release, "test-release");
+  assert.deepEqual(snapshot.sourceHealth,{available:true,unavailable:[]});
   assert.equal(snapshot.dataFreshness.sampledAt, snapshot.generatedAt);
   assert.equal(snapshot.dataFreshness.nodes, "2026-10-20T00:02:00.000Z");
   assert.ok(snapshot.dataFreshness.workflows && Number.isFinite(Date.parse(snapshot.dataFreshness.workflows)));
@@ -59,6 +60,37 @@ test("console uses existing database read-only and does not invent process statu
   assert.equal(snapshot.execution.manualReminders, null, "cannot count ChatGPT user interventions from server telemetry");
   assert.equal(snapshot.execution.selfReportedCompletionRate, null, "no terminal workflow denominator");
   assert.equal(snapshot.workflows[0]?.acceptanceCriteria[0], "All tests pass");
+});
+
+test("missing source is explicitly marked unavailable rather than proven zero", async t=>{
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-console-partial-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const snapshot=readConsoleSnapshot(dir,"test-release");
+  assert.equal(snapshot.sourceHealth.available,false);
+  assert.deepEqual(snapshot.sourceHealth.unavailable.sort(),[
+    "coding-workflows.sqlite:missing","devspace.sqlite:missing",
+  ]);
+  assert.equal(snapshot.memory.episodes,0);
+});
+
+test("conversation token totals require an explicit conversationId and report missing coverage",async t=>{
+  const dir=await mkdtemp(path.join(tmpdir(),"synrex-session-token-"));
+  t.after(()=>rm(dir,{recursive:true,force:true}));
+  const conv="conv_"+"a".repeat(32);
+  const trace=new DiagnosticTrace(dir);
+  trace.record("mcp_received",{requestId:"r1",conversationId:conv});
+  trace.record("mcp_body_ready",{requestId:"r1",conversationId:conv,rpcMethod:"tools/call",inputTokens:6});
+  trace.record("mcp_finished",{requestId:"r1",conversationId:conv,outputTokens:16});
+  trace.record("mcp_received",{requestId:"r2",conversationId:conv});
+  trace.record("mcp_body_ready",{requestId:"r2",conversationId:conv,rpcMethod:"tools/call"});
+  trace.record("mcp_finished",{requestId:"r2",conversationId:conv});
+  trace.record("mcp_body_ready",{requestId:"unlinked",rpcMethod:"tools/call",inputTokens:100});
+  const snapshot=readConsoleSnapshot(dir,"candidate");
+  assert.equal(snapshot.conversationSessions.length,1);
+  assert.equal(snapshot.conversationSessions[0]?.toolCalls,2);
+  assert.equal(snapshot.conversationSessions[0]?.inputTokens,6);
+  assert.equal(snapshot.conversationSessions[0]?.outputTokens,16);
+  assert.equal(snapshot.conversationSessions[0]?.measuredOutputs,1);
 });
 
 test("console reports observed failure timeline and never calls remote tasks running without owner evidence", async(t) => {

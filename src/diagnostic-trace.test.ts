@@ -87,6 +87,28 @@ test("last tool result without HTTP completion is identifiable, not falsely call
   assert.equal(report.requests[1]?.classification, "connection_closed_early");
 });
 
+test("tool completed before a broken connection is distinguishable from unfinished MCP work", () => {
+  const ts = "2026-10-27T12:00:00.000Z";
+  const events = [
+    { ts, event: "mcp_received" as const, requestId: "result_lost" },
+    { ts, event: "tool_execution_started" as const, requestId: "result_lost", callId: "c1", tool: "exec_command" },
+    { ts, event: "mcp_closed_early" as const, requestId: "result_lost" },
+    { ts, event: "tool_execution_finished" as const, requestId: "result_lost", callId: "c1", outcome: "ok" as const },
+    { ts, event: "mcp_received" as const, requestId: "transport_only" },
+    { ts, event: "mcp_closed_early" as const, requestId: "transport_only" },
+    { ts, event: "mcp_received" as const, requestId: "completed_http" },
+    { ts, event: "tool_execution_finished" as const, requestId: "completed_http", outcome: "ok" as const },
+    { ts, event: "mcp_finished" as const, requestId: "completed_http", status: 200 },
+  ];
+  const result = summarizeDiagnosticTrace(events);
+  assert.equal(result.requests.find(r => r.requestId === "result_lost")?.classification,
+    "tool_completed_connection_closed");
+  assert.equal(result.requests.find(r => r.requestId === "transport_only")?.classification,
+    "connection_closed_early");
+  assert.equal(result.requests.find(r => r.requestId === "completed_http")?.classification,
+    "rev_http_completed", "verified HTTP completion takes precedence over a tool event");
+});
+
 test("explicit chat titles are correlated but never synthesized or accepted from other events", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "synrex-title-trace-"));
   t.after(() => rm(root, { recursive: true, force: true }));

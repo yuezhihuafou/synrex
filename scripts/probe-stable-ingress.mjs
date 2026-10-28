@@ -108,6 +108,15 @@ try {
   const cookieHeader = cookieResponse.headers.get('set-cookie') ?? '';
   assert.match(cookieHeader, /Secure/);
   const cookie = cookieHeader.split(';')[0];
+  // A disposable Core does not run the independent snapshot collector.
+  // Absence must degrade to 503 rather than triggering database scans on Core.
+  const unavailable = await fetch(entry + '/console/api/snapshot', {headers: {cookie}});
+  assert.equal(unavailable.status, 503, 'missing collector must not invoke inline snapshot reads');
+  assert.equal((await unavailable.json()).snapshotStale, true);
+  const {readConsoleSnapshot} = await import(join(release, 'dist/console-snapshot.js'));
+  await mkdir(join(stateDir, 'observability'), {recursive: true});
+  await writeFile(join(stateDir, 'observability', 'console-snapshot.json'),
+    JSON.stringify(readConsoleSnapshot(stateDir, 'isolated-qa')), {mode: 0o600});
   assert.equal((await fetch(entry + '/console/api/snapshot', {
     headers: { cookie },
   })).status, 200);

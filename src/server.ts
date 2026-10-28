@@ -72,6 +72,7 @@ import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { withCodingWorkflowStore } from "./coding-workflows.js";
 import { registerCodingWorkflowTools } from "./coding-workflow-tools.js";
+import { workspaceRecoveryHint } from "./workspace-recovery.js";
 import { createOptionalProjectMemoryPort } from "./memhub-memory-adapter.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
@@ -191,7 +192,7 @@ function serverInstructions(
   const intelligence = " Use project for relevant architecture changes or verified local experience, not for repetitive approval of ordinary reads/edits. Do not run the same project check without new evidence.";
   const workflows = " For genuinely long or multi-session tasks, use workflow_open/checkpoint at meaningful handoff boundaries, not after each step. Batch independent reads, prefer task_wait to repeated task_get polling, and run focused tests during edits with final comprehensive checks before release. Keep GPT responsible for design and correctness; deterministic execution needs no repeated model confirmations. On recovery check current Git/tasks rather than trusting summaries. Synrex cannot resume GPT reasoning after a host turn ends.";
   const delegation = config.subagents.enabled
-    ? " GPT owns requirements, architecture, decisions and final verification. For a substantial independent multi-file investigation, implementation, review or test synthesis, prefer a bounded Subagent assignment instead of many fine-grained host tool calls; load the advertised subagents skill when needed. Use native Synrex tools for small reads, one-file edits and quick checks. Reuse the same agent ID and context reference when continuing one task; parallelize independent read-only assignments only. Give writers isolated worktrees, never race shared source or a production release. Delegate once per meaningful outcome, not one agent per file or command; verify its reported result independently. Subagent invocation is an explicit GPT decision, not a hidden automatic planner."
+    ? " GPT owns requirements, architecture, decisions and final verification. Delegate only when a separate bounded worker materially improves a substantial independent outcome; do not add an agent to simple work. Agent completed means its turn ended, NEVER that the user's request is done. On partial, failed or empty agent evidence, inspect its ID/diff/tests, continue the same agent once if useful or use native Synrex tools, then verify the ORIGINAL acceptance criteria within this turn. Do not turn agent failure into a plan or a new approval step. Give writers separate worktrees; never race production. Subagent invocation is an explicit GPT decision, not an automatic planner."
     : "";
 
   return `${common}${placement} ${toolSurface.instructions({ agents, skills })}${intelligence}${workflows}${delegation}${artifactInstruction}${showChangesInstruction}`;
@@ -554,22 +555,22 @@ function registerMcpSurface(
       const allPendingTasks = durableTasks?.available
         ? await durableTasks.pendingNotifications(workspace.root)
         : [];
-      const pendingTasks = allPendingTasks.slice(0, 8).map((task) => ({
+      const pendingTasks = allPendingTasks.slice(0, 3).map((task) => ({
         taskId: task.taskId,
         status: task.status,
       }));
       const allActiveTasks = durableTasks?.available
         ? await durableTasks.activeTaskHandles(workspace.root)
         : [];
-      const resumableWorkflows = withCodingWorkflowStore(config.stateDir, (store) =>
-        store.list(workspace.root, { limit: 5 }).map((workflow) => ({
+      const unfinishedWorkflows = withCodingWorkflowStore(config.stateDir, (store) =>
+        store.list(workspace.root, { limit: 5 }));
+      const resumableWorkflows = unfinishedWorkflows.map((workflow) => ({
           workflowId: workflow.workflowId,
           title: workflow.title,
           status: workflow.status as "active" | "blocked",
           revision: workflow.revision,
           summary: `${workflow.checkpoint.summary.slice(0, 100)}; next=${(workflow.checkpoint.nextSteps[0] ?? "inspect acceptance").slice(0, 95)}; tasks=${workflow.checkpoint.taskIds.slice(0, 3).join(",") || "none"}`,
-        })),
-      );
+        }));
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
@@ -623,11 +624,14 @@ function registerMcpSurface(
         ? [
             `Workspace already open as ${workspace.id}.`,
             "Continue with this workspaceId.",
-            "Keep following the project instructions, nested instruction files, skills, agent profiles, and diagnostics already provided for this workspace.",
+            workspaceRecoveryHint(unfinishedWorkflows),
           ].join("\n\n")
-        : workspace.mode === "worktree"
-          ? "Use this workspaceId for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
-          : cardInstruction;
+        : [
+            workspace.mode === "worktree"
+              ? "Use this workspaceId for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
+              : cardInstruction,
+            ...(unfinishedWorkflows.length ? [workspaceRecoveryHint(unfinishedWorkflows)] : []),
+          ].join("\n\n");
       const instruction = preloadedSubagentInstructions && includeBootstrapContext
         ? [
             workspaceInstruction,
@@ -668,7 +672,7 @@ function registerMcpSurface(
               ? `Unacknowledged TERMINAL command receipts (${allPendingTasks.length} historical results, not active processes): ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. A completed command does not prove the user's objective is done. Use task_get or 'devspace-task get <taskId>' to inspect results. Unrelated receipts do not block this request.`
               : undefined,
             allActiveTasks.length > 0
-              ? `Currently ACTIVE durable commands (${allActiveTasks.length}): ${allActiveTasks.slice(0, 8).map((task) => `${task.taskId}=${task.status}`).join(", ")}. Inspect these handles before retrying or cancelling work.`
+              ? `Currently ACTIVE durable commands (${allActiveTasks.length}): ${allActiveTasks.slice(0, 4).map((task) => `${task.taskId}=${task.status}`).join(", ")}. These may belong to other sessions; inspect matching handles before retrying or cancelling.`
               : undefined,
             resumableWorkflows.length > 0
               ? `Resumable coding workflows: ${resumableWorkflows.map((item) => `${item.workflowId}(${item.status},rev=${item.revision}): ${item.title.slice(0, 48)}; ${item.summary}`).join("; ")}. Resume by workflowId; verify original goal, tasks, current Git and test evidence before acting.`
