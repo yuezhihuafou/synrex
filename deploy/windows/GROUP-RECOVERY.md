@@ -9,7 +9,7 @@ executable name alone. Occupied ports fail closed. A named mutex prevents duplic
 supervisors; an exited Tunnel is restarted, and a failed Core is recovered by the
 scheduled task. No token value is passed to a command or written to logs.
 
-Run PowerShell as the owner, elevated for S4U boot startup:
+Run PowerShell as the owner, elevated for installation or activation:
 
 ```powershell
 & .\deploy\windows\group-service.ps1 -Action Activate -PlatformRoot $groupRoot -SlotName $verifiedCandidate
@@ -22,7 +22,10 @@ It backs up the task XML, active pointer, config and stopped Core state, install
 the packaged supervisor and performs readiness gates. Failure restores the old
 task/pointer and Group Tunnel. Old slots are retained. These code-only fixes do
 not change the SQLite schema; backup state is not blindly restored over subsequent
-user work. `-LogonOnly` is an explicit non-administrator fallback; it cannot start
-before the user logs in. Default S4U tasks have boot and logon triggers and retry
+user work. Registration checks elevation before stopping production and treats
+registration errors as fatal. `Restart` reuses the installed task without copying
+state or changing registration. `-LogonOnly` selects an interactive task; it still
+requires elevated installation and cannot start before the user logs in.
+Default S4U tasks have boot and logon triggers and retry
 failures every minute. Real reboot and host-native connector results must be
 reported separately from a successful task restart.

@@ -88,7 +88,7 @@ function Stop-Group {
         if ($task.Actions.Count -ne 1 -or (!$args.Contains($installedScript) -and !$args.Contains($legacy))) {
             throw 'Unexpected scheduled-task owner; refusing to stop it.'
         }
-        Stop-ScheduledTask -TaskName $taskName
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
     }
     # Match only the Group token file; Qwen uses the same executable.
     foreach ($process in Get-GroupTunnels) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
@@ -109,7 +109,11 @@ function Install-Task {
     $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType $(if ($LogonOnly) { 'Interactive' } else { 'S4U' }) -RunLevel Limited
     $triggers = @((New-ScheduledTaskTrigger -AtLogOn -User $user))
     if (!$LogonOnly) { $triggers += New-ScheduledTaskTrigger -AtStartup }
-    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Settings $settings -Trigger $triggers -Principal $principal -Force | Out-Null
+    Register-ScheduledTask -TaskName $taskName -Action $taskAction -Settings $settings -Trigger $triggers -Principal $principal -Force -ErrorAction Stop | Out-Null
+    $registered = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if ($registered.Actions[0].Arguments -ne $arguments -or [string]$registered.Principal.LogonType -ne [string]$principal.LogonType) {
+        throw 'Scheduled-task registration did not persist the requested startup chain.'
+    }
 }
 
 Assert-GroupConfig
@@ -154,6 +158,19 @@ if ($Action -eq 'Run') {
     }
 }
 
+if ($Action -eq 'Restart') {
+    $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    if (!$currentTask.Actions[0].Arguments.Contains($installedScript)) { throw 'Install the Group supervisor before restarting it.' }
+    Stop-Group
+    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    Test-Chain
+    exit 0
+}
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Run Install or Activate from elevated PowerShell; production has not been stopped.'
+}
+if ($Action -eq 'Activate' -and !$SlotName) { throw 'Activate requires a candidate SlotName.' }
 $backup = Join-Path $root ('runtime-backups\group-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 New-Item -ItemType Directory -Path $backup | Out-Null
 $acl = Get-Acl -LiteralPath $backup
@@ -169,16 +186,15 @@ Copy-Item -LiteralPath $pointer -Destination (Join-Path $backup 'active-slot.txt
 if (Test-Path -LiteralPath $installedScript) { Copy-Item -LiteralPath $installedScript -Destination (Join-Path $backup 'group-service.ps1') }
 $taskChanged = $false
 try {
-    if ($Action -eq 'Activate' -and !$SlotName) { throw 'Activate requires a candidate SlotName.' }
     Stop-Group
     $stateBackup = Join-Path $backup 'state'
     New-Item -ItemType Directory -Path $stateBackup | Out-Null
     Copy-Item -LiteralPath (Join-Path $root 'state\devspace-config') -Destination $stateBackup -Recurse
     Copy-Item -LiteralPath (Join-Path $root 'state\devspace-state') -Destination $stateBackup -Recurse
     if ($Action -eq 'Activate') { [IO.File]::WriteAllText($pointer, $slot.Name + [Environment]::NewLine, $utf8) }
-    Install-Task
     $taskChanged = $true
-    Start-ScheduledTask -TaskName $taskName
+    Install-Task
+    Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
     Test-Chain
     Write-Output ('Group chain ready; rollback snapshot: ' + $backup)
 } catch {
@@ -186,7 +202,10 @@ try {
     if ($taskChanged) { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
     [IO.File]::WriteAllText($pointer, $oldSlot + [Environment]::NewLine, $utf8)
     if (Test-Path -LiteralPath (Join-Path $backup 'group-service.ps1')) { Copy-Item -LiteralPath (Join-Path $backup 'group-service.ps1') -Destination $installedScript -Force }
-    if ($oldTask) { Register-ScheduledTask -TaskName $taskName -Xml ([IO.File]::ReadAllText((Join-Path $backup 'task.xml'))) -Force | Out-Null; Start-ScheduledTask -TaskName $taskName }
+    if ($oldTask) {
+        if ($taskChanged) { Register-ScheduledTask -TaskName $taskName -Xml ([IO.File]::ReadAllText((Join-Path $backup 'task.xml'))) -Force -ErrorAction Stop | Out-Null }
+        Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    }
     # The old Core-only task cannot restore its Tunnel; restore only this Group credential.
     if (@(Get-GroupTunnels).Count -eq 0) {
         Start-Process -FilePath (Join-Path $root 'cloudflared.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', '--metrics', '127.0.0.1:20243', 'run', '--token-file', ('"' + $tokenFile + '"')) -WorkingDirectory $root -WindowStyle Hidden | Out-Null
