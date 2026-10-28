@@ -95,9 +95,12 @@ test("real MCP tool text counts are recorded without storing prompt or response 
       method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body),
     });
     assert.equal(res.status,200);await res.text();
-    const events=diagnostics.read();
-    assert.equal(events.find(e=>e.event==="mcp_body_ready")?.inputTokens,countToolInputTokens(body));
-    assert.equal(events.find(e=>e.event==="mcp_finished")?.outputTokens,
+    let events=diagnostics.read();
+    for(let i=0;i<50 && events.filter(e=>e.event==="tool_tokens_measured").length<2;i++){
+      await new Promise(resolve=>setTimeout(resolve,20));events=diagnostics.read();
+    }
+    assert.equal(events.find(e=>e.event==="tool_tokens_measured" && e.inputTokens!==undefined)?.inputTokens,countToolInputTokens(body));
+    assert.equal(events.find(e=>e.event==="tool_tokens_measured" && e.outputTokens!==undefined)?.outputTokens,
       countToolOutputTokens(`event: message\ndata: ${JSON.stringify(response)}\n\n`,"sse"));
     const {readFile}=await import("node:fs/promises");
     const raw=await readFile(diagnostics.file,"utf8");

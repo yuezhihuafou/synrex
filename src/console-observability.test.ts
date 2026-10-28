@@ -58,3 +58,19 @@ test("measured tool tokens use a 60s wall-clock window with independent coverage
   assert.equal(stats.coverage.tokenUsage,"o200k_base_tool_payload");
   assert.equal(summarizeConsoleObservability(entries,now+120000).tokens.outputTokensPerSecond,null);
 });
+
+test("asynchronous Token worker events contribute once per request without requiring synchronous payload counts",()=>{
+  const now=Date.parse("2026-10-28T12:11:00Z");
+  const events:DiagnosticEntry[]=[
+    {event:"mcp_body_ready",ts:"2026-10-28T12:10:10Z",requestId:"r",rpcMethod:"tools/call"},
+    {event:"tool_tokens_measured",ts:"2026-10-28T12:10:11Z",requestId:"r",inputTokens:42},
+    {event:"mcp_finished",ts:"2026-10-28T12:10:13Z",requestId:"r",durationMs:500},
+    {event:"tool_tokens_measured",ts:"2026-10-28T12:10:14Z",requestId:"r",outputTokens:300},
+  ];
+  const result=summarizeConsoleObservability(events,now);
+  assert.equal(result.tokens.inputTotal,42);
+  assert.equal(result.tokens.outputTotal,300);
+  assert.equal(result.tokens.outputTokensPerSecond,5);
+  assert.equal(result.tokens.measuredInputs,1);
+  assert.equal(result.tokens.measuredOutputs,1);
+});

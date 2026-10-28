@@ -3,6 +3,7 @@ import { getEncoding, type Tiktoken } from "js-tiktoken";
 // Tool content only: do not claim knowledge of ChatGPT's hidden prompt, reasoning or model tokenizer.
 export const TOOL_TOKEN_ENCODING = "o200k_base" as const;
 // Bound main-thread encoding and per-request buffering; large results are unmeasured, never guessed.
+// Keep this Worker-side guard equal to console-token-policy.ts's main-thread bound.
 export const MAX_TOOL_METER_BYTES = 256 * 1024;
 let encoder: Tiktoken | undefined;
 
@@ -13,6 +14,9 @@ function tokens(text: string): number | null {
     return encoder.encode(text).length;
   } catch { return null; } // Metering can never break a real tool call.
 }
+
+/** Used by a dedicated worker so BPE encoding never stalls the MCP event loop. */
+export function countSerializedToolTokens(text: string): number | null { return tokens(text); }
 
 /** Count the JSON tool arguments actually received, not guessed wire bytes. */
 export function countToolInputTokens(body: unknown): number | null {

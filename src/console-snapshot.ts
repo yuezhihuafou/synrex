@@ -302,12 +302,15 @@ export function readConsoleSnapshot(stateDir: string, release: string): ConsoleS
       const events=eventsByRequest.get(request.requestId)??[];
       const body=events.find(e=>e.event==="mcp_body_ready" && e.rpcMethod==="tools/call");
       if(body || events.some(e=>e.event==="tool_execution_started"))toolCalls++;
-      if(body){if(typeof body.inputTokens==="number"){
-        inputTokens+=body.inputTokens;measuredInputs++;
-      }}
-      const finish=events.find(e=>e.event==="mcp_finished" && typeof e.outputTokens==="number");
-      if(body && finish && typeof finish.outputTokens==="number"){
-        outputTokens+=finish.outputTokens;measuredOutputs++;
+      const input=events.find(e=>typeof e.inputTokens==="number" &&
+        (e.event==="tool_tokens_measured"||e.event==="mcp_body_ready"));
+      if(input && typeof input.inputTokens==="number"){
+        inputTokens+=input.inputTokens;measuredInputs++;
+      }
+      const output=events.find(e=>typeof e.outputTokens==="number" &&
+        (e.event==="tool_tokens_measured"||e.event==="mcp_finished"));
+      if(output && typeof output.outputTokens==="number"){
+        outputTokens+=output.outputTokens;measuredOutputs++;
       }
     }
     return {id,title:recent.conversationTitle??id,lastAt:recent.lastAt,requestCount:items.length,runningTasks,

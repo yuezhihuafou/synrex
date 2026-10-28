@@ -2,6 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { getEncoding } from "js-tiktoken";
 import { countToolInputTokens, countToolOutputTokens, MAX_TOOL_METER_BYTES } from "./console-token-meter.js";
+import { MAX_TOOL_METER_BYTES as MAX_MAIN_THREAD_BYTES } from "./console-token-policy.js";
+
+test("the Core and Worker share the same byte budget",()=>{
+  assert.equal(MAX_TOOL_METER_BYTES,MAX_MAIN_THREAD_BYTES);
+});
 
 test("counts real tool argument and result text with explicit o200k_base, never wire bytes", () => {
   const encoder=getEncoding("o200k_base");

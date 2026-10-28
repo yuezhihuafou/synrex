@@ -6,7 +6,8 @@ import { currentRequestLogContext, logEvent, oauthPhaseForPath, requestPath, run
 import { traceEvent } from "./trace-stages.js";
 import { newOtelContext } from "./otel-context.js";
 import { emitNativeSpan } from "./native-otel.js";
-import { MAX_TOOL_METER_BYTES, countToolInputTokens, countToolOutputTokens } from "./console-token-meter.js";
+import { MAX_TOOL_METER_BYTES } from "./console-token-policy.js";
+import { measureToolTokens } from "./console-token-async.js";
 
 /** Mount BEFORE the SDK JSON parser and host checks, so body upload/parse and
  * rejected requests are included. HTTP finish means local flush, not host receipt. */
@@ -81,12 +82,14 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     });
     res.once("finish", () => {
       if (timer) clearInterval(timer);
-      const outputTokens = isMcp && res.locals.mcpToolTokenMeter && !meterOverflow
-        ? countToolOutputTokens(Buffer.concat(meterChunks).toString("utf8"), mode()) : null;
+      if(isMcp && res.locals.mcpToolTokenMeter && !meterOverflow && meterChunks.length) {
+        // BPE runs on a bounded worker thread, never on the request/event-loop thread.
+        measureToolTokens({kind:"output",body:Buffer.concat(meterChunks).toString("utf8"),mode:mode()},
+          tokens=>diagnostics.record("tool_tokens_measured",{...base,outputTokens:tokens}));
+      }
       if (isMcp) diagnostics.record("mcp_finished", {
         ...base, stage, responseMode: mode(), durationMs: elapsed(), status: res.statusCode,
         outputBytes: responseBodyBytes,
-        ...(outputTokens !== null ? { outputTokens } : {}),
       });
       if (isMcp) emitNativeSpan({ name: "mcp.http", context: otel,
         startMs: wallStart, endMs: Date.now(),
@@ -112,11 +115,18 @@ export const bodyReadyTrace: RequestHandler = (req, res, next) => {
     const id = typeof body?.id === "string" || typeof body?.id === "number" ? createHash("sha256").update(String(body.id)).digest("hex").slice(0, 24) : undefined;
     const isTool = body?.method === "tools/call";
     if (isTool) res.locals.mcpToolTokenMeter = true;
-    const inputTokens = isTool ? countToolInputTokens(body) : null;
+    const context=currentRequestLogContext();
+    if(isTool && context && (!Number.isFinite(Number(req.header("content-length"))) ||
+        Number(req.header("content-length"))<=MAX_TOOL_METER_BYTES)) {
+      try {
+        const serialized=JSON.stringify(body?.params?.arguments??{});
+        measureToolTokens({kind:"input",body:serialized},
+          tokens=>context.emitDiagnostic?.("tool_tokens_measured",{requestId:context.requestId,inputTokens:tokens}));
+      } catch { /* Metering must not impact MCP. */ }
+    }
     traceEvent("mcp_body_ready", { stage: "body", rpcMethod: method, rpcIdHash: id,
       durationMs: Math.round(performance.now() - (currentRequestLogContext()?.startedAt ?? performance.now())),
       tool: body?.method === "tools/call" && typeof body?.params?.name === "string" ? body.params.name : undefined,
-      ...(inputTokens !== null ? { inputTokens } : {}),
     });
   }
   next();

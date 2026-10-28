@@ -70,7 +70,14 @@ type Snapshot = {
     tokens?:{encoding:string;windowSeconds:number;inputTotal:number|null;outputTotal:number|null;
       measuredInputs:number;measuredOutputs:number;outputTokensPerSecond:number|null;
       toolCallsPerMinute:number|null;averageLatencyMs:number|null;lastObservedAt:string|null;
-      trend:Array<{minute:string;outputTokens:number;measuredOutputs:number}>} };
+      trend:Array<{minute:string;outputTokens:number;measuredOutputs:number}>;
+      history?:{startedAt:string;observedFrom?:string|null;updatedAt:string;coverageGaps:number;
+        totals:{inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number};
+        peakMinute:{at:string;tokens:number;tokensPerSecond:number}|null;
+        peakOutputCall:{at:string;tokens:number}|null;
+        minute:Array<{at:string;inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number}>;
+        hour:Array<{at:string;inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number}>;
+        day:Array<{at:string;inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number}>}|null} };
     requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
     conversationTitle?:string; conversationId?:string; runId?:string;
     classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
@@ -134,9 +141,11 @@ function Blank({ children }: { children:ReactNode }) {
 }
 function RexPerformance({d}:{d:Snapshot}) {
   const t=d.diagnostics.observability?.tokens;
-  const total=t&&(t.inputTotal!==null||t.outputTotal!==null)
+  const history=t?.history;
+  const [range,setRange]=useState<"24h"|"30d"|"365d">("24h");
+  const total=history?history.totals.inputTokens+history.totals.outputTokens:t&&(t.inputTotal!==null||t.outputTotal!==null)
     ?(t.inputTotal??0)+(t.outputTotal??0):null;
-  const trend=t?.trend??[];
+  const trend=history?(range==="24h"?history.minute:range==="30d"?history.hour:history.day):[];
   const hasTrend=trend.some(b=>b.measuredOutputs>0);
   const maximum=Math.max(1,...trend.map(b=>b.outputTokens));
   const points=trend.map((b,i)=>`${trend.length===1?0:i*600/(trend.length-1)},${110-100*b.outputTokens/maximum}`).join(" ");
@@ -144,21 +153,31 @@ function RexPerformance({d}:{d:Snapshot}) {
     <div className="metrics performance-metrics">
       <Metric label="工具输出吞吐" symbol="↑" value={t?.outputTokensPerSecond==null?"未测量":`${t.outputTokensPerSecond} Token/s`}
         info="最近 60 秒已完成工具结果 ÷ 60"/>
-      <Metric label="可观测累计 Token" symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
-        info={`当前诊断窗口 · 输入 ${t?.measuredInputs??0} / 输出 ${t?.measuredOutputs??0} 次已计量`}/>
+      <Metric label={history?"持久累计 Token":"当前可观测 Token"} symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
+        info={history?`可观测自 ${time(history.observedFrom??history.startedAt)} · 输入 ${history.totals.measuredInputs} / 输出 ${history.totals.measuredOutputs} 次已计量`:"尚无历史账本；仅展示有限日志窗口"}/>
       <Metric label="工具调用速率" symbol="⌘" value={t?.toolCallsPerMinute==null?"未知":`${t.toolCallsPerMinute} 次/min`}
         info="最近 60 秒观察到的工具启动"/>
       <Metric label="平均调用延迟" symbol="◷" value={t?.averageLatencyMs==null?"未测量":`${t.averageLatencyMs} ms`}
         info="最近 60 秒有完整记录的调用"/>
     </div>
     <div className="performance-chart">
-      <p className="footnote">工具输出趋势 · 最近 10 分钟（每分钟已计量 Token）</p>
-      {hasTrend?<svg role="img" aria-label="最近十分钟工具输出 Token 趋势"
+      <div className="usage-actions"><p className="footnote">持久化工具输出趋势（按分钟 / 小时 / 天）</p>
+        <div className="usage-range" role="group" aria-label="Token 历史范围">
+          {(["24h","30d","365d"] as const).map(v=><button key={v} type="button" className={range===v?"selected":""}
+            aria-pressed={range===v} onClick={()=>setRange(v)}>{v==="24h"?"24 小时":v==="30d"?"30 天":"365 天"}</button>)}
+        </div></div>
+      {hasTrend?<svg role="img" aria-label={`${range} 工具输出 Token 历史趋势`}
         viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:125}}>
         <line x1="0" y1="110" x2="600" y2="110" stroke="currentColor" opacity="0.2"/>
         <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>
-      </svg>:<Blank>最近 10 分钟暂无可计量的文本输出。</Blank>}
-      <p className="footnote">编码器 {t?.encoding??"尚未接入"}；按完成时间统计工具结果，非实时生成速度。仅计入可读取文本，超过 256 KiB、非文本及旧版日志不按字节推算。{t?.lastObservedAt?` 最近 MCP 活动 ${time(t.lastObservedAt)}。`:""}</p>
+      </svg>:<Blank>该时间范围暂无已计量的工具文本输出。</Blank>}
+      <div className="metrics performance-peaks">
+        <Metric symbol="⌁" label="历史分钟吞吐峰值" value={history?.peakMinute?`${history.peakMinute.tokensPerSecond} Token/s`:"未测量"}
+          info={history?.peakMinute?`最高完整分钟桶 · ${time(history.peakMinute.at)}`:"每分钟输出量 ÷ 60"}/>
+        <Metric symbol="↑" label="最大单次工具输出" value={history?.peakOutputCall?`${history.peakOutputCall.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
+          info={history?.peakOutputCall?time(history.peakOutputCall.at):"仅计量文本结果"}/>
+      </div>
+      <p className="footnote">编码器 {t?.encoding??"尚未接入"}；从留存诊断日志开始累计，缺失的早期 Token 无法补算。{history?.coverageGaps?`检测到 ${history.coverageGaps} 次日志缺口，累计为已观测下限。`:""}统计仅在独立快照进程写入，当前速率仍是最近 60 秒完成量，不是模型内部生成速度。</p>
     </div>
   </Panel>;
 }

@@ -57,6 +57,10 @@ export function summarizeConsoleObservability(events: DiagnosticEntry[], now = D
     else lifecycle.unknown++;
     const finish = [...entries].reverse().find(e => e.event === "mcp_finished");
     const body=entries.find(e=>e.event==="mcp_body_ready" && e.rpcMethod==="tools/call");
+    const inputSample=entries.find(e=>typeof e.inputTokens==="number" &&
+      (e.event==="tool_tokens_measured"||e.event==="mcp_body_ready"));
+    const outputSample=entries.find(e=>typeof e.outputTokens==="number" &&
+      (e.event==="tool_tokens_measured"||e.event==="mcp_finished"));
     const toolStarted=entries.some(e=>e.event==="tool_execution_started");
     if (finish && typeof finish.durationMs === "number") durations.push(finish.durationMs);
     // One reading per request and direction; don't double-count stages.
@@ -66,16 +70,16 @@ export function summarizeConsoleObservability(events: DiagnosticEntry[], now = D
     if(typeof output==="number" && output>=0){
       outputSizes.push(output);observedOutputBytes+=output;
     }
-    if (body && typeof body.inputTokens==="number") {
-      inputTokenTotal+=body.inputTokens;measuredInputs++;
+    if (inputSample && typeof inputSample.inputTokens==="number") {
+      inputTokenTotal+=inputSample.inputTokens;measuredInputs++;
     }
-    if (finish && typeof finish.outputTokens==="number" && body) {
-      outputTokenTotal+=finish.outputTokens;measuredOutputs++;
-      const at=Date.parse(finish.ts);
-      if (at>=start && at<=now) {recentOutputTokens+=finish.outputTokens;recentOutputSamples++;}
+    if (outputSample && typeof outputSample.outputTokens==="number") {
+      outputTokenTotal+=outputSample.outputTokens;measuredOutputs++;
+      const at=Date.parse(outputSample.ts);
+      if (at>=start && at<=now) {recentOutputTokens+=outputSample.outputTokens;recentOutputSamples++;}
       const index=Math.floor(at/60000)-firstMinute;
       if(index>=0 && index<trend.length){
-        trend[index]!.outputTokens+=finish.outputTokens;trend[index]!.measuredOutputs++;
+        trend[index]!.outputTokens+=outputSample.outputTokens;trend[index]!.measuredOutputs++;
       }
     }
     if (toolStarted) {

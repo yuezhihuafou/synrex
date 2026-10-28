@@ -25,7 +25,7 @@ const DIAGNOSTIC_DIR = "diagnostics";
 const DIAGNOSTIC_FILE = "recent.jsonl";
 
 export type DiagnosticEvent =
-  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent"
+  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent" | "tool_tokens_measured"
   | "request_stalled" | "runtime_started" | "runtime_stopping"
   | "runtime_sampled"
   | "network_sampled" | "tunnel_registered" | "tunnel_disconnected" | "tunnel_retry" | "tunnel_auth_failed"
@@ -126,7 +126,7 @@ const EVENT_NAMES: readonly string[] = [
   "task_created", "task_runner_started", "task_spawned", "task_first_output", "task_finished", "task_notification",
   "mailbox_registered", "mailbox_delivered", "mailbox_acknowledged", "mailbox_error", "learning_error",
   "conversation_labeled", "conversation_seen", "node_request_timeout", "node_late_completion",
-  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
+  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed", "tool_tokens_measured",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
 
