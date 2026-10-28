@@ -13,6 +13,83 @@ $pointer = Join-Path $root 'runtime\active-slot.txt'
 $installedScript = Join-Path $root 'ops\group-service.ps1'
 $processReceipt = Join-Path $root 'state\group-service-core.json'
 $utf8 = New-Object Text.UTF8Encoding($false)
+$stateDirectoriesToBackup = @('diagnostics', 'jobs', 'observability', 'operations', 'payload-spool')
+$stateDirectoriesExcludedFromBackup = @('compact-runs')
+$backupFreeSpaceReserveBytes = 256MB
+
+function Get-DirectoryBytes([string]$path) {
+    if (!(Test-Path -LiteralPath $path -PathType Container)) { return [long]0 }
+    $measurement = Get-ChildItem -LiteralPath $path -Recurse -File -Force -ErrorAction Stop |
+        Measure-Object -Property Length -Sum
+    if ($null -eq $measurement.Sum) { return [long]0 }
+    return [long]$measurement.Sum
+}
+
+function Get-StateBackupRequiredBytes {
+    $configRoot = Join-Path $root 'state\devspace-config'
+    $stateRoot = Join-Path $root 'state\devspace-state'
+    $bytes = Get-DirectoryBytes $configRoot
+    if (!(Test-Path -LiteralPath $stateRoot -PathType Container)) { return [long]$bytes }
+
+    $knownDirectories = @($stateDirectoriesToBackup + $stateDirectoriesExcludedFromBackup)
+    $unknownDirectories = @(Get-ChildItem -LiteralPath $stateRoot -Directory -Force | Where-Object {
+        $_.Name -notin $knownDirectories
+    })
+    if ($unknownDirectories.Count -gt 0) {
+        throw ('Unknown Group state directories require an explicit backup policy before activation: ' +
+            (($unknownDirectories | ForEach-Object Name) -join ', '))
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $stateRoot -File -Force) { $bytes += [long]$file.Length }
+    foreach ($name in $stateDirectoriesToBackup) { $bytes += Get-DirectoryBytes (Join-Path $stateRoot $name) }
+    return [long]$bytes
+}
+
+function Assert-StateBackupCapacity {
+    $required = Get-StateBackupRequiredBytes
+    $driveRoot = [IO.Path]::GetPathRoot($root)
+    $drive = New-Object IO.DriveInfo($driveRoot)
+    $minimumFree = $required + $backupFreeSpaceReserveBytes
+    if ($drive.AvailableFreeSpace -lt $minimumFree) {
+        throw ('Insufficient disk space for Group activation before production stop. ' +
+            'free=' + $drive.AvailableFreeSpace + ' requiredBackup=' + $required +
+            ' reserve=' + $backupFreeSpaceReserveBytes)
+    }
+    return @{ RequiredBytes = $required; FreeBytes = [long]$drive.AvailableFreeSpace }
+}
+
+function Backup-GroupState([string]$stateBackup, [hashtable]$capacity) {
+    $configRoot = Join-Path $root 'state\devspace-config'
+    $stateRoot = Join-Path $root 'state\devspace-state'
+    Copy-Item -LiteralPath $configRoot -Destination $stateBackup -Recurse
+    $stateDestination = Join-Path $stateBackup 'devspace-state'
+    New-Item -ItemType Directory -Path $stateDestination | Out-Null
+    if (Test-Path -LiteralPath $stateRoot -PathType Container) {
+        foreach ($file in Get-ChildItem -LiteralPath $stateRoot -File -Force) {
+            Copy-Item -LiteralPath $file.FullName -Destination $stateDestination
+        }
+        foreach ($name in $stateDirectoriesToBackup) {
+            $source = Join-Path $stateRoot $name
+            if (Test-Path -LiteralPath $source -PathType Container) {
+                Copy-Item -LiteralPath $source -Destination $stateDestination -Recurse
+            }
+        }
+    }
+    $excluded = foreach ($name in $stateDirectoriesExcludedFromBackup) {
+        $source = Join-Path $stateRoot $name
+        [ordered]@{
+            path = ('devspace-state\\' + $name)
+            bytes = Get-DirectoryBytes $source
+            reason = 'append-only execution history; activation does not replace or delete the live directory'
+        }
+    }
+    [ordered]@{
+        version = 1
+        createdAt = (Get-Date).ToUniversalTime().ToString('o')
+        requiredBackupBytes = $capacity.RequiredBytes
+        freeBytesBeforeStop = $capacity.FreeBytes
+        excluded = @($excluded)
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $stateBackup 'backup-manifest.json') -Encoding UTF8
+}
 
 function Get-Slot([string]$name) {
     if (!$name) { $name = [IO.File]::ReadAllText($pointer).Trim() }
@@ -191,6 +268,7 @@ if ($Action -eq 'Restart') {
     exit 0
 }
 if ($Action -eq 'Activate' -and !$SlotName) { throw 'Activate requires a candidate SlotName.' }
+$backupCapacity = Assert-StateBackupCapacity
 $backup = Join-Path $root ('runtime-backups\group-startup-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff'))
 New-Item -ItemType Directory -Path $backup | Out-Null
 $acl = Get-Acl -LiteralPath $backup
@@ -209,8 +287,7 @@ try {
     Stop-Group
     $stateBackup = Join-Path $backup 'state'
     New-Item -ItemType Directory -Path $stateBackup | Out-Null
-    Copy-Item -LiteralPath (Join-Path $root 'state\devspace-config') -Destination $stateBackup -Recurse
-    Copy-Item -LiteralPath (Join-Path $root 'state\devspace-state') -Destination $stateBackup -Recurse
+    Backup-GroupState $stateBackup $backupCapacity
     if ($Action -eq 'Activate') { [IO.File]::WriteAllText($pointer, $slot.Name + [Environment]::NewLine, $utf8) }
     $taskChanged = $true
     Install-Task

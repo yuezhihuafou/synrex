@@ -13,6 +13,7 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   const installer = await readFile(resolve("deploy/windows/install-console-desktop.ps1"), "utf8");
   const launcher = await readFile(resolve("deploy/windows/start-synrex-console.ps1"), "utf8");
   const deploy = await readFile(resolve("deploy/windows/deploy-group.ps1"), "utf8");
+  const service = await readFile(resolve("deploy/windows/group-service.ps1"), "utf8");
   const desktop = await readFile(resolve("deploy/windows/desktop/main.cjs"), "utf8");
   assert.match(installer, /start-synrex-console\.ps1/);
   assert.match(installer, /Synrex Console\.lnk/);
@@ -25,6 +26,12 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(deploy, /prepare-runtime-slot\.ps1/);
   assert.match(deploy, /-Action Activate/);
   assert.match(deploy, /install-console-desktop\.ps1/);
+  assert.match(service, /Assert-StateBackupCapacity/);
+  assert.match(service, /backupFreeSpaceReserveBytes = 256MB/);
+  assert.match(service, /stateDirectoriesExcludedFromBackup = @\('compact-runs'\)/);
+  assert.match(service, /Unknown Group state directories require an explicit backup policy/);
+  assert.match(service, /backup-manifest\.json/);
+  assert.doesNotMatch(service, /Copy-Item -LiteralPath \(Join-Path \$root 'state\\devspace-state'\) -Destination \$stateBackup -Recurse/);
   assert.match(desktop, /app\.setPath\("userData", profileRoot\)/);
   assert.match(desktop, /DEVSPACE_PLATFORM_ROOT/);
 });

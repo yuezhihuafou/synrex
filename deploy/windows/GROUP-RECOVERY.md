@@ -53,6 +53,15 @@ Default S4U tasks have boot and logon triggers and retry
 failures every minute. Real reboot and host-native connector results must be
 reported separately from a successful task restart.
 
+Activation performs a disk-space preflight before stopping production. The rollback
+snapshot includes config, top-level SQLite/key files, diagnostics, jobs, observability,
+operations and payload spool state. `devspace-state\compact-runs` is deliberately not
+duplicated into every rollback snapshot: it is append-only execution history, the
+activation path never replaces or deletes its live directory, and copying it can be
+larger than the free space available on long-running Windows nodes. The snapshot
+writes `backup-manifest.json` with the excluded path and its measured byte size.
+Unknown future top-level state directories fail closed until a backup policy is added.
+
 The supervisor records its Core PID, creation time and immutable slot. Restart
 and crash recovery validate all three plus the executable/CLI before stopping
 leftover Core children. A reused PID or unrelated listener is never adopted.
