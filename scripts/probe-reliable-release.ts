@@ -97,7 +97,10 @@ async function runAuthenticatedProbe(env: NodeJS.ProcessEnv, resumeId?: string) 
     qaMailboxDelivered?: boolean;
     qaFinalBarrierVerified?: boolean;
   };
-  assert.equal(result.toolCount, 17);
+  // Current codex surface includes the three retained media compatibility
+  // aliases (read_image/read_images/read_video) in addition to the 17-tool
+  // modern surface. Keep release smoke aligned with the host-visible schema.
+  assert.equal(result.toolCount, 20);
   if (!resumeId) {
     assert.equal(result.qaMailboxDelivered, true, "Normal tool reply must carry completion mailbox event");
     assert.equal(result.qaFinalBarrierVerified, true, "Legacy final barrier must complete over HTTP");
