@@ -9,6 +9,7 @@ import { DiagnosticTrace, diagnosticRuntime } from "./diagnostic-trace.js";
 import { readOtelFileTail } from "./otel-file-reader.js";
 import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
 import { assignConversationLabel, readConversationLabels } from "./conversation-labels.js";
+import { buildBrowserExtensionZip } from "./browser-extension-package.js";
 
 const COOKIE_NAME = "rev_console";
 const SESSION_SECONDS = 8 * 60 * 60;
@@ -168,18 +169,17 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     next();
   };
   const sendBrowserExtension = (res: Response, filename: string): void => {
-    const archive = fileURLToPath(new URL("../browser-extension/synrex-browser-trace.zip", import.meta.url));
-    if (!existsSync(archive)) { res.status(404).json({ error: "Extension package unavailable" }); return; }
-    const size = statSync(archive).size;
-    if (size <= 0 || size > 4 * 1024 * 1024) {
-      res.status(503).json({ error: "Extension package invalid" }); return;
+    try {
+      const archive = buildBrowserExtensionZip();
+      if (archive.length <= 0 || archive.length > 4 * 1024 * 1024) {
+        res.status(503).json({ error: "Extension package invalid" }); return;
+      }
+      res.type("application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      res.send(archive);
+    } catch {
+      res.status(404).json({ error: "Extension package unavailable" });
     }
-    // The archive is a small immutable release asset. Sending the bytes
-    // directly avoids Express sendFile/download path-root differences between
-    // tsx source tests and compiled immutable releases.
-    res.type("application/zip");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.send(readFileSync(archive));
   };
   app.use("/console", noStore);
   app.get(["/console", "/console/"], (req, res) => {

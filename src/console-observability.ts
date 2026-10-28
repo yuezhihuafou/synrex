@@ -16,7 +16,8 @@ export interface ConsoleObservability {
     encoding: "o200k_base"; windowSeconds: 60;
     inputTotal: number | null; outputTotal: number | null;
     measuredInputs: number; measuredOutputs: number;
-    outputTokensPerSecond: number | null; toolCallsPerMinute: number | null;
+    recentOutputTokens: number | null; recentOutputSamples: number;
+    toolCallsPerMinute: number | null;
     averageLatencyMs: number | null; lastObservedAt: string | null;
     trend: Array<{ minute: string; outputTokens: number; measuredOutputs: number }>;
   };
@@ -124,7 +125,7 @@ export function summarizeConsoleObservability(events: DiagnosticEntry[], now = D
     tokens: { encoding:"o200k_base", windowSeconds:60,
       inputTotal:measuredInputs?inputTokenTotal:null,outputTotal:measuredOutputs?outputTokenTotal:null,
       measuredInputs,measuredOutputs,
-      outputTokensPerSecond:recentOutputSamples?Math.round(recentOutputTokens/60*10)/10:null,
+      recentOutputTokens:recentOutputSamples?recentOutputTokens:null,recentOutputSamples,
       toolCallsPerMinute:latestMs>=start?recentToolCalls:null,
       averageLatencyMs:recentToolDurations?Math.round(recentToolDuration/recentToolDurations):null,
       lastObservedAt:latestAt,trend },

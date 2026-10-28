@@ -68,12 +68,12 @@ type Snapshot = {
     recentTraffic?:{windowSeconds:60;inputBytesPerSecond:number|null;outputBytesPerSecond:number|null;
       measuredResponses:number;lastObservedAt:string|null};
     tokens?:{encoding:string;windowSeconds:number;inputTotal:number|null;outputTotal:number|null;
-      measuredInputs:number;measuredOutputs:number;outputTokensPerSecond:number|null;
+      measuredInputs:number;measuredOutputs:number;recentOutputTokens?:number|null;recentOutputSamples?:number;
       toolCallsPerMinute:number|null;averageLatencyMs:number|null;lastObservedAt:string|null;
       trend:Array<{minute:string;outputTokens:number;measuredOutputs:number}>;
       history?:{startedAt:string;observedFrom?:string|null;updatedAt:string;coverageGaps:number;
         totals:{inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number};
-        peakMinute:{at:string;tokens:number;tokensPerSecond:number}|null;
+        peakMinute:{at:string;tokens:number}|null;
         peakOutputCall:{at:string;tokens:number}|null;
         runtime?:{averageTokensPerSecond:number|null;matchedOutputTokens:number;matchedDurationMs:number;
           measuredCalls:number;observedFrom:string|null};
@@ -179,8 +179,8 @@ function RexPerformance({d}:{d:Snapshot}) {
         info={`只是已配对请求的会话 ID 覆盖，不是 Token 或主 GPT 身份覆盖；未知 ${effective?.unknownCalls??0}`}/>
       <Metric label="端到端 / GPT 纯思考时间" symbol="◴" value="未测量"
         info="主机尚无可靠回合边界；不得把工具间隔当成纯思考"/>
-      <Metric label={history?"持久累计 Token":"当前可观测 Token"} symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
-        info={history?`可观测自 ${time(history.observedFrom??history.startedAt)} · 输入 ${history.totals.measuredInputs} / 输出 ${history.totals.measuredOutputs} 次已计量`:"尚无历史账本；仅展示有限日志窗口"}/>
+      <Metric label={history?"已计量工具 Token 累计":"当前窗口工具 Token"} symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
+        info={history?`自 ${time(history.observedFrom??history.startedAt)} 的已计量样本累计；输入 ${history.totals.measuredInputs} / 输出 ${history.totals.measuredOutputs} 次。会持续累加，不是上下文长度或计费 Token。`:"仅展示当前诊断窗口的工具内容计量"}/>
       <Metric label="工具调用速率" symbol="⌘" value={t?.toolCallsPerMinute==null?"未知":`${t.toolCallsPerMinute} 次/min`}
         info="最近 60 秒观察到的工具启动"/>
       <Metric label="平均调用延迟" symbol="◷" value={t?.averageLatencyMs==null?"未测量":`${t.averageLatencyMs} ms`}
@@ -189,16 +189,16 @@ function RexPerformance({d}:{d:Snapshot}) {
     <div className="performance-chart">
       <p className="footnote">分对话工具交付 · 最近 24 小时（仅有会话 ID 的完整样本）</p>
       {effective?.sessions?.length?<div className="table-scroll"><table>
-        <thead><tr><th>会话标识</th><th>调用</th><th>输出 Token</th><th>工具活跃时间</th><th>活跃交付率</th><th>最后活动</th></tr></thead>
+        <thead><tr><th>会话标识</th><th>调用</th><th>输出 Token</th><th>工具活跃时间</th><th>按活跃耗时折算</th><th>最后活动</th></tr></thead>
         <tbody>{effective.sessions.map(s=><tr key={s.conversationId}>
           <td title={s.conversationId}>{s.conversationId.slice(0,13)}…</td>
           <td>{s.matchedCalls}</td><td>{s.outputTokens.toLocaleString("zh-CN")}</td>
           <td>{(s.activeMs/1000).toFixed(2)} s</td>
-          <td>{s.activeTokensPerSecond==null?"未测量":`${s.activeTokensPerSecond} Token/s`}</td>
+          <td>{s.activeTokensPerSecond==null?"未测量":`${s.activeTokensPerSecond} Token/活跃秒`}</td>
           <td>{time(s.lastAt)}</td>
         </tr>)}</tbody>
       </table></div>:<Blank>当前没有完整且有会话标识的工具请求。</Blank>}
-      <p className="footnote">每条会话各自合并并发请求区间；不跨会话求一个所谓“模型平均 Token/s”。这些速率只表示工具文本的活跃交付，不包含 GPT 思考或完整回合耗时。旧总量与系统并发仍在诊断账本中。</p>
+      <p className="footnote">每条会话各自合并并发请求区间；“Token/活跃秒”只是工具请求输出量 ÷ 已观测调用活跃时间，不是按秒采样，更不是模型生成速度。</p>
     </div>
     <div className="performance-chart">
       <div className="usage-actions"><p className="footnote">旧全来源历史账本（不按会话归属过滤）</p>
@@ -208,7 +208,7 @@ function RexPerformance({d}:{d:Snapshot}) {
         </div></div>
       <div className="usage-range" role="group" aria-label="Token 趋势指标">
         <button type="button" className={curve==="volume"?"selected":""} aria-pressed={curve==="volume"} onClick={()=>setCurve("volume")}>输出 Token</button>
-        <button type="button" className={curve==="active"?"selected":""} aria-pressed={curve==="active"} onClick={()=>setCurve("active")}>旧调用耗时速率</button>
+        <button type="button" className={curve==="active"?"selected":""} aria-pressed={curve==="active"} onClick={()=>setCurve("active")}>调用耗时折算</button>
       </div>
       {hasTrend?<svg role="img" aria-label={`${range} ${curve==="volume"?"输出 Token":"调用耗时加权吞吐"}历史趋势`}
         viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:125}}>
@@ -216,10 +216,10 @@ function RexPerformance({d}:{d:Snapshot}) {
         {plot.length===1?<circle cx="300" cy={110-100*(curve==="volume"?plot[0]!.outputTokens:(plot[0]!.runtimeAverageTokensPerSecond??0))/maximum} r="4" fill="currentColor"/>:
           <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>}
       </svg>:<Blank>该时间范围暂无相关完整观测样本。</Blank>}
-      <p className="footnote">诊断指标：最近 60 秒全来源交付 {t?.outputTokensPerSecond==null?"未测量":`${t.outputTokensPerSecond} Token/s`}；历史全部来源的调用耗时加权交付率 {history?.runtime?.averageTokensPerSecond==null?"未测量":`${history.runtime.averageTokensPerSecond} Token/s`}；本时段 {windowRuntimeRate===null?"未测量":`${windowRuntimeRate} Token/s`}（{windowRuntimeCalls} 次）。旧口径不能反映真实并发容量或模型生成速度。</p>
+      <p className="footnote">最近 60 秒记录到的工具输出：{t?.recentOutputTokens==null?"未测量":`${t.recentOutputTokens.toLocaleString("zh-CN")} Token（${t.recentOutputSamples??0} 个已计量输出）`}。历史完成调用折算：{history?.runtime?.averageTokensPerSecond==null?"未测量":`${history.runtime.averageTokensPerSecond} Token/调用秒`}；所选时段：{windowRuntimeRate===null?"未测量":`${windowRuntimeRate} Token/调用秒`}（{windowRuntimeCalls} 次）。后二者是输出量 ÷ 请求耗时，不是逐秒生成速率。</p>
       <div className="metrics performance-peaks">
-        <Metric symbol="⌁" label="历史分钟交付峰值" value={history?.peakMinute?`${history.peakMinute.tokensPerSecond} Token/s`:"未测量"}
-          info={history?.peakMinute?`最高有记录分钟桶 · ${time(history.peakMinute.at)}`:"每分钟完成输出量 ÷ 60"}/>
+        <Metric symbol="⌁" label="单分钟记录输出峰值" value={history?.peakMinute?`${history.peakMinute.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
+          info={history?.peakMinute?`该分钟桶内记录的输出总量 · ${time(history.peakMinute.at)}`:"不除以 60，不冒充逐秒生成速度"}/>
         <Metric symbol="↑" label="最大单次工具输出" value={history?.peakOutputCall?`${history.peakOutputCall.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
           info={history?.peakOutputCall?time(history.peakOutputCall.at):"仅计量文本结果"}/>
       </div>
@@ -488,6 +488,8 @@ function Nodes({d}:{d:Snapshot}) {
     <code>{n.id}</code></article>)}</div>;
 }
 function Diagnostics({d}:{d:Snapshot}) {
+  const localNode=d.nodes.find(n=>n.kind==="local");
+  const localNodeLabel=localNode?.alias||localNode?.id||"本机";
   const [query,setQuery]=useState("");
   const [selected,setSelected]=useState<string|null>(null);
   const [detail,setDetail]=useState<{events:Snapshot["diagnostics"]["events"];spans:ObservedSpan[];
@@ -553,6 +555,9 @@ if(historyStart)params.set("start",new Date(historyStart).toISOString());
   }
   async function loadBrowserMetadata(file:File){
     setBrowserError("");
+    if(/\.zip$/i.test(file.name)){
+      setBrowserError("这是扩展安装 ZIP，不是观测数据。请先解压并在 chrome://extensions 中“加载已解压的扩展”；随后从扩展弹窗导出 JSON，再在这里导入。");return;
+    }
     if(file.size>4*1024*1024){setBrowserError("文件超过 4 MiB 上限");return;}
     try{
       const data=JSON.parse(await file.text()) as {schema?:string;events?:BrowserEvent[]};
@@ -645,16 +650,19 @@ if(historyStart)params.set("start",new Date(historyStart).toISOString());
         当前保留范围：{time(historyStats.first)} 至 {time(historyStats.last)}。</p>}
       <div className="table-scroll"><table><thead><tr><th>时间</th><th>事件</th><th>节点</th><th>对话标题</th><th>请求 ID</th></tr></thead>
         <tbody>{history.slice(0,100).map((e,i)=><tr key={i}><td>{time(e.ts)}</td><td>{e.event}</td>
-          <td>{e.nodeId??"swy1"}</td><td>{e.conversationTitle??"未知"}</td><td>{e.requestId??e.nodeRequestId??"—"}</td></tr>)}</tbody></table></div>
+          <td>{e.nodeId??localNodeLabel}</td><td>{e.conversationTitle??"未知"}</td><td>{e.requestId??e.nodeRequestId??"—"}</td></tr>)}</tbody></table></div>
       {!history.length&&<Blank>点击“检索”可查询历史事件；未执行检索不代表没有日志。</Blank>}
     </Panel>
-    <Panel title="浏览器消息流元数据" hint="手动导入扩展 JSON，不上传提示词和消息内容">
+    <Panel title="浏览器扩展与消息流元数据" hint="扩展 ZIP 用于安装；扩展导出的 JSON 才用于这里导入">
       <a href="/console/api/browser-extension" download="synrex-browser-observer.zip">
-        下载浏览器观测扩展（安装需要用户自行确认）
+        ① 下载当前 Synrex 浏览器观测扩展 ZIP
       </a>
+      <p className="footnote">② 解压 ZIP → 打开 <code>chrome://extensions</code> → 开启“开发者模式” → “加载已解压的扩展” → 选择解压后的目录。Chrome 不能直接把 ZIP 通过下面的文件框安装。</p>
+      <p className="footnote">③ 切到 ChatGPT 标签页，打开扩展并运行“测试实际页面网络采集”；通过后点击“导出 JSON（手动导入 Console）”。</p>
+      <label>④ 导入扩展导出的 <code>synrex-browser-metadata.json</code>：
       <input type="file" accept=".json,application/json" onChange={e=>{
 const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
-      }}/>
+      }}/></label>
       {browserError&&<p className="form-error">{browserError}</p>}
 <p className="footnote">扩展 v1.1：在 ChatGPT 标签页打开扩展并点击“测试实际页面网络采集”。
         看到通过后导出 JSON，再导入 Console。无共享请求 ID 的记录只按时间推测关联。</p>
@@ -682,13 +690,26 @@ const file=e.currentTarget.files?.[0];if(file)void loadBrowserMetadata(file);
     </Panel></div>;
 }
 function Resources({d}:{d:Snapshot}) {
-  const [host,setHost]=useState("swy1");
+  const localNode=d.nodes.find(n=>n.kind==="local");
+  const localNodeId=localNode?.id??"local";
+  const localNodeLabel=localNode?.alias||localNode?.id||"本机";
+  const selectableNodes=useMemo(()=>{
+    const seen=new Map<string,string>();
+    seen.set(localNodeId,localNodeLabel);
+    for(const node of d.nodes)seen.set(node.id,node.alias||node.id);
+    for(const event of d.diagnostics.events)if(event.nodeId&&!seen.has(event.nodeId))seen.set(event.nodeId,event.nodeId);
+    return [...seen.entries()];
+  },[d.nodes,d.diagnostics.events,localNodeId,localNodeLabel]);
+  const [host,setHost]=useState(localNodeId);
+  useEffect(()=>{if(!selectableNodes.some(([id])=>id===host))setHost(localNodeId);},[host,localNodeId,selectableNodes]);
+  const isLocal=host===localNodeId;
   const runtime=d.observability.runtime;
-  const latestNodeNetwork=d.diagnostics.events.find(e=>e.event==="network_sampled"&&(e.nodeId??"swy1")===host);
-  const networkStatus=latestNodeNetwork??(host==="swy1"?d.observability.network:{});
+  const eventNode=(nodeId?:string)=>nodeId??localNodeId;
+  const latestNodeNetwork=d.diagnostics.events.find(e=>e.event==="network_sampled"&&eventNode(e.nodeId)===host);
+  const networkStatus=latestNodeNetwork??(isLocal?d.observability.network:{});
   const mib=(bytes?:number)=>bytes===undefined?"未知":(bytes/1048576).toFixed(1)+" MiB";
   const runtimeSamples=d.diagnostics.events.filter(e=>e.event==="runtime_sampled"&&typeof e.rssBytes==="number"&&
-    (e.nodeId??"swy1")===host);
+    eventNode(e.nodeId)===host);
   const latestBoot=runtimeSamples[0]?.bootId;
   const samples=runtimeSamples.filter(e=>!latestBoot||e.bootId===latestBoot)
     .slice().reverse().slice(-50);
@@ -722,13 +743,13 @@ Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取�
       <p className="footnote">该速率为服务端实际记录到的 MCP HTTP 有效载荷平均吞吐，不包含 TCP/TLS 开销。不能推导 GPT 每秒生成 Token 或 GPU 生成速度。空闲期间的 0 B/s 仅表示观测窗口内无对应字节；来源过期时不填零。</p>
     </Panel>
     <label>节点 <select className="filter" value={host} onChange={e=>setHost(e.target.value)}>
-      <option value="swy1">swy1</option><option value="gateway">gateway（近一分钟元数据）</option>
+      {selectableNodes.map(([id,label])=><option key={id} value={id}>{label}{id===localNodeId?"（当前 Server）":""}</option>)}
     </select></label>
     <div className="metrics">
-      <Metric symbol="▥" label="Synrex RSS" value={host==="swy1"?mib(runtime.rssBytes):"未知"} info={host==="swy1"?time(runtime.at):"gateway 未部署新版进程埋点"}/>
-      <Metric symbol="▦" label="JS Heap" value={host==="swy1"?mib(runtime.heapUsedBytes):"未知"} info={host}/>
-      <Metric symbol="◷" label="事件循环采样延迟" value={host==="swy1"&&runtime.eventLoopLagMs!==undefined?runtime.eventLoopLagMs+" ms":"未知"} info="10 秒采样偏移"/>
-      <Metric symbol="⌁" label="正在执行工具" value={host==="swy1"?runtime.activeToolCount??"未知":"未知"} info="采样时刻的活动数量"/>
+      <Metric symbol="▥" label="Synrex RSS" value={isLocal?mib(runtime.rssBytes):"未知"} info={isLocal?time(runtime.at):"该节点未提供本进程埋点"}/>
+      <Metric symbol="▦" label="JS Heap" value={isLocal?mib(runtime.heapUsedBytes):"未知"} info={selectableNodes.find(([id])=>id===host)?.[1]??host}/>
+      <Metric symbol="◷" label="事件循环采样延迟" value={isLocal&&runtime.eventLoopLagMs!==undefined?runtime.eventLoopLagMs+" ms":"未知"} info="10 秒采样偏移"/>
+      <Metric symbol="⌁" label="正在执行工具" value={isLocal?runtime.activeToolCount??"未知":"未知"} info="采样时刻的活动数量"/>
     </div>
     <Panel title="进程内存曲线" hint="真实采集记录 · 同一服务实例 · 采样缺失处不插值">
       {samples.length>=2?<svg role="img" aria-label="Synrex 内存采样历史曲线"
@@ -739,9 +760,9 @@ Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取�
     <div className="metrics">
       <Metric symbol="◷" label="TCP RTT p95" value={networkStatus.tcpRttP95Ms===undefined?"未知":networkStatus.tcpRttP95Ms+" ms"}
         info="主机已建立连接样本，非 MCP 请求 RTT"/>
-      <Metric symbol="⌁" label="TCP 已采样连接" value={networkStatus.tcpConnections??"未知"} info={time(latestNodeNetwork?.ts??(host==="swy1"?d.observability.network.at:undefined))}/>
+      <Metric symbol="⌁" label="TCP 已采样连接" value={networkStatus.tcpConnections??"未知"} info={time(latestNodeNetwork?.ts??(isLocal?d.observability.network.at:undefined))}/>
       <Metric symbol="▥" label="重传连接数" value={networkStatus.tcpRetransSockets??"未知"} info="采样窗口"/>
-      <Metric symbol="◷" label="GC 耗时" value={host==="swy1"&&runtime.gcDurationMs!==undefined?runtime.gcDurationMs+" ms":"未知"} info="最近 10 秒采样区间"/>
+      <Metric symbol="◷" label="GC 耗时" value={isLocal&&runtime.gcDurationMs!==undefined?runtime.gcDurationMs+" ms":"未知"} info="最近 10 秒采样区间"/>
     </div>
     <Panel title="采集完整性" hint="Collector 计数器 · 计数非零表示存在丢失风险，并非全部丢失量">
       <div className="metrics">

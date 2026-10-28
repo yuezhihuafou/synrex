@@ -90,7 +90,9 @@ function applyEvent(history: TokenHistory, entry: DiagnosticEntry): void {
     }
   }
   if (!isInput && !isOutput && !isCall && !isFinish) return;
-  if(!history.observedFrom || iso<history.observedFrom)history.observedFrom=iso;
+  // observedFrom describes Token coverage, not the first tool call that
+  // happened to exist in an older diagnostic log.
+  if ((isInput || isOutput) && (!history.observedFrom || iso<history.observedFrom)) history.observedFrom=iso;
   const minuteBucket=history.minute[minute]??(history.minute[minute]=empty());
   const hourBucket=history.hour[hour]??(history.hour[hour]=empty());
   const dayBucket=history.day[day]??(history.day[day]=empty());
@@ -273,10 +275,22 @@ export function tokenHistorySummary(s: TokenHistory) {
       runtimeSamples:b.runtimeSamples??0,
       runtimeAverageTokensPerSecond:average(b.runtimeOutputTokens??0,b.runtimeDurationMs??0)}));
   const total=s.runtime;
-  return {startedAt:s.startedAt,observedFrom:s.observedFrom??null,updatedAt:s.updatedAt,coverageGaps:s.gaps,
+  // Older ledgers could set observedFrom from the first tool call even when
+  // Token measurement was not enabled yet. Correct the public summary from
+  // the earliest retained bucket that actually contains a Token sample.
+  const firstMeasuredBucket=Object.entries(s.minute).sort(([a],[b])=>a.localeCompare(b))
+    .find(([,b])=>b.inputSamples>0||b.outputSamples>0)?.[0]
+    ??Object.entries(s.hour).sort(([a],[b])=>a.localeCompare(b))
+      .find(([,b])=>b.inputSamples>0||b.outputSamples>0)?.[0]
+    ??Object.entries(s.day).sort(([a],[b])=>a.localeCompare(b))
+      .find(([,b])=>b.inputSamples>0||b.outputSamples>0)?.[0];
+  const observedFrom=s.observedFrom&&firstMeasuredBucket
+    ?(Date.parse(s.observedFrom)>=Date.parse(firstMeasuredBucket)?s.observedFrom:firstMeasuredBucket)
+    :s.observedFrom??firstMeasuredBucket??null;
+  return {startedAt:s.startedAt,observedFrom,updatedAt:s.updatedAt,coverageGaps:s.gaps,
     totals:{inputTokens:s.totals.input,outputTokens:s.totals.output,calls:s.totals.calls,
       measuredInputs:s.totals.inputSamples,measuredOutputs:s.totals.outputSamples},
-    peakMinute:s.peakMinute,peakOutputCall:s.peakOutputCall,
+    peakMinute:s.peakMinute?{at:s.peakMinute.at,tokens:s.peakMinute.tokens}:null,peakOutputCall:s.peakOutputCall,
     runtime:{averageTokensPerSecond:average(total?.outputTokens??0,total?.durationMs??0),
       matchedOutputTokens:total?.outputTokens??0,matchedDurationMs:total?.durationMs??0,
       measuredCalls:total?.samples??0,observedFrom:total?.observedFrom??null},

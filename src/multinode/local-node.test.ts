@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { hostname } from "node:os";
 import {
+  localNodeRegistration,
   runtimeBuildFingerprint,
   sourceFingerprint,
   sourceProvenanceDrifted,
 } from "./local-node.js";
+import type { ServerConfig } from "../config.js";
+
+test("local node defaults to the actual host name and preserves an explicit alias", () => {
+  const base={node:{alias:null,labels:{}},subagents:{enabled:false},toolMode:"codex",allowedRoots:[]} as unknown as ServerConfig;
+  assert.equal(localNodeRegistration(base,{semanticAvailable:false,durableTasksAvailable:false}).alias,hostname());
+  const named={...base,node:{alias:"owner-server",labels:{}}} as ServerConfig;
+  assert.equal(localNodeRegistration(named,{semanticAvailable:false,durableTasksAvailable:false}).alias,"owner-server");
+});
 
 test("runtime build fingerprint is stable and bounded", () => {
   const first = runtimeBuildFingerprint();

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { cpus, homedir, totalmem } from "node:os";
+import { cpus, homedir, hostname, totalmem } from "node:os";
 import { dirname, join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -50,7 +50,10 @@ export function localNodeRegistration(
   if (config.subagents.enabled) features.push("agent.subagent");
 
   return {
-    alias: config.node.alias ?? undefined,
+    // A null alias used to leave the Console with an opaque node ID, which
+    // encouraged old UI code to substitute a hard-coded machine name. Keep
+    // an explicit config alias authoritative, otherwise use the actual host.
+    alias: config.node.alias ?? hostname(),
     platform: {
       os: process.platform,
       arch: process.arch,

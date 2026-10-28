@@ -160,7 +160,13 @@ test("authenticated browser extension API serves the packaged archive", async t 
   const response=await fetch(origin+"/console/api/browser-extension",{headers:{cookie}});
   assert.equal(response.status,200,await response.clone().text());
   assert.match(response.headers.get("content-disposition")??"",/synrex-browser-observer\.zip/);
-  assert.ok((await response.arrayBuffer()).byteLength>1000);
+  const archive=Buffer.from(await response.arrayBuffer());
+  assert.ok(archive.byteLength>1000);
+  assert.equal(archive.readUInt32LE(0),0x04034b50);
+  const text=archive.toString("utf8");
+  assert.ok(text.includes("Synrex Transport Metadata Observer"));
+  assert.ok(text.includes('"version": "1.1.1"'));
+  assert.ok(!text.includes("devspace.yuezhihuafou.dpdns.org"));
 });
 
 test("loopback Console uses same-origin assets and local session cookies while public sessions stay secure", async t => {

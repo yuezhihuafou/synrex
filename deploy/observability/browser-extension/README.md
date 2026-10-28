@@ -1,14 +1,24 @@
 # Chrome/Chromium browser-side metadata observation
 
-Unpacked opt-in Manifest V3 extension. Go to `chrome://extensions`, enable
-Developer mode and choose **Load unpacked**, selecting this directory.
+Opt-in Manifest V3 extension. The Synrex Console downloads it as a ZIP because
+Chrome does not install an unpacked development extension directly from a ZIP:
+
+1. Download `synrex-browser-observer.zip` from the authenticated Console.
+2. Extract it to a normal directory.
+3. Open `chrome://extensions`, enable **Developer mode**, choose **Load
+   unpacked**, and select the extracted directory.
+4. Open a ChatGPT tab, use the extension popup to run the self-test, then
+   export the metadata JSON and import that JSON into Synrex Console.
+
+Do not select the extension ZIP in a Console HAR/JSON import field. The ZIP is
+only an installation package; observation data is exported separately as JSON.
 The ChatGPT host's private model inference and internal scheduling remain
 unobservable. Browser network completion does not prove a model token became
 visible, and Chrome webRequest does not surface arbitrary response body chunks.
 
 The extension saves at most 5000 recent sanitized event records locally, seven
 days by timestamp. Its popup exports a JSON file, which the operator can load
-into the P012 Web Console for approximate client/server time comparison. It
+into Synrex Console for approximate client/server time comparison. It
 does **not** transmit data automatically, intercept passwords, or modify
 network responses. Events with no shared server trace ID are explicitly
 inferred by time and may not uniquely identify a request.

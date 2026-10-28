@@ -43,7 +43,7 @@ test("persistent Token ledger does not replay, survives restart/rotation and ret
   assert.equal(data.gaps,0);
   const publicData=tokenHistorySummary(data);
   assert.equal(publicData.totals.outputTokens,535);
-  assert.equal(publicData.observedFrom,"2026-10-28T12:09:00.000Z");
+  assert.equal(publicData.observedFrom,"2026-10-28T12:09:02.000Z");
   assert.equal(publicData.hour.length,1);
   assert.equal(publicData.day.length,1);
   assert.equal(tokenHistorySummary(updateTokenHistory(dir,new Date(now.getTime()+75000))).totals.outputTokens,535);

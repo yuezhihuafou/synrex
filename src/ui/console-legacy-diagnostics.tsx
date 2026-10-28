@@ -77,51 +77,12 @@ export function LegacyDiagnostics({d,clockOffsetMs,clockUncertaintyMs}:{d:Snapsh
   }
   const [browser,setBrowser]=useState<BrowserEvent[]>([]);
   const [harError,setHarError]=useState("");
-  const [autoCount,setAutoCount]=useState(0);
-  const [lastExtensionSync,setLastExtensionSync]=useState<number|null>(null);
   const [incidents,setIncidents]=useState<Array<{id:string;at:string;trigger:BrowserEvent;events:BrowserEvent[]}>>([]);
   useEffect(()=>{
     try {
       const saved=JSON.parse(localStorage.getItem("synrex-browser-incidents-v1")||"[]");
       if(Array.isArray(saved))setIncidents(saved.slice(-30));
     } catch { /* Browser storage is optional. */ }
-  },[]);
-  useEffect(()=>{
-    function onMessage(event:MessageEvent){
-      if(event.source!==window || event.origin!==location.origin || event.data?.type!=="synrex-browser-trace-v1" || !Array.isArray(event.data.events))return;
-      const safe=(event.data.events as BrowserEvent[]).slice(-1000).filter(x=>x && typeof x.at==="string" &&
-        typeof x.host==="string" && typeof x.path==="string" && Number.isFinite(Date.parse(x.at)) &&
-        (x.host==="chatgpt.com" || x.host==="chat.openai.com"));
-      setBrowser(old=>{
-        const merged=new Map(old.map(x=>[`${x.at}|${x.host}|${x.path}|${x.durationMs}`,x]));
-        for(const x of safe)merged.set(`${x.at}|${x.host}|${x.path}|${x.durationMs}`,x);
-        const next=[...merged.values()].sort((a,b)=>a.at.localeCompare(b.at)).slice(-2000);
-const discovered=detectBrowserIncidents(next);
-        if(discovered.length)setIncidents(previous=>{
-          const byId=new Map(previous.map(x=>[x.id,x]));
-          let changed=false;
-          for(const incident of discovered) {
-            if(!byId.has(incident.id)){byId.set(incident.id,incident);changed=true;}
-          }
-          if(!changed)return previous;
-          const recent=[...byId.values()].sort((a,b)=>a.at.localeCompare(b.at)).slice(-30);
-          try {localStorage.setItem("synrex-browser-incidents-v1",JSON.stringify(recent));} catch {}
-          return recent;
-        });
-        return next;
-      });
-      setAutoCount(safe.length);
-      setLastExtensionSync(Date.now());
-      if(Array.isArray(event.data.incidents)) {
-        setIncidents(event.data.incidents.slice(-30).filter((x:unknown):x is {id:string;at:string;trigger:BrowserEvent;events:BrowserEvent[]}=>{
-          if(!x || typeof x!=="object")return false;
-          const item=x as {id?:unknown;at?:unknown;trigger?:unknown;events?:unknown};
-          return typeof item.id==="string"&&typeof item.at==="string"&&
-            Boolean(item.trigger)&&Array.isArray(item.events);
-        }));
-      }
-    }
-    window.addEventListener("message",onMessage);return()=>window.removeEventListener("message",onMessage);
   },[]);
   const matched=useMemo(()=>d.diagnostics.requests.filter(r=>(r.requestId+" "+(r.tool??"")+" "+(r.taskId??""))
     .toLowerCase().includes(query.toLowerCase())),[d,query]);
@@ -146,8 +107,17 @@ const discovered=detectBrowserIncidents(next);
   async function importHar(file?:File) {
     if (!file) return;
     setHarError("");
+    const prefix=new Uint8Array(await file.slice(0,4).arrayBuffer());
+    if(/\.zip$/i.test(file.name)||(prefix[0]===0x50&&prefix[1]===0x4b)){
+      setHarError("你选的是 Synrex 扩展 ZIP，不是 HAR。请先解压 ZIP，在 chrome://extensions 开启开发者模式并“加载已解压的扩展”。这个文件框只接收 DevTools 导出的 HAR。");return;
+    }
     if(file.size>15_000_000){setHarError("HAR 超过 15 MB 限制");return;}
-    try {setBrowser(parseHar(JSON.parse(await file.text())));}catch(e){setHarError(e instanceof Error?e.message:"无效的 HAR 文件");}
+    try {
+      const next=parseHar(JSON.parse(await file.text()));
+      setBrowser(next);
+      const discovered=detectBrowserIncidents(next);
+      if(discovered.length){setIncidents(discovered.slice(-30));try{localStorage.setItem("synrex-browser-incidents-v1",JSON.stringify(discovered.slice(-30)));}catch{}}
+    }catch(e){setHarError(e instanceof Error?e.message:"无效的 HAR 文件");}
   }
   function exportIncident(incident:{id:string;at:string;trigger:BrowserEvent;events:BrowserEvent[]}) {
     const payload={schema:"synrex-incident-v1",capturedAt:new Date().toISOString(),
@@ -170,10 +140,13 @@ const discovered=detectBrowserIncidents(next);
       <p className="footnote">已观测 MCP 输入 {d.diagnostics.observability.transfer.observedInputBytes.toLocaleString()} B、输出 {d.diagnostics.observability.transfer.observedOutputBytes.toLocaleString()} B；覆盖 {d.diagnostics.observability.coverage.observedRequests} 个请求。仅有 HTTP 完成证据时，模型推理中断与 ChatGPT 消息断流仍不可区分，需结合浏览器 HAR。</p>
       <p className="footnote">输入 p95：{d.diagnostics.observability.capacity?.inputP95?.toLocaleString()??"—"} B；最大输出：{d.diagnostics.observability.capacity?.largestOutput.toLocaleString()??"—"} B；超过 16 KiB 的响应：{d.diagnostics.observability.capacity?.largeResponses??"—"}；平均有效输出吞吐估计：{d.diagnostics.observability.capacity?.bytesPerSecond?.toLocaleString()??"—"} B/s（用整段 MCP 耗时估算，包含执行等待，不代表模型生成速度）。</p>
     </Panel>}
-    <Panel title="浏览器网络证据" hint="本地读取 HAR，仅保留请求时间、域名、路径、状态和耗时；不会上传原始 HAR">
-      <p><a href="/console/browser-extension.zip">下载 Synrex Browser Trace 扩展</a> · 首次安装后按版本更新；扩展仅读取 ChatGPT 网络元数据</p>
-      <label>导入浏览器 DevTools 导出的 HAR（建议先过滤 ChatGPT 请求） <input type="file" accept=".har,.json,application/json" onChange={e=>void importHar(e.target.files?.[0])}/></label>
-      <p className="footnote">扩展链路：{lastExtensionSync===null?"尚未收到消息":`最近同步于 ${new Date(lastExtensionSync).toLocaleTimeString()}`}；已读取 {browser.length} 条浏览器请求；最近一次同步 {autoCount} 条。{clockOffsetMs===null?"尚未校准浏览器与 swy1 时钟":`估计浏览器相对 swy1 时钟偏移 ${Math.round(clockOffsetMs)} ms，采样网络不确定度约 ±${Math.round(clockUncertaintyMs??0)} ms`}。仅有共同请求 ID 才是确定关联；时间接近只是线索。</p>
+    <Panel title="浏览器网络证据" hint="扩展安装包和 HAR 是两种不同文件；都只在本机处理">
+      <div className="notice"><strong>安装 Synrex 浏览器观测扩展</strong>
+        <p>① <a href="/console/api/browser-extension" download="synrex-browser-observer.zip">下载扩展 ZIP</a>。② 解压。③ 打开 <code>chrome://extensions</code>，开启“开发者模式”，点“加载已解压的扩展”并选择解压目录。Chrome 不能把 ZIP 直接拖进下面的 HAR 输入框安装。</p>
+        <p>安装后在 ChatGPT 标签页打开扩展，运行“测试实际页面网络采集”，再从扩展弹窗导出 JSON。扩展 JSON 请在“诊断中心 → 浏览器扩展与消息流元数据”导入。</p>
+      </div>
+      <label>可选：导入 Chrome DevTools 导出的 HAR（不是扩展 ZIP） <input type="file" accept=".har,.json,application/json" onChange={e=>void importHar(e.target.files?.[0])}/></label>
+      <p className="footnote">当前已从 HAR 读取 {browser.length} 条浏览器请求。{clockOffsetMs===null?"尚未校准浏览器与当前 Synrex Server 时钟":`估计浏览器相对当前 Synrex Server 时钟偏移 ${Math.round(clockOffsetMs)} ms，采样网络不确定度约 ±${Math.round(clockUncertaintyMs??0)} ms`}。没有共享请求 ID 时，时间接近只作为线索。</p>
       {harError&&<p role="alert">{harError}</p>}
       {!!browser.length&&<button onClick={()=>setBrowser([])}>清除浏览器数据</button>}
 </Panel>
@@ -184,7 +157,7 @@ const discovered=detectBrowserIncidents(next);
           <small>附近 MCP 事件：{d.diagnostics.requests.filter(r=>Math.abs(Date.parse(r.lastAt)-Date.parse(i.at))<120000).length} 条（仅时间候选，非确定关联）</small></div>
         <button onClick={()=>exportIncident(i)}>导出证据</button>
       </div>)}
-      {!incidents.length&&<Blank>尚无自动冻结的故障证据；需启用 Synrex Browser Trace 扩展</Blank>}
+      {!incidents.length&&<Blank>当前 HAR 中没有检测到可冻结的故障证据；扩展自身的事件请从扩展导出 JSON 后在诊断中心导入。</Blank>}
       <p className="footnote">按需深度抓包：在 Chrome 打开 chrome://net-export，选择默认隐私保护模式开始记录，复现后停止；原始 NetLog 不会上传至 Synrex。扩展无法获取 ChatGPT 内部模型事件或完整流式消息帧。</p>
     </Panel>
     <Panel title="端到端时间线（已知事件）" hint="按请求 ID、工具、域名或路径过滤；浏览器时间必须校准">
