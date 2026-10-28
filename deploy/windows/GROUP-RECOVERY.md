@@ -31,6 +31,18 @@ installing dependencies. The minimum is the current source slot's measured size
 plus 512 MiB build reserve, so a low-disk node fails before creating another
 half-built runtime. Superseded slots are never deleted automatically.
 
+After a successful promotion the complete Windows deployment toolkit is copied
+to `$groupRoot\ops\deployment`. Subsequent releases can therefore be promoted
+without locating the original source checkout:
+
+```powershell
+& "$groupRoot\ops\deployment\deploy-group.ps1" -PlatformRoot $groupRoot -RuntimePackagePath $runtimePackage -SourceRevision $revision
+```
+
+The installed toolkit contains the deployment entrypoint, slot preparation,
+Group supervisor, Console installer, desktop shell resources and recovery notes.
+It is replaced only after the new slot and Group readiness checks have succeeded.
+
 The installed manual Console command is:
 
 ```powershell

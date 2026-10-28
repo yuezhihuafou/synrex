@@ -21,6 +21,7 @@ if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Secur
 $prepare = Join-Path $PSScriptRoot 'prepare-runtime-slot.ps1'
 $service = Join-Path $PSScriptRoot 'group-service.ps1'
 $console = Join-Path $PSScriptRoot 'install-console-desktop.ps1'
+$installedDeploymentRoot = Join-Path $root 'ops\deployment'
 foreach ($required in @($prepare, $service, $console, $package)) {
     if (!(Test-Path -LiteralPath $required -PathType Leaf)) { throw "Deployment input missing: $required" }
 }
@@ -44,10 +45,41 @@ if ($LASTEXITCODE -ne 0) { throw 'Post-deployment Group readiness check failed.'
 $active = (Get-Content -Raw -LiteralPath (Join-Path $root 'runtime\active-slot.txt')).Trim()
 if ($active -ne $SlotName) { throw "Active slot mismatch after deployment: $active" }
 
+# Keep a self-contained copy of the Windows deployment toolkit beside the
+# installed supervisor so future promotions do not depend on a source checkout.
+$sourceDeploymentRoot = [IO.Path]::GetFullPath($PSScriptRoot).TrimEnd('\')
+$targetDeploymentRoot = [IO.Path]::GetFullPath($installedDeploymentRoot).TrimEnd('\')
+if (!$sourceDeploymentRoot.Equals($targetDeploymentRoot, [StringComparison]::OrdinalIgnoreCase)) {
+    $staging = $targetDeploymentRoot + '.staging'
+    $previous = $targetDeploymentRoot + '.previous'
+    Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $previous -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    Copy-Item -Path (Join-Path $sourceDeploymentRoot '*') -Destination $staging -Recurse -Force
+    $movedPrevious = $false
+    try {
+        if (Test-Path -LiteralPath $targetDeploymentRoot -PathType Container) {
+            Move-Item -LiteralPath $targetDeploymentRoot -Destination $previous
+            $movedPrevious = $true
+        }
+        Move-Item -LiteralPath $staging -Destination $targetDeploymentRoot
+        Remove-Item -LiteralPath $previous -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        $installFailure = $_
+        Remove-Item -LiteralPath $targetDeploymentRoot -Recurse -Force -ErrorAction SilentlyContinue
+        if ($movedPrevious -and (Test-Path -LiteralPath $previous -PathType Container)) {
+            Move-Item -LiteralPath $previous -Destination $targetDeploymentRoot
+        }
+        throw $installFailure
+    }
+}
+
 [PSCustomObject]@{
     status = 'ready'
     slot = $active
     revision = $revision
     console = 'http://127.0.0.1:17677/console'
     launcher = (Join-Path $root 'ops\start-synrex-console.ps1')
+    deployment = (Join-Path $installedDeploymentRoot 'deploy-group.ps1')
 }

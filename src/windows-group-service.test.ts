@@ -27,6 +27,11 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(deploy, /prepare-runtime-slot\.ps1/);
   assert.match(deploy, /-Action Activate/);
   assert.match(deploy, /install-console-desktop\.ps1/);
+  assert.match(deploy, /ops\\deployment/);
+  assert.match(deploy, /installedDeploymentRoot/);
+  assert.match(deploy, /Active slot mismatch after deployment/);
+  assert.match(deploy, /Move-Item -LiteralPath \$staging -Destination \$targetDeploymentRoot/);
+  assert.match(deploy, /Move-Item -LiteralPath \$previous -Destination \$targetDeploymentRoot/);
   assert.match(prepare, /buildFreeSpaceReserveBytes = 512MB/);
   assert.match(prepare, /sourceSlotBytes = Get-DirectoryBytes/);
   assert.match(prepare, /Insufficient disk space to prepare a new Synrex Windows runtime slot/);
