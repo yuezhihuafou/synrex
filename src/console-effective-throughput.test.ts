@@ -19,6 +19,12 @@ test("overlapping calls count once per conversation; global concurrency is separ
   assert.equal(r.globalActiveTokensPerSecond,500);
   assert.equal(r.unknownCalls,1);
   assert.equal(r.attributionCoveragePercent,75);
+  assert.equal(r.sessions.length,2);
+  const a=r.sessions.find(s=>s.conversationId==="conv_aaa");
+  const b=r.sessions.find(s=>s.conversationId==="conv_bbb");
+  assert.deepEqual([a?.matchedCalls,a?.outputTokens,a?.activeMs,a?.activeTokensPerSecond],[2,2000,6000,333.3]);
+  assert.deepEqual([b?.matchedCalls,b?.outputTokens,b?.activeMs,b?.activeTokensPerSecond],[1,1000,4000,250]);
+  assert.equal(r.perSessionTokensPerSecond,300,"aggregate rate must not be mislabelled as any individual conversation");
 });
 
 test("serial intervals sum; absent verified association cannot produce a main GPT rate",()=>{

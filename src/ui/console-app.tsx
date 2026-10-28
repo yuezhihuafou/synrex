@@ -81,6 +81,8 @@ type Snapshot = {
           matchedCalls:number;unknownCalls:number;totalMatchedCalls:number;sessionCount:number;
           perSessionActiveMs:number;globalActiveMs:number;maxConcurrency:number;
           perSessionTokensPerSecond:number|null;globalActiveTokensPerSecond:number|null;
+          sessions?:Array<{conversationId:string;matchedCalls:number;outputTokens:number;activeMs:number;
+            observedSpanMs:number;activeTokensPerSecond:number|null;firstAt:string;lastAt:string}>;
           attributionCoveragePercent:number|null;truncatedCalls?:number;
           status:"observed"|"unavailable";note:string};
         minute:Array<TokenHistoryPoint>;hour:Array<TokenHistoryPoint>;day:Array<TokenHistoryPoint>}|null} };
@@ -169,12 +171,12 @@ function RexPerformance({d}:{d:Snapshot}) {
   const windowRuntimeRate=windowRuntimeMs>0?Math.round(windowRuntimeTokens*10000/windowRuntimeMs)/10:null;
   return <Panel title="Rex Performance" hint="主机会话关联与 Subagent 独立统计 · 不是 GPT 模型的解码速度">
     <div className="metrics performance-metrics">
-      <Metric label="会话关联请求活跃交付率" symbol="⇄" value={effective?.perSessionTokensPerSecond==null?"未测量":`${effective.perSessionTokensPerSecond} Token/s`}
-        info={`最近 24h · ${effective?.matchedCalls??0} 次关联请求 · 同会话并发去重`}/>
-      <Metric label="Rex 全局请求活跃交付率" symbol="↑" value={effective?.globalActiveTokensPerSecond==null?"未测量":`${effective.globalActiveTokensPerSecond} Token/s`}
-        info={`最近 24h · ${effective?.maxConcurrency??0} 峰值并发 · 全局时间并集`}/>
-      <Metric label="会话关联覆盖率" symbol="⊙" value={effective?.attributionCoveragePercent==null?"未测量":`${effective.attributionCoveragePercent}%`}
-        info={`已配对 ${effective?.totalMatchedCalls??0} 次；未知 ${effective?.unknownCalls??0}；滚动截断 ${effective?.truncatedCalls??0}`}/>
+      <Metric label="可关联会话" symbol="⇄" value={effective?.sessionCount??"未测量"}
+        info={`最近 24h · ${effective?.matchedCalls??0} 次完整工具请求，按对话独立统计`}/>
+      <Metric label="最大观测并发" symbol="↑" value={effective?.matchedCalls?`${effective.maxConcurrency} 次`:"未测量"}
+        info="不同对话可以并发；不作为模型生成速度"/>
+      <Metric label="会话 ID 关联率" symbol="⊙" value={effective?.attributionCoveragePercent==null?"未测量":`${effective.attributionCoveragePercent}%`}
+        info={`只是已配对请求的会话 ID 覆盖，不是 Token 或主 GPT 身份覆盖；未知 ${effective?.unknownCalls??0}`}/>
       <Metric label="端到端 / GPT 纯思考时间" symbol="◴" value="未测量"
         info="主机尚无可靠回合边界；不得把工具间隔当成纯思考"/>
       <Metric label={history?"持久累计 Token":"当前可观测 Token"} symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
@@ -183,6 +185,20 @@ function RexPerformance({d}:{d:Snapshot}) {
         info="最近 60 秒观察到的工具启动"/>
       <Metric label="平均调用延迟" symbol="◷" value={t?.averageLatencyMs==null?"未测量":`${t.averageLatencyMs} ms`}
         info="最近 60 秒有完整记录的调用"/>
+    </div>
+    <div className="performance-chart">
+      <p className="footnote">分对话工具交付 · 最近 24 小时（仅有会话 ID 的完整样本）</p>
+      {effective?.sessions?.length?<div className="table-scroll"><table>
+        <thead><tr><th>会话标识</th><th>调用</th><th>输出 Token</th><th>工具活跃时间</th><th>活跃交付率</th><th>最后活动</th></tr></thead>
+        <tbody>{effective.sessions.map(s=><tr key={s.conversationId}>
+          <td title={s.conversationId}>{s.conversationId.slice(0,13)}…</td>
+          <td>{s.matchedCalls}</td><td>{s.outputTokens.toLocaleString("zh-CN")}</td>
+          <td>{(s.activeMs/1000).toFixed(2)} s</td>
+          <td>{s.activeTokensPerSecond==null?"未测量":`${s.activeTokensPerSecond} Token/s`}</td>
+          <td>{time(s.lastAt)}</td>
+        </tr>)}</tbody>
+      </table></div>:<Blank>当前没有完整且有会话标识的工具请求。</Blank>}
+      <p className="footnote">每条会话各自合并并发请求区间；不跨会话求一个所谓“模型平均 Token/s”。这些速率只表示工具文本的活跃交付，不包含 GPT 思考或完整回合耗时。旧总量与系统并发仍在诊断账本中。</p>
     </div>
     <div className="performance-chart">
       <div className="usage-actions"><p className="footnote">旧全来源历史账本（不按会话归属过滤）</p>

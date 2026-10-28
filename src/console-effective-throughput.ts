@@ -31,7 +31,16 @@ export function summarizeEffectiveThroughput(calls:readonly EffectiveCall[],now:
   const perConversation=new Map<string,EffectiveCall[]>();
   for(const call of host){const items=perConversation.get(call.conversationId!)??[];items.push(call);perConversation.set(call.conversationId!,items);}
   let perSessionActiveMs=0;
-  for(const items of perConversation.values())perSessionActiveMs+=unionMilliseconds(items);
+  const sessions=[...perConversation.entries()].map(([conversationId,items])=>{
+    const activeMs=unionMilliseconds(items);
+    const outputTokens=items.reduce((sum,c)=>sum+c.outputTokens,0);
+    const startMs=Math.min(...items.map(c=>c.startMs));
+    const endMs=Math.max(...items.map(c=>c.endMs));
+    return {conversationId,matchedCalls:items.length,outputTokens,activeMs,
+      observedSpanMs:endMs-startMs,activeTokensPerSecond:rate(outputTokens,activeMs),
+      firstAt:new Date(startMs).toISOString(),lastAt:new Date(endMs).toISOString()};
+  }).sort((a,b)=>b.lastAt.localeCompare(a.lastAt));
+  for(const session of sessions)perSessionActiveMs+=session.activeMs;
   const hostTokens=host.reduce((s,c)=>s+c.outputTokens,0);
   const globalActiveMs=unionMilliseconds(host);
   const events=host.flatMap(c=>[{at:c.startMs,delta:1},{at:c.endMs,delta:-1}])
@@ -41,6 +50,7 @@ export function summarizeEffectiveThroughput(calls:readonly EffectiveCall[],now:
   return {
     windowSeconds:86400, scope:"host_session_associated" as const,
     outputTokens:hostTokens, matchedCalls:host.length, unknownCalls:unknown,
+    sessions,
     totalMatchedCalls:eligible.length, sessionCount:perConversation.size,
     perSessionActiveMs,globalActiveMs,maxConcurrency,
     perSessionTokensPerSecond:rate(hostTokens,perSessionActiveMs),
