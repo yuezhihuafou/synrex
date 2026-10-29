@@ -81,3 +81,8 @@ Unknown future top-level state directories fail closed until a backup policy is 
 The supervisor records its Core PID, creation time and immutable slot. Restart
 and crash recovery validate all three plus the executable/CLI before stopping
 leftover Core children. A reused PID or unrelated listener is never adopted.
+
+Core startup intentionally does not run recovery-aware managed-worktree pruning
+before binding the MCP/Console listener. That maintenance remains available via
+`synrex worktrees prune`; keeping it outside the readiness-critical path avoids
+turning old or dirty Windows worktrees into deployment downtime.

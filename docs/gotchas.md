@@ -167,8 +167,10 @@ shows the combined changes and advances the review point automatically.
 Synrex prunes stale checkout workspace sessions, old conversation bindings,
 and their Git review refs on server startup. The default retention window is 90
 days and is configured with `storage.metadataRetentionDays`. Active managed
-worktrees are not deleted by metadata retention; `devspace worktrees prune`
-keeps its separate recovery-aware lifecycle.
+worktrees are not deleted by metadata retention and are not synchronously
+scanned or pruned on the server startup path. `synrex worktrees prune` keeps
+their separate recovery-aware lifecycle, so a large or dirty managed worktree
+cannot delay MCP/Console readiness during a service restart.
 
 ## MCP Workspace Path Rejected
 
