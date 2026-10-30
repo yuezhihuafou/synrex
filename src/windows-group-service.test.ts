@@ -86,6 +86,8 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.ok(manualStartBlock, "ManualStart implementation must remain a distinct bounded path");
   assert.doesNotMatch(manualStartBlock[1], /Install-Task|Register-ScheduledTask|Restart-Computer|shutdown\.exe/i);
   assert.match(manualLauncher, /-Verb RunAs/);
+  assert.doesNotMatch(manualLauncher, /^\s*\$elevated = Start-Process[^\r\n]*-Wait/m);
+  assert.match(manualLauncher, /\$elevated\.WaitForExit\(\)/);
   assert.match(manualLauncher, /-Action ManualStart/);
   assert.match(manualLauncher, /bundledService/);
   assert.match(manualCmd, /ExecutionPolicy Bypass/);

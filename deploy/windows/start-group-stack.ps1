@@ -24,7 +24,9 @@ if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         '-File', ('"' + $PSCommandPath + '"'),
         '-PlatformRoot', ('"' + $root + '"')
     )
-    $elevated = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -Wait -PassThru
+    # Start-Process -Wait waits for the supervisor's entire long-running tree.
+    $elevated = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -Verb RunAs -PassThru
+    $elevated.WaitForExit()
     exit $elevated.ExitCode
 }
 
