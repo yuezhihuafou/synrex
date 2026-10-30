@@ -10,11 +10,15 @@ import {
 import { registerSynrexConsole } from "./console-router.js";
 import express from "express";
 import type { Server } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import type { ServerConfig } from "./config.js";
+import { openDatabase } from "./db/client.js";
+import { UsageTrafficRecorder } from "./usage-ledger.js";
+import { readConsoleSnapshot } from "./console-snapshot.js";
+import { CodingWorkflowStore } from "./coding-workflows.js";
 
 test("owner console session is signed, expiring and isolated from another secret", () => {
   const now = Date.now();
@@ -156,4 +160,45 @@ test("Windows bridge obtains the Control action token server-side", async t => {
   const headers=action?.init?.headers as Record<string,string>;
   assert.equal(headers.origin,"http://127.0.0.1:17678");
   assert.equal(headers["x-devspace-console-token"],"test-action-value");
+});
+
+test("owner-only HTTP snapshot exposes usage while unauthenticated clients are rejected", async t => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "synrex-console-http-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const db = openDatabase(stateDir); db.close();
+  new CodingWorkflowStore(stateDir).close();
+  const recorder = new UsageTrafficRecorder(stateDir);
+  recorder.record({ event: "mcp_received", ts: new Date().toISOString(), requestId: "r1", inputBytes: 250 });
+  assert.ok(recorder.flush()); recorder.close();
+  await mkdir(path.join(stateDir,"observability"),{recursive:true});
+  const snapshot=readConsoleSnapshot(stateDir,"test-release");
+  const snapshotFile=path.join(stateDir,"observability","console-snapshot.json");
+  await writeFile(snapshotFile,JSON.stringify(snapshot));
+  const app=express();
+  const ownerToken="test-owner-secret";
+  const config={stateDir,publicBaseUrl:"http://127.0.0.1:12345",oauth:{ownerToken}} as ServerConfig;
+  registerSynrexConsole(app,config);
+  const server=app.listen(0,"127.0.0.1");
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  await new Promise<void>(resolve => server.once("listening",()=>resolve()));
+  const port=(server.address() as {port:number}).port;
+  const endpoint=`http://127.0.0.1:${port}/console/api/snapshot`;
+  assert.equal((await fetch(endpoint)).status,401);
+  const cookie=consoleAuthCookie(ownerToken, config.publicBaseUrl);
+  const response=await fetch(endpoint,{headers:{cookie}});
+  assert.equal(response.status,200);
+  const payload=await response.json() as {usage:{periods:{"24h":{requests:number;inputBytes:number}}};snapshotStale:boolean};
+  assert.equal(payload.snapshotStale,false);
+  assert.equal(payload.usage.periods["24h"].requests,1);
+  assert.equal(payload.usage.periods["24h"].inputBytes,250);
+  await writeFile(snapshotFile,JSON.stringify({...snapshot,sourceHealth:{available:false,unavailable:["devspace.sqlite:read_failed"]}}));
+  const degraded=await fetch(endpoint,{headers:{cookie}});
+  assert.equal(degraded.status,200);
+  assert.equal((await degraded.json() as {snapshotStale:boolean}).snapshotStale,true);
+  // A broken or missing collector artifact must never synchronously scan
+  // SQLite/logs inside the live MCP process.
+  await writeFile(snapshotFile,"{");
+  assert.equal((await fetch(endpoint,{headers:{cookie}})).status,503);
+  await rm(snapshotFile);
+  assert.equal((await fetch(endpoint,{headers:{cookie}})).status,503);
 });

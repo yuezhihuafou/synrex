@@ -54,7 +54,30 @@ try {
 assert.deepEqual(store.list({ workspaceId: "ws_1" }).map((agent) => agent.id), [created.id]);
 assert.deepEqual(store.list({ workspaceId: "ws_other" }), []);
 assert.deepEqual(store.list({ workspaceId: "ws_1", workspaceRoot: join(root, "other") }), []);
-assert.deepEqual(store.list({ workspaceRoot: join(root, "other") }), []);
+  assert.deepEqual(store.list({ workspaceRoot: join(root, "other") }), []);
+
+  const started = store.appendEvent(created.id, "turn_started");
+  store.appendEvent(created.id, "progress", { label: "step_update:DONE", inputTokens: 10 });
+  store.appendEvent(created.id, "session_saved");
+  const completed = store.appendEvent(created.id, "turn_completed", {
+    durationMs: 123, inputTokens: 10, outputTokens: 3, thinkingTokens: 2,
+    totalTokens: 13, outputBytes: 405,
+  });
+  assert.ok(completed.seq > started.seq);
+  assert.deepEqual(store.listEvents(created.id, started.seq).map((event) => event.kind), [
+    "progress", "session_saved", "turn_completed",
+  ]);
+  assert.deepEqual(store.listEvents(created.id, completed.seq), []);
+  const statistics = store.stats({ workspaceId: "ws_1", workspaceRoot: join(root, "project") });
+  assert.equal(statistics.turns, 1);
+  assert.equal(statistics.successfulTurns, 1);
+  assert.equal(statistics.durationMs, 123);
+  assert.equal(statistics.inputTokens, 10);
+  assert.equal(statistics.outputTokens, 3);
+  assert.equal(statistics.thinkingTokens, 2);
+  assert.equal(statistics.totalTokens, 13);
+  assert.equal(statistics.outputBytes, 405);
+  assert.equal(statistics.byProvider.codex?.turns, 1);
 
   const otherStore = new LocalAgentStore(root);
   stores.push(otherStore);

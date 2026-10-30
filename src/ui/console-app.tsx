@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { analyzeBrowserTransport } from "../browser-transport-analysis.js";
 import { LegacyDiagnostics } from "./console-legacy-diagnostics.js";
@@ -18,6 +18,14 @@ type BrowserEvent = {ts:number;kind:"network"|"ui"|"conversation_title"|"tab"|"h
   durationMs?:number;status?:number;errorCategory?:string;netError?:string;startedAt?:string;
   host?:string;conversationTitle?:string};
 type UsagePeriod = "24h" | "7d" | "30d";
+type DelegationMetrics = { window:"24h"; source:{scope:"local_workspace";diagnosticsCapped:boolean;agentRecordsCapped:boolean;
+  agentsAvailable:boolean;note:string};
+  totals:{observedMcpToolCalls:number;agentSessionsStarted:number;agentTurnsCompleted:number;
+    agentTurnsFailed:number;agentExecutionMs:number;agentTurnSuccessPercent:number|null;userTaskSuccessPercent:null};
+  workspaces:Array<{workspaceId:string;observedMcpToolCalls:number;agentSessionsStarted:number;
+    agentTurnsCompleted:number;agentTurnsFailed:number;agentExecutionMs:number}>;
+  agentTasks:Array<{agentId:string;workspaceId:string;provider:string;state:string;
+    createdAt:string;finishedTurns:number;failedTurns:number;executionMs:number}> };
 type UsageTotals = { requests:number; completed:number; toolExecutions:number; inputBytes:number; outputBytes:number;
   measuredInput:number;measuredOutput:number;
   payloadTokenEquivalentInput:number;payloadTokenEquivalentOutput:number;gitReviews:number;reviewedFileTouches:number;
@@ -27,6 +35,7 @@ type UsageTotals = { requests:number; completed:number; toolExecutions:number; i
   trends:Array<{day:string;requests:number;toolExecutions:number;addedLines:number;removedLines:number}> };
 type Snapshot = {
   generatedAt: string;
+  sourceHealth?:{available:boolean;unavailable:string[]};
   dataFreshness?: {sampledAt:string;nodes:string|null;workflows:string|null;tasks:string|null;
     diagnostics:string|null;runtime:string|null};
   snapshotStale?: boolean;
@@ -35,7 +44,10 @@ type Snapshot = {
     contract: { matching: number; missing: number; incompatible: number; total: number }; version: string | null }>;
   workflows: Array<{ id: string; title: string; goal: string; workspace: string; status: string; revision: number;
     phase: string; summary: string; nextSteps: string[]; blockers: string[]; taskIds: string[]; checks:string[]; acceptanceCriteria:string[]; updatedAt: string }>;
-  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  conversationSessions: Array<{id:string;title:string;lastAt:string;requestCount:number;runningTasks:number;state:string;
+    toolCalls?:number;inputTokens?:number|null;outputTokens?:number|null;measuredInputs?:number;measuredOutputs?:number;
+    requests:Array<{requestId:string;tool?:string;lastAt:string;taskId?:string;runId?:string;classification:string}>}>;
+  delegation?: DelegationMetrics;
   tasks: Array<{ id: string; nodeId: string; workspaceId: string; runId: string | null; createdAt: string; status: string; lastUpdatedAt?: string; lastActivityAt?: string; childPid?:number; exitCode?:number|null; statusSource:string }>;
   activeTaskUnits?: string[] | null;
   activeTaskProcesses?: Array<{unit:string;pid:number|null;memoryBytes:number|null;cpuTimeMs:number|null}> | null;
@@ -52,7 +64,28 @@ type Snapshot = {
     latency:{completed:number;medianMs:number|null;p95Ms:number|null;maximumMs:number|null};
     lifecycle:{httpCompleted:number;closedEarly:number;handlerFailed:number;toolCompletedWithoutHttp:number;unknown:number};
     transfer:{observedInputBytes:number;observedOutputBytes:number;approximateInputTokens:number|null;approximateOutputTokens:number|null};
-    capacity?:{inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null} };
+    capacity?:{inputP95:number|null;outputP95:number|null;largestOutput:number;largeResponses:number;bytesPerSecond:number|null};
+    recentTraffic?:{windowSeconds:60;inputBytesPerSecond:number|null;outputBytesPerSecond:number|null;
+      measuredResponses:number;lastObservedAt:string|null};
+    tokens?:{encoding:string;windowSeconds:number;inputTotal:number|null;outputTotal:number|null;
+      measuredInputs:number;measuredOutputs:number;outputTokensPerSecond:number|null;
+      toolCallsPerMinute:number|null;averageLatencyMs:number|null;lastObservedAt:string|null;
+      trend:Array<{minute:string;outputTokens:number;measuredOutputs:number}>;
+      history?:{startedAt:string;observedFrom?:string|null;updatedAt:string;coverageGaps:number;
+        totals:{inputTokens:number;outputTokens:number;calls:number;measuredInputs:number;measuredOutputs:number};
+        peakMinute:{at:string;tokens:number;tokensPerSecond:number}|null;
+        peakOutputCall:{at:string;tokens:number}|null;
+        runtime?:{averageTokensPerSecond:number|null;matchedOutputTokens:number;matchedDurationMs:number;
+          measuredCalls:number;observedFrom:string|null};
+        effective?:{windowSeconds:number;scope:"host_session_associated";outputTokens:number;
+          matchedCalls:number;unknownCalls:number;totalMatchedCalls:number;sessionCount:number;
+          perSessionActiveMs:number;globalActiveMs:number;maxConcurrency:number;
+          perSessionTokensPerSecond:number|null;globalActiveTokensPerSecond:number|null;
+          sessions?:Array<{conversationId:string;matchedCalls:number;outputTokens:number;activeMs:number;
+            observedSpanMs:number;activeTokensPerSecond:number|null;firstAt:string;lastAt:string}>;
+          attributionCoveragePercent:number|null;truncatedCalls?:number;
+          status:"observed"|"unavailable";note:string};
+        minute:Array<TokenHistoryPoint>;hour:Array<TokenHistoryPoint>;day:Array<TokenHistoryPoint>}|null} };
     requests: Array<{ requestId: string; tool?: string; lastAt: string; taskId?: string;
     conversationTitle?:string; conversationId?:string; runId?:string;
     classification: string; status?: number }>; events: Array<{ ts:string; event:string; requestId?:string;
@@ -88,10 +121,14 @@ const coreMenus: Array<{ id: View; title: string; symbol: string; caption: strin
   { id: "memory", title: "记忆与治理", symbol: "◇", caption: "学习证据" },
 ];
 const windowsMenu = { id: "windows" as const, title: "Windows 运维", symbol: "⊞", caption: "连接 / Tunnel / 服务 / 设置" };
+type TokenHistoryPoint={at:string;inputTokens:number;outputTokens:number;calls:number;
+  measuredInputs:number;measuredOutputs:number;runtimeMatchedTokens?:number;runtimeDurationMs?:number;
+  runtimeSamples?:number;runtimeAverageTokensPerSecond?:number|null};
 const statusText: Record<string,string> = {
   online:"在线", offline:"离线", suspect:"连接异常", draining:"停止调度", active:"进行中",
   blocked:"阻塞", completed:"已完成", cancelled:"已取消",
   rev_http_completed:"Synrex 已返回", connection_closed_early:"连接提前断开",
+  tool_completed_connection_closed:"工具已结束 / 连接提前断开",
   tool_finished_http_not_observed:"工具完成 / HTTP 未确认",
   rev_handler_error:"执行错误", rev_incomplete_or_log_window_truncated:"状态未确认",
 };
@@ -102,7 +139,7 @@ function time(value?: string) {
 }
 function Badge({ value }: { value:string }) {
   const tone = ["online","completed","rev_http_completed"].includes(value) ? "ok"
-    : ["offline","blocked","connection_closed_early","rev_handler_error"].includes(value) ? "bad" : "pending";
+    : ["offline","blocked","connection_closed_early","tool_completed_connection_closed","rev_handler_error"].includes(value) ? "bad" : "pending";
   return <span className={`badge badge-${tone}`}><i />{statusText[value] ?? value}</span>;
 }
 function Panel({ title, hint, extra, children }: { title:string; hint?:string; extra?:ReactNode; children:ReactNode }) {
@@ -114,6 +151,99 @@ function Metric({ label, value, info, symbol }: { label:string; value:string|num
 }
 function Blank({ children }: { children:ReactNode }) {
   return <div className="blank"><span>◌</span><p>{children}</p></div>;
+}
+function RexPerformance({d}:{d:Snapshot}) {
+  const t=d.diagnostics.observability?.tokens;
+  const history=t?.history;
+  const effective=history?.effective;
+  const [range,setRange]=useState<"24h"|"30d"|"365d">("24h");
+  const [curve,setCurve]=useState<"volume"|"active">("volume");
+  const total=history?history.totals.inputTokens+history.totals.outputTokens:t&&(t.inputTotal!==null||t.outputTotal!==null)
+    ?(t.inputTotal??0)+(t.outputTotal??0):null;
+  const trend=history?(range==="24h"?history.minute:range==="30d"?history.hour:history.day):[];
+  const hasTrend=trend.some(b=>curve==="volume"?b.measuredOutputs>0:(b.runtimeSamples??0)>0);
+  const plot=trend.filter(b=>curve==="volume"?b.measuredOutputs>0:(b.runtimeSamples??0)>0);
+  const maximum=Math.max(1,...plot.map(b=>curve==="volume"?b.outputTokens:(b.runtimeAverageTokensPerSecond??0)));
+  const first=trend.length?Date.parse(trend[0]!.at):0;
+  const last=trend.length?Date.parse(trend[trend.length-1]!.at):0;
+  const points=plot.map((b,i)=>`${last>first?600*(Date.parse(b.at)-first)/(last-first):300},${110-100*(curve==="volume"?b.outputTokens:(b.runtimeAverageTokensPerSecond??0))/maximum}`).join(" ");
+  const windowRuntimeTokens=trend.reduce((n,b)=>n+(b.runtimeMatchedTokens??0),0);
+  const windowRuntimeMs=trend.reduce((n,b)=>n+(b.runtimeDurationMs??0),0);
+  const windowRuntimeCalls=trend.reduce((n,b)=>n+(b.runtimeSamples??0),0);
+  const windowRuntimeRate=windowRuntimeMs>0?Math.round(windowRuntimeTokens*10000/windowRuntimeMs)/10:null;
+  return <Panel title="Rex Performance" hint="主机会话关联与 Subagent 独立统计 · 不是 GPT 模型的解码速度">
+    <div className="metrics performance-metrics">
+      <Metric label="可关联会话" symbol="⇄" value={effective?.sessionCount??"未测量"}
+        info={`最近 24h · ${effective?.matchedCalls??0} 次完整工具请求，按对话独立统计`}/>
+      <Metric label="最大观测并发" symbol="↑" value={effective?.matchedCalls?`${effective.maxConcurrency} 次`:"未测量"}
+        info="不同对话可以并发；不作为模型生成速度"/>
+      <Metric label="会话 ID 关联率" symbol="⊙" value={effective?.attributionCoveragePercent==null?"未测量":`${effective.attributionCoveragePercent}%`}
+        info={`只是已配对请求的会话 ID 覆盖，不是 Token 或主 GPT 身份覆盖；未知 ${effective?.unknownCalls??0}`}/>
+      <Metric label="端到端 / GPT 纯思考时间" symbol="◴" value="未测量"
+        info="主机尚无可靠回合边界；不得把工具间隔当成纯思考"/>
+      <Metric label={history?"持久累计 Token":"当前可观测 Token"} symbol="▤" value={total===null?"未测量":total.toLocaleString("zh-CN")}
+        info={history?`可观测自 ${time(history.observedFrom??history.startedAt)} · 输入 ${history.totals.measuredInputs} / 输出 ${history.totals.measuredOutputs} 次已计量`:"尚无历史账本；仅展示有限日志窗口"}/>
+      <Metric label="工具调用速率" symbol="⌘" value={t?.toolCallsPerMinute==null?"未知":`${t.toolCallsPerMinute} 次/min`}
+        info="最近 60 秒观察到的工具启动"/>
+      <Metric label="平均调用延迟" symbol="◷" value={t?.averageLatencyMs==null?"未测量":`${t.averageLatencyMs} ms`}
+        info="最近 60 秒有完整记录的调用"/>
+    </div>
+    <div className="performance-chart">
+      <p className="footnote">分对话工具交付 · 最近 24 小时（仅有会话 ID 的完整样本）</p>
+      {effective?.sessions?.length?<div className="table-scroll"><table>
+        <thead><tr><th>会话标识</th><th>调用</th><th>输出 Token</th><th>工具活跃时间</th><th>活跃交付率</th><th>最后活动</th></tr></thead>
+        <tbody>{effective.sessions.map(s=><tr key={s.conversationId}>
+          <td title={s.conversationId}>{s.conversationId.slice(0,13)}…</td>
+          <td>{s.matchedCalls}</td><td>{s.outputTokens.toLocaleString("zh-CN")}</td>
+          <td>{(s.activeMs/1000).toFixed(2)} s</td>
+          <td>{s.activeTokensPerSecond==null?"未测量":`${s.activeTokensPerSecond} Token/s`}</td>
+          <td>{time(s.lastAt)}</td>
+        </tr>)}</tbody>
+      </table></div>:<Blank>当前没有完整且有会话标识的工具请求。</Blank>}
+      <p className="footnote">每条会话各自合并并发请求区间；不跨会话求一个所谓“模型平均 Token/s”。这些速率只表示工具文本的活跃交付，不包含 GPT 思考或完整回合耗时。旧总量与系统并发仍在诊断账本中。</p>
+    </div>
+    <div className="performance-chart">
+      <div className="usage-actions"><p className="footnote">旧全来源历史账本（不按会话归属过滤）</p>
+        <div className="usage-range" role="group" aria-label="Token 历史范围">
+          {(["24h","30d","365d"] as const).map(v=><button key={v} type="button" className={range===v?"selected":""}
+            aria-pressed={range===v} onClick={()=>setRange(v)}>{v==="24h"?"24 小时":v==="30d"?"30 天":"365 天"}</button>)}
+        </div></div>
+      <div className="usage-range" role="group" aria-label="Token 趋势指标">
+        <button type="button" className={curve==="volume"?"selected":""} aria-pressed={curve==="volume"} onClick={()=>setCurve("volume")}>输出 Token</button>
+        <button type="button" className={curve==="active"?"selected":""} aria-pressed={curve==="active"} onClick={()=>setCurve("active")}>旧调用耗时速率</button>
+      </div>
+      {hasTrend?<svg role="img" aria-label={`${range} ${curve==="volume"?"输出 Token":"调用耗时加权吞吐"}历史趋势`}
+        viewBox="0 0 600 120" preserveAspectRatio="none" style={{width:"100%",height:125}}>
+        <line x1="0" y1="110" x2="600" y2="110" stroke="currentColor" opacity="0.2"/>
+        {plot.length===1?<circle cx="300" cy={110-100*(curve==="volume"?plot[0]!.outputTokens:(plot[0]!.runtimeAverageTokensPerSecond??0))/maximum} r="4" fill="currentColor"/>:
+          <polyline points={points} fill="none" stroke="currentColor" strokeWidth="2.5" vectorEffect="non-scaling-stroke"/>}
+      </svg>:<Blank>该时间范围暂无相关完整观测样本。</Blank>}
+      <p className="footnote">诊断指标：最近 60 秒全来源交付 {t?.outputTokensPerSecond==null?"未测量":`${t.outputTokensPerSecond} Token/s`}；历史全部来源的调用耗时加权交付率 {history?.runtime?.averageTokensPerSecond==null?"未测量":`${history.runtime.averageTokensPerSecond} Token/s`}；本时段 {windowRuntimeRate===null?"未测量":`${windowRuntimeRate} Token/s`}（{windowRuntimeCalls} 次）。旧口径不能反映真实并发容量或模型生成速度。</p>
+      <div className="metrics performance-peaks">
+        <Metric symbol="⌁" label="历史分钟交付峰值" value={history?.peakMinute?`${history.peakMinute.tokensPerSecond} Token/s`:"未测量"}
+          info={history?.peakMinute?`最高有记录分钟桶 · ${time(history.peakMinute.at)}`:"每分钟完成输出量 ÷ 60"}/>
+        <Metric symbol="↑" label="最大单次工具输出" value={history?.peakOutputCall?`${history.peakOutputCall.tokens.toLocaleString("zh-CN")} Token`:"未测量"}
+          info={history?.peakOutputCall?time(history.peakOutputCall.at):"仅计量文本结果"}/>
+      </div>
+      <p className="footnote">编码器 {t?.encoding??"尚未接入"}；会话关联吞吐仅基于新版本可配对的 MCP 调用（滚动 24h），Subagent 的独立 Provider 用量不混入这一分子。未知来源仍保留在旧总体账本。{history?.coverageGaps?`检测到 ${history.coverageGaps} 次日志缺口。`:"日志缺口 0 不代表覆盖率 100%。"}独立采集器增量记录，无模型调用。</p>
+    </div>
+  </Panel>;
+}
+function SessionTokenUsage({d}:{d:Snapshot}) {
+  return <Panel title="会话 Token 与调用量" hint="只按有明确 conversationId 的 MCP 请求归类；累计范围限于当前诊断窗口">
+    {d.conversationSessions.length?<div className="table-scroll"><table>
+      <thead><tr><th>会话</th><th>工具调用</th><th>输入 Token</th><th>输出 Token</th><th>计量覆盖</th><th>最近活动</th></tr></thead>
+      <tbody>{d.conversationSessions.slice(0,20).map(s=><tr key={s.id}>
+        <td title={s.id}>{s.title===s.id?s.id.slice(0,16)+"…":s.title}</td>
+        <td>{s.toolCalls??"未知"}</td>
+        <td>{s.inputTokens==null?"未测量":s.inputTokens.toLocaleString("zh-CN")}</td>
+        <td>{s.outputTokens==null?"未测量":s.outputTokens.toLocaleString("zh-CN")}</td>
+        <td>{s.measuredInputs??0} / {s.measuredOutputs??0} 次输入/输出</td>
+        <td>{time(s.lastAt)}</td>
+      </tr>)}</tbody>
+    </table></div>:<Blank>暂无可明确关联到会话的请求；不按时间猜测会话归属。</Blank>}
+    <p className="footnote">上述为 o200k_base 工具内容 Token；不包含 GPT 的隐藏上下文、推理 Token，也不保证覆盖已滚动清理的日志。</p>
+  </Panel>;
 }
 function UsagePage(){
   const [data,setData]=useState<Usage|null>(null);
@@ -224,6 +354,7 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
     ["Core 资源采样",d.dataFreshness?.runtime],
   ] as const;
   return <div className="stack">
+    <RexPerformance d={d}/>
     <div className="metrics">
       <Metric label="在线节点" value={`${online} / ${d.nodes.length}`} info="计算网络" symbol="⌘"/>
       <Metric label="标记 active 的工作流" value={active} info="持久检查点，不代表当前进程" symbol="☷"/>
@@ -242,6 +373,44 @@ function Overview({ d, go }: {d:Snapshot;go:(v:View)=>void}) {
     {d.execution&&Object.keys(d.execution.failureCategories).length>0&&<Panel title="可观察失败原因" hint="仅来自工具执行事件中的错误类别，不代表根因或用户目标失败">
       {Object.entries(d.execution.failureCategories).sort((a,b)=>b[1]-a[1]).map(([reason,count])=>
         <div key={reason} className="list-row"><strong className="grow">{reason}</strong><span>{count} 次</span></div>)}
+    </Panel>}
+    {d.delegation&&<Panel title="GPT / Subagent 委派效率" hint="近 24 小时 · 本机工作区 · 历史记录只读聚合">
+      <div className="metrics">
+        <Metric label="MCP 工具调用" value={d.delegation.totals.observedMcpToolCalls}
+          info="服务端观测调用，不等于 GPT 内部推理" symbol="⌘"/>
+        <Metric label="新建 Subagent" value={d.delegation.totals.agentSessionsStarted}
+          info="会话数；继续会话不会重复计数" symbol="◇"/>
+        <Metric label="Agent 执行时长" value={Math.round(d.delegation.totals.agentExecutionMs/1000)+" s"}
+          info="已记录终态 Agent 回合之和" symbol="◷"/>
+        <Metric label="Agent 回合成功率" value={d.delegation.totals.agentTurnSuccessPercent===null
+          ?"无样本":d.delegation.totals.agentTurnSuccessPercent+"%"}
+          info="非用户任务完成率" symbol="✓"/>
+      </div>
+      <p className="footnote">{d.delegation.source.note}</p>
+      {(d.delegation.source.diagnosticsCapped||d.delegation.source.agentRecordsCapped)&&
+        <p className="footnote">部分历史日志已达到读取上限，当前指标只表示已观测样本，不代表完整周期总量。</p>}
+      {!d.delegation.source.agentsAvailable&&<p className="footnote">本地 Agent 记录暂不可用，委派数据不能视为零使用量。</p>}
+      <div className="table-scroll"><table><thead><tr>
+        <th>工作区</th><th>MCP 工具调用</th><th>Subagent 新会话</th><th>Agent 回合成功 / 失败</th><th>Agent 时长</th>
+      </tr></thead><tbody>
+        {d.delegation.workspaces.map(w=><tr key={w.workspaceId}>
+          <td><code title={w.workspaceId}>{w.workspaceId}</code></td>
+          <td>{w.observedMcpToolCalls}</td><td>{w.agentSessionsStarted}</td>
+          <td>{w.agentTurnsCompleted} / {w.agentTurnsFailed}</td>
+          <td>{Math.round(w.agentExecutionMs/1000)} s</td>
+        </tr>)}
+      </tbody></table></div>
+      {d.delegation.agentTasks.length>0&&<>
+        <p className="footnote">最近 Agent 任务（Agent ID 是独立执行标识，并非 GPT 用户任务 ID）</p>
+        <div className="table-scroll"><table><thead><tr>
+          <th>Agent ID</th><th>Provider</th><th>状态</th><th>回合成功 / 失败</th><th>耗时</th>
+        </tr></thead><tbody>
+          {d.delegation.agentTasks.slice(0,10).map(a=><tr key={a.agentId}>
+            <td><code>{a.agentId}</code></td><td>{a.provider}</td><td>{a.state}</td>
+            <td>{a.finishedTurns-a.failedTurns} / {a.failedTurns}</td><td>{Math.round(a.executionMs/1000)} s</td>
+          </tr>)}
+        </tbody></table></div>
+      </>}
     </Panel>}
     <Panel title="数据源最近活动" hint="快照刷新不代表数据源有新事件；空闲不等于离线">
       <p className="footnote">快照读取：{time(d.dataFreshness?.sampledAt??d.generatedAt)}。下列时间分别来自原始数据源，不是页面刷新时间。</p>
@@ -554,12 +723,24 @@ function Resources({d}:{d:Snapshot}) {
     .sort((a,b)=>b.ts.localeCompare(a.ts)).slice(0,30);
   const network=[...latest.values()].filter(e=>e.name.startsWith("system.network"))
     .sort((a,b)=>a.name.localeCompare(b.name)).slice(0,18);
+  const traffic=d.diagnostics.observability?.recentTraffic;
+  const transferRate=(n:number|null|undefined)=>n==null?"未知":n>=1048576
+    ?(n/1048576).toFixed(2)+" MiB/s":n>=1024?(n/1024).toFixed(1)+" KiB/s":n+" B/s";
 const tunnelFailures=d.diagnostics.events.filter(e=>e.event==="tunnel_auth_failed"||e.event==="tunnel_disconnected");
   return <div className="stack">
     <div className="notice"><strong>采集范围：可控主机与进程</strong><p>
 Collector：{d.observability.collector==="bounded_tail"?"本地归档可读取（仅尾部窗口）":"尚无本地归档数据"}。
       gateway 元数据：{d.observability.peerSync.gateway==="current"?"最近同步":d.observability.peerSync.gateway==="stale"?"已过期":"尚无同步"}。
       网络计数器不能替代单次 MCP 请求 RTT；缺失数据显示“未知”。</p></div>
+    <Panel title="实际观测的 MCP 流量速率" hint="最近 60 秒 HTTP 请求/响应正文的字节数 ÷ 60 秒，不是模型 Token/s，也不是物理网卡带宽">
+      <div className="metrics">
+        <Metric symbol="↓" label="请求输入速率" value={transferRate(traffic?.inputBytesPerSecond)} info="本机已观测请求正文"/>
+        <Metric symbol="↑" label="响应输出速率" value={transferRate(traffic?.outputBytesPerSecond)} info="本机已观测响应正文"/>
+        <Metric symbol="⌁" label="有字节记录的响应" value={traffic?.measuredResponses??"未知"} info="最近 60 秒样本数"/>
+        <Metric symbol="◷" label="流量观测时间" value={time(traffic?.lastObservedAt??undefined)} info="源已停止上报时速率显示未知"/>
+      </div>
+      <p className="footnote">该速率为服务端实际记录到的 MCP HTTP 有效载荷平均吞吐，不包含 TCP/TLS 开销。不能推导 GPT 每秒生成 Token 或 GPU 生成速度。空闲期间的 0 B/s 仅表示观测窗口内无对应字节；来源过期时不填零。</p>
+    </Panel>
     <label>节点 <select className="filter" value={host} onChange={e=>setHost(e.target.value)}>
       <option value="swy1">swy1</option><option value="gateway">gateway（近一分钟元数据）</option>
     </select></label>
@@ -642,6 +823,7 @@ function Usage({d}:{d:Snapshot}) {
     link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
   }
   return <div className="stack">
+    <SessionTokenUsage d={d}/>
     <Panel title="用量区间" hint="只读 · 已留存的 MCP 诊断和 Git 审阅记录；时间窗可能不完整"
       extra={<div className="usage-actions"><div className="usage-range" role="group" aria-label="统计周期">
         {(["24h","7d","30d"] as const).map(p=><button key={p} type="button" className={period===p?"selected":""}
@@ -865,6 +1047,7 @@ function WindowsOperations() {
     </Panel>}
   </div>;
 }
+
 function App() {
   const [auth,setAuth]=useState<boolean|null>(null);
   const [data,setData]=useState<Snapshot|null>(null);
@@ -875,13 +1058,24 @@ function App() {
   const [clock,setClock]=useState(Date.now());
   const [clockOffsetMs,setClockOffsetMs]=useState<number|null>(null);
   const [clockUncertaintyMs,setClockUncertaintyMs]=useState<number|null>(null);
-  const refresh=useCallback(async()=>{
+  const inflight=useRef<AbortController|null>(null);
+  const refresh=useCallback(async(force=false)=>{
+    if(inflight.current){
+      if(!force)return; // Auto-refresh never creates concurrent pending requests.
+      inflight.current.abort(); // Manual retry supersedes a stalled request.
+    }
+    const controller=new AbortController();
+    inflight.current=controller;
+    const timeout=window.setTimeout(()=>controller.abort(),8000);
     setLoading(true);
-    try { const response=await getJson<Snapshot>("/console/api/snapshot");
-      setData(response);setAuth(true);setError(""); }
-    catch(e) { if(e instanceof Error&&e.message==="AUTH_REQUIRED")setAuth(false);
-      else setError("读取系统状态失败，请手动刷新。"); }
-    finally {setLoading(false);}
+    try { const response=await getJson<Snapshot>("/console/api/snapshot",{signal:controller.signal});
+      if(inflight.current===controller){setData(response);setAuth(true);setError("");} }
+    catch(e) { if(inflight.current===controller){
+      if(e instanceof Error&&e.message==="AUTH_REQUIRED")setAuth(false);
+      else {setAuth(true);setError(controller.signal.aborted
+        ?"快照请求超时（8 秒），仍显示上次成功的数据。":"快照服务暂不可用，仍显示上次成功的数据。");}
+    }}
+    finally {window.clearTimeout(timeout);if(inflight.current===controller){inflight.current=null;setLoading(false);}}
   },[]);
   useEffect(()=>{void refresh();},[refresh]);
   useEffect(()=>{
@@ -895,7 +1089,12 @@ function App() {
   useEffect(()=>{if(view==="windows"&&!windowsAvailable)setView("overview");},[view,windowsAvailable]);
   useEffect(()=>{if(!auth) return; const timer=window.setInterval(()=>{
     if(!document.hidden)void refresh();
-  },10000);return ()=>window.clearInterval(timer);},[auth,refresh]);
+  },10000);
+    const onVisible=()=>{if(!document.hidden)void refresh(true);};
+    document.addEventListener("visibilitychange",onVisible);
+    return ()=>{window.clearInterval(timer);document.removeEventListener("visibilitychange",onVisible);};
+  },[auth,refresh]);
+  useEffect(()=>()=>{inflight.current?.abort();inflight.current=null;},[]);
   useEffect(()=>{const timer=window.setInterval(()=>setClock(Date.now()),5000);
     return ()=>window.clearInterval(timer);},[]);
   useEffect(()=>{
@@ -925,7 +1124,7 @@ try{
   const menus=windowsAvailable?[...coreMenus,windowsMenu]:coreMenus;
   const meta=menus.find(x=>x.id===view)??coreMenus[0]!;
   const ageMs=clock-Date.parse(data?.generatedAt??"");
-  const stale=Boolean(data?.snapshotStale)||!Number.isFinite(ageMs)||ageMs>45000;
+  const stale=!data||Boolean(data.snapshotStale)||data.sourceHealth?.available===false||!Number.isFinite(ageMs)||ageMs>45000||Boolean(error);
   return <div className="shell"><aside className="sidebar"><div className="brand"><div className="brand-mark">S</div>
 <div><strong>SYNREX<span>.</span></strong><small>CONTROL PLANE</small></div></div>
     <p className="sidebar-label">WORKSPACE</p><nav aria-label="Synrex 管理导航">
@@ -935,13 +1134,16 @@ try{
     <div className="sidebar-bottom"><div className="owner"><span className="round-symbol">♙</span><div><strong>Owner Access</strong><small>{windowsAvailable?"观测 + Windows 运维":"只读观测"}</small></div></div>
       <button onClick={()=>void logout()}>退出登录 ↗</button></div>
   </aside><main className="main"><header className="topbar"><span>Synrex Console <b>/</b> <strong>{meta.title}</strong></span>
-    <div><span className="online-dot"/> {stale?"数据过期":"数据新鲜"} <button className="refresh" disabled={loading} onClick={()=>void refresh()}>{loading?"刷新中…":"↻ 刷新"}</button></div>
+    <div><span className={`online-dot ${stale?"offline-dot":""}`}/> {stale?"数据不可确认":"快照正常"} <button className="refresh" onClick={()=>void refresh(true)}>{loading?"↻ 重新请求":"↻ 刷新"}</button></div>
   </header><div className="content"><div className="heading"><p className="eyebrow">SYNREX OPERATIONS / {view.toUpperCase()}</p>
     <h1>{view==="overview"?"开发环境，一目了然。":meta.title}</h1>
     <div className="heading-line"><p>{view==="overview"?"主机、执行、工作流与诊断，一站式掌控。":meta.caption+" · 显示已有的真实数据"}</p>
       <span>更新于 {time(data?.generatedAt)} · {Number.isFinite(ageMs)?Math.max(0,Math.round(ageMs/1000))+" 秒前":"时间未知"}</span></div></div>
-    {stale&&<div className="error-banner" role="alert">Console 快照已过期。当前为历史数据，不代表实时进程状态；请检查独立快照服务。</div>}
-    {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh()}>重试</button></div>}
+    {stale&&<div className="error-banner" role="alert">Console 数据不可确认：当前为历史数据或采集失败，不代表实时进程状态。请检查独立快照服务。</div>}
+    {data?.sourceHealth?.available===false&&<div className="error-banner" role="alert">
+      以下数据源未能读取，受影响的空列表和 0 不代表实际为零：{data.sourceHealth.unavailable.join("、")}。
+    </div>}
+    {error&&<div className="error-banner" role="alert">{error} <button onClick={()=>void refresh(true)}>重试</button></div>}
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
       {view==="usage"&&<Usage d={data}/>}
       {view==="workflows"&&<Workflows d={data}/>}

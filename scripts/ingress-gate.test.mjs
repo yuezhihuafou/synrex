@@ -57,7 +57,9 @@ test('ingress preserves OAuth paths, host, POST body and response without rewrit
   const result = await http(port, '/mcp?probe=1', 'action=read');
   assert.equal(result.status, 201);
   assert.equal(result.body, 'POST /mcp?probe=1 synrex.example.test action=read');
-  assert.deepEqual(await control(socket, 'STATUS'), { paused: false, active: 0, pending: 0, upstreamPort: original.port });
+  assert.deepEqual(await control(socket, 'STATUS'), {
+    paused: false, active: 0, pending: 0, upstreamPort: original.port, activeRequests: [],
+  });
   assert.equal((await sendIngressCommand(socket, 'STATUS')).active, 0);
 });
 
@@ -116,7 +118,7 @@ test('connected request is never automatically replayed after backend failure', 
   assert.equal(hits, 1);
 });
 
-test('SSE-style active response drains while newer calls remain paused', async (t) => {
+test('long-lived GET SSE is gracefully closed while new requests remain queued', async (t) => {
   const tmp = await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
   const original = await backend((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -135,8 +137,123 @@ test('SSE-style active response drains while newer calls remain paused', async (
   await sleep(35);
   assert.equal((await control(socket, 'STATUS')).pending, 1);
   const streamed = await current;
-  assert.match(streamed.body, /data: first[\s\S]*data: finished/);
+  assert.match(streamed.body, /data: first[\s\S]*reconnect to continue/);
+  assert.doesNotMatch(streamed.body, /data: finished/);
   assert.equal((await control(socket, 'STATUS')).active, 0);
   await control(socket, 'RESUME');
   assert.equal((await next).status, 200);
+});
+
+test('streaming POST is never terminated by PAUSE because its side effects may be unknown', async (t) => {
+  const tmp=await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
+  let invoked=0;
+  const original=await backend((_req, res)=>{
+    invoked++;
+    res.writeHead(200,{'content-type':'text/event-stream'});
+    res.write('data: in-progress\n\n');
+    setTimeout(()=>res.end('data: completed\n\n'), 180);
+  });
+  const socket=join(tmp,'control.sock');
+  const ingress=createIngressGate({upstreamPort:original.port,controlSocket:socket});
+  t.after(async()=>{await ingress.close();await original.close();await rm(tmp,{recursive:true,force:true});});
+  const port=await ingress.start();
+  const ongoing=http(port,'/mcp','task-start');
+  await sleep(40);
+  assert.equal((await control(socket,'STATUS')).active,1);
+  await control(socket,'PAUSE');
+  assert.equal((await control(socket,'STATUS')).active,1);
+  const response=await ongoing;
+  assert.match(response.body, /data: in-progress[\s\S]*data: completed/);
+  assert.equal(invoked,1);
+  assert.equal((await control(socket,'STATUS')).active,0);
+  await control(socket,'RESUME');
+});
+
+test('premature upstream SSE abort clears tracked request instead of permanently blocking releases', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
+  const upstream = await backend((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('event: progress\ndata: started\n\n');
+    setTimeout(() => res.destroy(), 60);
+  });
+  const socket = join(tmp, 'control.sock');
+  const ingress = createIngressGate({ upstreamPort: upstream.port, controlSocket: socket });
+  t.after(async () => { await ingress.close(); await upstream.close(); await rm(tmp, { recursive: true, force: true }); });
+  const port = await ingress.start();
+  const result = new Promise((done, reject) => {
+    const req = request({ host: '127.0.0.1', port, path: '/mcp?private=query-value' }, (res) => {
+      res.once('aborted', () => done('aborted'));
+      res.once('error', () => done('response-error'));
+      res.once('end', () => done('complete'));
+      res.resume();
+    });
+    req.once('error', reject);
+    req.end();
+  });
+  await sleep(25);
+  const during = await control(socket, 'STATUS');
+  assert.equal(during.active, 1);
+  assert.equal(during.activeRequests[0].route, 'mcp');
+  assert.equal(during.activeRequests[0].response, 'sse');
+  assert.equal(JSON.stringify(during).includes('private=query-value'), false);
+  assert.notEqual(await result, 'complete', 'a truncated response must never look complete');
+  await sleep(35);
+  assert.equal((await control(socket, 'STATUS')).active, 0);
+  assert.equal((await control(socket, 'STATUS')).activeRequests.length, 0);
+});
+
+test('exceptional ingress shutdown is bounded even if a stream never ends', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
+  const upstream = await backend((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.write('data: long-lived\n\n');
+  });
+  const socket = join(tmp, 'control.sock');
+  const ingress = createIngressGate({ upstreamPort: upstream.port, controlSocket: socket });
+  t.after(async () => { await upstream.close(); await rm(tmp, { recursive: true, force: true }); });
+  const port = await ingress.start();
+  const result = new Promise((done) => {
+    const req = request({ host: '127.0.0.1', port, path: '/mcp' }, (res) => {
+      res.once('aborted', () => done('aborted'));
+      res.once('error', () => done('response-error'));
+      res.resume();
+    });
+    req.once('error', () => done('request-error'));
+    req.end();
+  });
+  await sleep(45);
+  assert.equal((await control(socket, 'STATUS')).active, 1);
+  const before = Date.now();
+  await ingress.close();
+  assert.ok(Date.now() - before < 4500, 'shutdown may not hang on an endless SSE stream');
+  assert.notEqual(await result, 'complete');
+});
+
+test('peer POST long polls finish naturally after PAUSE, and replacement poll remains queued', async (t) => {
+  const tmp = await mkdtemp(join(tmpdir(), 'synrex-ingress-'));
+  let calls = 0;
+  const upstream = await backend((_req, res) => {
+    calls++;
+    setTimeout(() => { res.writeHead(200, { 'content-type': 'application/json' }); res.end('{"request":null}'); }, 220);
+  });
+  const socket = join(tmp, 'control.sock');
+  const ingress = createIngressGate({ upstreamPort: upstream.port, controlSocket: socket });
+  t.after(async () => { await ingress.close(); await upstream.close(); await rm(tmp, { recursive: true, force: true }); });
+  const port = await ingress.start();
+  const first = http(port, '/_devspace/node/v1/poll', '{}');
+  await sleep(35);
+  const before = await control(socket, 'STATUS');
+  assert.equal(before.active, 1);
+  assert.equal(before.activeRequests[0].method, 'POST');
+  assert.equal(before.activeRequests[0].route, 'other');
+  await control(socket, 'PAUSE');
+  const queued = http(port, '/_devspace/node/v1/poll', '{}');
+  await sleep(50);
+  assert.equal((await control(socket, 'STATUS')).pending, 1);
+  assert.equal((await first).status, 200, 'current peer poll must be allowed to finish');
+  assert.equal((await control(socket, 'STATUS')).active, 0);
+  assert.equal(calls, 1, 'replacement poll cannot reach Core during release');
+  await control(socket, 'RESUME');
+  assert.equal((await queued).status, 200);
+  assert.equal(calls, 2);
 });

@@ -172,6 +172,15 @@ scanned or pruned on the server startup path. `synrex worktrees prune` keeps
 their separate recovery-aware lifecycle, so a large or dirty managed worktree
 cannot delay MCP/Console readiness during a service restart.
 
+For conservative cleanup across concurrent ChatGPT sessions, first run
+`synrex worktrees prune --dry-run` and inspect preserved/recovery statuses.
+`synrex worktrees prune --safe` only considers stale, clean worktrees whose
+HEAD is reachable from local `origin/main`; it protects unmerged commits,
+untracked files, unexpected ignored state and directly active Linux process
+working directories. A process that has moved its working directory elsewhere
+is not automatically discoverable, so review running tasks before pruning.
+The original `prune` command remains recovery-aware for deliberate cleanup.
+
 ## MCP Workspace Path Rejected
 
 The path passed to `open_workspace` must be inside one of the allowed roots

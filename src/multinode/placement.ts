@@ -3,7 +3,7 @@ import type { ControlPlaneStore } from "./store.js";
 
 export interface WorkspacePlacement {
   node: ExecutionNode;
-  reason: "explicit" | "required-rule" | "preferred-rule" | "unique-root" | "single-node";
+  reason: "explicit" | "project-binding" | "required-rule" | "preferred-rule" | "unique-root" | "single-node";
 }
 
 export interface WorkspacePlacementRule {
@@ -18,11 +18,38 @@ export function selectWorkspaceNode(
   store: ControlPlaneStore,
   input: {
     selector?: string;
+    project?: string;
     path: string;
     localNodeId: string;
     rules?: readonly WorkspacePlacementRule[];
+    projectBindings?: readonly { project: string; node: string; pathPrefix: string }[];
   },
 ): WorkspacePlacement {
+  const bindings = input.projectBindings ?? [];
+  const matching = bindings.filter((item) => pathPrefixMatches(input.path, item.pathPrefix))
+    .sort((a, b) => b.pathPrefix.length - a.pathPrefix.length);
+  const binding = input.project
+    ? bindings.find((item) => item.project === input.project)
+    : matching[0];
+  if (input.project && !binding) throw new Error(`Unknown Synrex project binding: ${input.project}.`);
+  if (binding && !pathPrefixMatches(input.path, binding.pathPrefix)) {
+    throw new Error(`Workspace path ${JSON.stringify(input.path)} is outside project ${binding.project} prefix ${binding.pathPrefix}.`);
+  }
+  if (!input.project && matching.length > 1 && matching[0]!.pathPrefix.length === matching[1]!.pathPrefix.length
+    && matching[0]!.node !== matching[1]!.node) {
+    throw new Error(`Ambiguous project bindings for path ${JSON.stringify(input.path)}; specify project.`);
+  }
+  const pinned = binding ? store.findNode(binding.node) : undefined;
+  if (binding && !pinned) throw new Error(`Project ${binding.project} references unknown node ${binding.node}.`);
+  if (pinned && input.selector && store.findNode(input.selector)?.id !== pinned.id) {
+    throw new Error(`Project ${binding!.project} is bound to ${binding!.node}; node override denied.`);
+  }
+  if (pinned) {
+    assertAcceptsNewWorkspace(pinned);
+    assertPathAllowedOnNode(input.path, pinned);
+    assertRequiredRules(pinned, matchingRules(input.path, input.rules ?? []), store);
+    return { node: pinned, reason: "project-binding" };
+  }
   const rules = matchingRules(input.path, input.rules ?? []);
   if (input.selector) {
     const selected = store.findNode(input.selector);

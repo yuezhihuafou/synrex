@@ -36,3 +36,21 @@ test("batch size bounds retain original file text", async () => {
   const result = await readBatch([{ path: "file.ts" }], async () => ({ structuredContent: { result: text } }));
   assert.equal(result.structuredContent.files[0]?.result, text);
 });
+
+test("batch read keeps image blocks without embedding encoded bytes in structured text", async () => {
+  const image = { type: "image" as const, mimeType: "image/png", data: "iVBORw0KGgo=" };
+  const result = await readBatch([{ path: "photo.png" }, { path: "a.txt" }], async file => ({
+    content: file.path === "photo.png" ? [{ type: "text", text: "Read image" }, image]
+      : [{ type: "text", text: "regular text" }],
+    structuredContent: file.path === "photo.png" ? {
+      result: "Read image", observation: { observationId: "obs_1", source: { kind: "file.image" } },
+    } : undefined,
+  }));
+  assert.equal(result.content.filter(item => item.type === "image").length, 1);
+  assert.equal(result.content.some(item => item.type === "image" && item.data === image.data), true);
+  assert.ok(JSON.stringify(result.structuredContent).includes("photo.png"));
+  assert.ok(!JSON.stringify(result.structuredContent).includes(image.data));
+  assert.deepEqual(result.structuredContent.observations, [
+    { path: "photo.png", observation: { observationId: "obs_1", source: { kind: "file.image" } } },
+  ]);
+});

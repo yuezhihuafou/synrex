@@ -203,6 +203,27 @@ assert.deepEqual(overwriteResult.files, [
 ]);
 assert.equal(await readFile(join(overwriteRoot, "duplicate.txt"), "utf8"), "new content\n");
 
+const concurrentRoot = await mkdtemp(join(tmpdir(), "devspace-apply-patch-conflict-"));
+await writeFile(join(concurrentRoot, "first.txt"), "before\n");
+await writeFile(join(concurrentRoot, "second.txt"), "before\n");
+await assert.rejects(
+  applyPatch(concurrentRoot, `*** Begin Patch
+*** Update File: first.txt
+@@
+-before
++after
+*** Update File: second.txt
+@@
+-before
++after
+*** End Patch`, { beforeCommit: async () => {
+    await writeFile(join(concurrentRoot, "second.txt"), "external writer\n");
+  } }),
+  /workspace changed concurrently: second.txt/,
+);
+assert.equal(await readFile(join(concurrentRoot, "first.txt"), "utf8"), "before\n");
+assert.equal(await readFile(join(concurrentRoot, "second.txt"), "utf8"), "external writer\n");
+
 await writeFile(join(overwriteRoot, "source.txt"), "from\n");
 await writeFile(join(overwriteRoot, "destination.txt"), "existing\n");
 await applyPatch(

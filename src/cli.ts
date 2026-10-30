@@ -26,6 +26,8 @@ import {
   parseLocalAgentRunArgs,
 } from "./local-agent-targets.js";
 import { createLocalAgentClient } from "./local-agent-client.js";
+import { LocalAgentContextPacks } from "./local-agent-context-pack.js";
+import { createOptionalProjectMemoryPort } from "./memhub-memory-adapter.js";
 import { routeAutoAgent } from "./local-agent-router.js";
 import { toAgentErrorPayload, type LocalAgentError } from "./local-agent-errors.js";
 import {
@@ -297,7 +299,7 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     }
 
     const currentSubagents = files.config.subagents;
-    const availability = getLocalAgentProviderAvailabilitySnapshot();
+    const availability = getLocalAgentProviderAvailabilitySnapshot(process.env, currentSubagents);
     const configuredProviders = currentSubagents.providers
       .filter((provider) => provider.enabled)
       .map((provider) => provider.id);
@@ -395,9 +397,16 @@ async function serve(): Promise<void> {
   }
 
   const config = loadConfig();
+  const privateListenOverride = process.env.SYNREX_CORE_LISTEN_PORT;
   const listenPort = resolveCoreListenPort(
-    config.port, config.host, config.publicBaseUrl, process.env.SYNREX_CORE_LISTEN_PORT,
+    config.port, config.host, config.publicBaseUrl, privateListenOverride,
   );
+  // Only the server listener may consume the temporary release-time override.
+  // Child tools and durable tasks must not inherit it and silently relocate
+  // unrelated Synrex/test listeners. Managed-worktree pruning deliberately
+  // stays off the startup critical path; Windows proved it can add tens of
+  // seconds to readiness and it remains an explicit recovery operation.
+  delete process.env.SYNREX_CORE_LISTEN_PORT;
   await runStartupMetadataCleanup(config);
   const { createServer } = await import("./server.js");
   const { app, close, localAgentProviders, localNode } = createServer(config);
@@ -506,7 +515,7 @@ async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
     }
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
-      getLocalAgentProviderAvailabilitySnapshot(),
+      getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
     );
     console.log(`Subagents: ${config.subagents.enabled ? "enabled" : "disabled"}`);
     console.log(`Subagent providers: ${formatLocalAgentProviderStatusSummary(providers)}`);
@@ -573,11 +582,15 @@ function runConfigCommand(args: string[]): void {
 
 async function runWorktreesCommand(args: string[]): Promise<void> {
   const [subcommand, ...extra] = args;
-  if (subcommand !== "prune" || extra.length > 0) {
-    throw new Error("Usage: synrex worktrees prune");
+  if (subcommand !== "prune" || extra.some((arg) => !["--safe", "--dry-run"].includes(arg))
+    || new Set(extra).size !== extra.length) {
+    throw new Error("Usage: synrex worktrees prune [--safe] [--dry-run]");
   }
-
-  const cleanup = await pruneStaleManagedWorktrees(loadConfig());
+  const dryRun = extra.includes("--dry-run");
+  const cleanup = await pruneStaleManagedWorktrees(loadConfig(), new Date(), {
+    safeOnly: extra.includes("--safe") || dryRun,
+    dryRun,
+  });
   if (cleanup.isErr()) {
     console.warn(`Failed to prune managed worktrees: ${cleanup.error.message}`);
     process.exitCode = 1;
@@ -586,13 +599,19 @@ async function runWorktreesCommand(args: string[]): Promise<void> {
 
   const result = cleanup.value;
   const preserved = result.removed.filter((entry) => entry.recoveryRef).length;
-  console.log(`Pruned ${result.removed.length} stale managed worktree${result.removed.length === 1 ? "" : "s"}.`);
+  if (dryRun) {
+    console.log(`Would prune ${result.wouldRemove.length} safe, stale managed worktree${result.wouldRemove.length === 1 ? "" : "s"}.`);
+    for (const id of result.wouldRemove) console.log(`Eligible: ${id}`);
+  } else {
+    console.log(`Pruned ${result.removed.length} stale managed worktree${result.removed.length === 1 ? "" : "s"}.`);
+  }
   if (preserved > 0) console.log(`Preserved ${preserved} recovery ref${preserved === 1 ? "" : "s"}.`);
   if (result.missing.length > 0) {
     console.log(`Cleared ${result.missing.length} missing worktree session${result.missing.length === 1 ? "" : "s"}.`);
   }
   if (result.skipped.length > 0) {
-    console.log(`Skipped ${result.skipped.length} worktree${result.skipped.length === 1 ? "" : "s"} with untracked files.`);
+    console.log(`Skipped ${result.skipped.length} worktree${result.skipped.length === 1 ? "" : "s"} to protect local state.`);
+    for (const entry of result.skipped) console.log(`Preserved ${entry.workspaceId}: ${entry.reason}`);
   }
   for (const failure of result.failed) {
     console.warn(`Failed to prune ${failure.workspaceId}: ${failure.error.message}`);
@@ -616,7 +635,7 @@ function printHelp(): void {
       "  synrex oauth status    Show current OAuth enrollment policy",
       "  synrex config get      Print persisted config",
       "  synrex config set publicBaseUrl <url|null>",
-      "  synrex worktrees prune Prune managed worktrees unused for 3 days",
+      "  synrex worktrees prune [--safe] [--dry-run]  Review or clean managed worktrees unused for 3 days",
       "  synrex show-changes <review-ref> [--json]",
       "  synrex workflow list [--workspace <path>]  List resumable GPT coding workflows",
       "  synrex workflow show <workflow-id> [--workspace <path>]",
@@ -949,13 +968,22 @@ async function runShowChanges(args: string[]): Promise<void> {
   }
 
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const review = await readReviewRef(scope.workspaceRoot, reviewRef);
   if (json) {
     printJson(review);
     return;
   }
   console.log(review.patch || review.result);
+}
+
+function localAgentWorkspaceContext(config: ServerConfig) {
+  return resolveCliWorkspaceContext(
+    config.allowedRoots,
+    process.env,
+    process.cwd(),
+    { stateDir: config.stateDir, worktreeRoot: config.worktreeRoot },
+  );
 }
 
 async function runAgentsCommand(args: string[]): Promise<void> {
@@ -975,6 +1003,18 @@ async function runAgentsCommand(args: string[]): Promise<void> {
     case "show":
       await runAgentsShow(commandArgs, json);
       return;
+    case "events":
+      await runAgentsEvents(commandArgs, json);
+      return;
+    case "stats":
+      await runAgentsStats(commandArgs, json);
+      return;
+    case "watch":
+      await runAgentsWatch(commandArgs, json);
+      return;
+    case "context":
+      await runAgentsContext(commandArgs, json);
+      return;
     case "targets":
       await runAgentsTargets(commandArgs, json);
       return;
@@ -992,14 +1032,40 @@ async function runAgentsCommand(args: string[]): Promise<void> {
   }
 }
 
+async function runAgentsContext(args: string[], json: boolean): Promise<void> {
+  const [action, ...rest] = args;
+  const config = loadConfig();
+  const workspace = localAgentWorkspaceContext(config);
+  const store = new LocalAgentContextPacks(config.stateDir, createOptionalProjectMemoryPort());
+  if (action === "show" && rest.length === 1) {
+    const pack = store.read(rest[0]!, workspace.workspaceRoot);
+    if (json) printJson(pack);
+    else console.log(pack.rendered);
+    return;
+  }
+  if (action === "build") {
+    const parsed = parseLocalAgentRunArgs(["context", ...rest]);
+    const result = await store.build({
+      workspaceRoot: workspace.workspaceRoot,
+      query: parsed.prompt,
+      request: parsed.context ?? {},
+    });
+    if (json) printJson({ metrics: result.metrics, pack: result.pack });
+    else console.log(result.pack.ref + " files=" + result.metrics.sourceCount +
+      " bytes=" + result.metrics.bytes + " reused=" + result.metrics.packReused);
+    return;
+  }
+  throw new Error("Usage: agents context <build [--workflow wf_...] [--context-file path] task | show ctx_ref> [--json]");
+}
+
 async function runAgentsTargets(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents targets [--json]");
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
   const providers = buildLocalAgentProviderStatuses(
     config.subagents,
-    getLocalAgentProviderAvailabilitySnapshot(),
+    getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
   );
   const catalog = buildLocalAgentCatalog(config.subagents, profiles, providers);
   const output = presentAgentTargetCatalog(catalog);
@@ -1011,7 +1077,7 @@ async function runAgentsList(args: string[], json: boolean): Promise<void> {
   if (args.length > 0) throw new Error("Usage: devspace agents ls [--json]");
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const result = await client.list(resolveCliWorkspaceContext(config.allowedRoots));
+  const result = await client.list(localAgentWorkspaceContext(config));
   const agents = presentAgentResult(result, json);
   if (!agents) return;
 
@@ -1034,13 +1100,13 @@ async function runAgentsList(args: string[], json: boolean): Promise<void> {
 async function runAgentsRun(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentRunArgs(args);
   const config = loadConfig();
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   let target = parsed.target;
   if (target === "auto") {
     const profiles = await loadLocalAgentProfiles(config, scope.workspaceRoot);
     const providers = buildLocalAgentProviderStatuses(
       config.subagents,
-      getLocalAgentProviderAvailabilitySnapshot(),
+      getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
     );
     target = routeAutoAgent(
       parsed.prompt,
@@ -1055,6 +1121,7 @@ async function runAgentsRun(args: string[], json: boolean): Promise<void> {
     workspaceId: scope.workspaceId,
     model: parsed.model,
     effort: parsed.effort,
+    context: parsed.context,
   });
   const record = presentAgentResult(result, json);
   if (!record) return;
@@ -1070,10 +1137,11 @@ async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
   const parsed = parseLocalAgentContinueArgs(args);
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const result = await client.continue(parsed.agentId, parsed.prompt, {
     model: parsed.model,
     effort: parsed.effort,
+    context: parsed.context,
   }, scope);
   const record = presentAgentResult(result, json);
   if (!record) return;
@@ -1087,11 +1155,15 @@ async function runAgentsContinue(args: string[], json: boolean): Promise<void> {
 
 async function runAgentsShow(args: string[], json: boolean): Promise<void> {
   const [id, ...extra] = args;
-  if (!id || extra.length > 0) throw new Error("Usage: devspace agents show <id> [--json]");
+  const includeEvidence = extra.includes("--evidence");
+  const evidenceRef = extra.find((item) => item.startsWith("--evidence-ref="))?.slice("--evidence-ref=".length);
+  if (!id || extra.some((item) => item !== "--evidence" && !item.startsWith("--evidence-ref="))) {
+    throw new Error("Usage: devspace agents show <id> [--json] [--evidence] [--evidence-ref=ev_...]");
+  }
 
   const config = loadConfig();
   const client = createLocalAgentClient(config);
-  const scope = resolveCliWorkspaceContext(config.allowedRoots);
+  const scope = localAgentWorkspaceContext(config);
   const initial = await client.get(id, scope);
   let record = presentAgentResult(initial, json);
   if (!record) return;
@@ -1103,10 +1175,86 @@ async function runAgentsShow(args: string[], json: boolean): Promise<void> {
     if (!refreshed) return;
     record = refreshed;
   }
+  if (includeEvidence || evidenceRef) {
+    const withEvidence = presentAgentResult(await client.get(id, scope, {
+      includeEvidence: true, ...(evidenceRef ? { evidenceRef } : {}),
+    }), true);
+    if (!withEvidence) return;
+    record = withEvidence;
+  }
 
   const observation = presentAgentObservation(record);
-  if (json) printJson(observation);
+  if (json || includeEvidence || evidenceRef) printJson(observation);
   else console.log(formatAgentObservation(observation));
+}
+
+async function runAgentsEvents(args: string[], json: boolean): Promise<void> {
+  const [id, afterRaw, ...extra] = args;
+  if (!id || extra.length > 0 || (afterRaw !== undefined && !/^\d+$/.test(afterRaw))) {
+    throw new Error("Usage: devspace agents events <id> [after-seq] [--json]");
+  }
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const events = presentAgentResult(await client.events(
+    id, localAgentWorkspaceContext(config), Number(afterRaw ?? 0), 200,
+  ), json);
+  if (!events) return;
+  if (json) printJson(events);
+  else for (const event of events) console.log(formatAgentEvent(event));
+}
+
+async function runAgentsStats(args: string[], json: boolean): Promise<void> {
+  if (args.length > 0) throw new Error("Usage: devspace agents stats [--json]");
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const stats = presentAgentResult(await client.stats(localAgentWorkspaceContext(config)), json);
+  if (!stats) return;
+  if (json) printJson(stats);
+  else console.log(
+    `Sessions: ${stats.sessions} (${stats.running} running, ${stats.completed} idle, ${stats.failed} failed)` +
+    `\nTurns: ${stats.turns} (${stats.successfulTurns} completed, ${stats.failedTurns} failed)` +
+    `\nRuntime: ${stats.durationMs}ms; input/output tokens: ${stats.inputTokens ?? "unreported"}/${stats.outputTokens ?? "unreported"}`,
+  );
+}
+
+function formatAgentEvent(event: { seq: number; at: string; kind: string; label?: string; durationMs?: number }): string {
+  return `${event.seq} ${event.at} ${event.kind}${event.label ? " " + event.label : ""}${event.durationMs === undefined ? "" : ` (${event.durationMs}ms)`}`;
+}
+
+/** Read-only near-real-time CLI tail. All events are persisted before publication. */
+async function runAgentsWatch(args: string[], json: boolean): Promise<void> {
+  const [id, ...extra] = args;
+  if (!id || extra.length > 0) throw new Error("Usage: devspace agents watch <id> [--json]");
+  const config = loadConfig();
+  const client = createLocalAgentClient(config);
+  const scope = localAgentWorkspaceContext(config);
+  let afterSeq = 0;
+  const deadline = Date.now() + 30 * 60_000;
+  while (true) {
+    const events = presentAgentResult(await client.events(id, scope, afterSeq, 200), json);
+    if (!events) return;
+    for (const event of events) {
+      afterSeq = event.seq;
+      if (json) printJson(event);
+      else console.log(formatAgentEvent(event));
+    }
+    const agent = presentAgentResult(await client.get(id, scope), json);
+    if (!agent) return;
+    if (agent.status !== "running" && agent.status !== "starting" && events.length < 200) {
+      // A terminal record may become visible a moment before its terminal event.
+      await sleep(150);
+      const finalEvents = presentAgentResult(await client.events(id, scope, afterSeq, 200), json);
+      if (!finalEvents) return;
+      for (const event of finalEvents) {
+        afterSeq = event.seq;
+        if (json) printJson(event);
+        else console.log(formatAgentEvent(event));
+      }
+      return;
+    }
+    if (Date.now() > deadline) throw new Error("Agent watch window expired; execution was not cancelled.");
+    await sleep(500);
+  }
 }
 
 async function runAgentsDaemon(args: string[], json: boolean): Promise<void> {
@@ -1188,8 +1336,15 @@ function printAgentsHelp(): void {
       "Usage:",
       "  devspace agents ls [--json]",
       "  devspace agents run <profile-or-provider|auto> [--model <model>] [--effort <level>] [--json] <prompt>",
+      "    Add [--workflow wf_id] [--context-file relpath] [--memory-project slug] for an explicit G4 Context Pack.",
+      "    Reuse a pack with [--context-ref ctx_hash]; omitted context options preserve the legacy path.",
       "  devspace agents continue <id> [--model <model>] [--effort <level>] [--json] <prompt>",
-      "  devspace agents show <id> [--json]",
+      "  devspace agents show <id> [--json] [--evidence] [--evidence-ref=ev_hash]",
+      "  devspace agents events <id> [after-seq] [--json]",
+      "  devspace agents watch <id> [--json]",
+      "  devspace agents stats [--json]",
+      "  devspace agents context build [--workflow wf_id] [--context-file path] <query> [--json]",
+      "  devspace agents context show <ctx_hash> [--json]",
       "  devspace agents targets [--json]",
       "  devspace agents daemon <status|stop|logs> [--json]",
     ].join("\n"),

@@ -22,6 +22,8 @@ import {
 import {
   decodeAgentRecord,
   decodeAgentRecordList,
+  decodeAgentEvents,
+  decodeAgentStats,
   decodeDaemonLogs,
   decodeDaemonStatus,
   decodeLocalAgentDaemonResponse,
@@ -48,7 +50,7 @@ import type {
   RunOverrides,
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
-import type { LocalAgentRecord, LocalAgentWorkspaceScope } from "./local-agent-store.js";
+import type { LocalAgentRecord, LocalAgentWorkspaceScope, LocalAgentEvent, LocalAgentStats } from "./local-agent-store.js";
 import { devspaceConfigDir } from "./user-config.js";
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 8_000;
@@ -59,6 +61,8 @@ type RequestError<M extends LocalAgentDaemonRequest["method"]> =
   M extends "agent.start" ? AgentStartError | AgentDaemonError
     : M extends "agent.continue" ? AgentContinueError | AgentDaemonError
       : M extends "agent.get" ? AgentLookupError | AgentDaemonError
+        : M extends "agent.events" ? AgentLookupError | AgentDaemonError
+          : M extends "agent.stats" ? AgentListError | AgentDaemonError
         : M extends "agent.list" ? AgentListError | AgentDaemonError
           : AgentDaemonError;
 
@@ -123,8 +127,9 @@ export class LocalAgentClient {
   async get(
     agentId: string,
     scope: LocalAgentWorkspaceScope,
+    options: { includeEvidence?: boolean; evidenceRef?: string } = {},
   ): Promise<BetterResult<LocalAgentRecord, AgentLookupError | AgentDaemonError>> {
-    const result = await this.request("agent.get", { id: agentId, scope });
+    const result = await this.request("agent.get", { id: agentId, scope, ...options });
     return decodeRequestResult(result, "agent.get", decodeAgentRecord);
   }
 
@@ -133,6 +138,18 @@ export class LocalAgentClient {
   ): Promise<BetterResult<LocalAgentRecord[], AgentListError | AgentDaemonError>> {
     const result = await this.request("agent.list", scope);
     return decodeRequestResult(result, "agent.list", decodeAgentRecordList);
+  }
+
+  async events(
+    id: string, scope: LocalAgentWorkspaceScope, afterSeq = 0, limit = 100,
+  ): Promise<BetterResult<LocalAgentEvent[], AgentLookupError | AgentDaemonError>> {
+    const result = await this.request("agent.events", { id, scope, afterSeq, limit });
+    return decodeRequestResult(result, "agent.events", decodeAgentEvents);
+  }
+
+  async stats(scope: LocalAgentWorkspaceScope): Promise<BetterResult<LocalAgentStats, AgentListError | AgentDaemonError>> {
+    const result = await this.request("agent.stats", scope);
+    return decodeRequestResult(result, "agent.stats", decodeAgentStats);
   }
 
   async status(): Promise<BetterResult<LocalAgentDaemonStatus, AgentDaemonError>> {
@@ -706,8 +723,10 @@ function isRequestError(
         || category === "conflict"
         || category === "store";
     case "agent.get":
+    case "agent.events":
       return category === "target" || category === "scope" || category === "store";
     case "agent.list":
+    case "agent.stats":
       return category === "scope" || category === "store";
     case "hello":
     case "daemon.status":

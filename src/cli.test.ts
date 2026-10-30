@@ -113,6 +113,26 @@ try {
       }
       const result = request.method === "agent.list"
         ? [current]
+        : request.method === "agent.get"
+          ? {
+              ...current,
+              evidenceSummary: {
+                ref: "ev_12345678901234567890123456789012",
+                outcome: "completed",
+                provider: "codex",
+                observedAt: "2026-10-24T00:00:00Z",
+                itemCount: 1,
+                itemsTruncated: false,
+                sha256: "a".repeat(64),
+              },
+              ...(request.params?.includeEvidence === true ? {
+                evidence: {
+                  v: 1, ref: "ev_12345678901234567890123456789012",
+                  agentId: current.id, outcome: "completed",
+                  answerPreview: "Review complete.", itemsJson: "[]",
+                },
+              } : {}),
+            }
         : request.method === "hello"
           ? {
               state: "ready",
@@ -151,6 +171,22 @@ try {
     });
 
     assert.equal(output.trim(), `${current.id} completed reviewer`);
+    const { stdout: evidenceOutput } = await execFileAsync(
+      "node", ["--import", "tsx", "src/cli.ts", "agents", "show", current.id, "--json", "--evidence"], {
+        cwd: process.cwd(), encoding: "utf8",
+        env: {
+          ...process.env, ...cliConfigEnv,
+          DEVSPACE_WORKSPACE_ID: "ws_current",
+          DEVSPACE_WORKSPACE_ROOT: projectRoot,
+        },
+      },
+    );
+    const evidenceReceipt = JSON.parse(evidenceOutput);
+    assert.equal(evidenceReceipt.status, "completed");
+    assert.equal(evidenceReceipt.evidenceSummary.itemCount, 1);
+    assert.equal(evidenceReceipt.evidence.itemsJson, "[]");
+    assert.ok(daemonRequests.some((request) => request.method === "agent.get"
+      && request.params?.includeEvidence === true));
 
     const { stdout: jsonOutput } = await execFileAsync(
       "node",

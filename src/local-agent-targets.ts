@@ -5,12 +5,14 @@ import {
   type LocalAgentProvider,
 } from "./local-agent-profiles.js";
 import type { SubagentProviderConfig } from "./local-agent-config.js";
+import type { AgentContextRequest } from "./local-agent-context-pack.js";
 
 export interface ParsedLocalAgentRunArgs {
   target: string;
   prompt: string;
   model?: string;
   effort?: string;
+  context?: AgentContextRequest;
 }
 
 export interface ParsedLocalAgentContinueArgs {
@@ -18,6 +20,7 @@ export interface ParsedLocalAgentContinueArgs {
   prompt: string;
   model?: string;
   effort?: string;
+  context?: AgentContextRequest;
 }
 
 export type LocalAgentTarget =
@@ -40,7 +43,7 @@ export type LocalAgentTarget =
 export function parseLocalAgentRunArgs(args: string[]): ParsedLocalAgentRunArgs {
   const parsed = parseAgentPromptArgs(
     args,
-    'Usage: devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] "<prompt>"',
+    'Usage: devspace agents run <profile-or-provider> [--model <model>] [--effort <level>] [--workflow wf_id] [--context-file path] [--memory-project slug] [--context-ref ctx_id] "<prompt>"',
   );
   return parsed;
 }
@@ -50,7 +53,10 @@ export function parseLocalAgentContinueArgs(args: string[]): ParsedLocalAgentCon
     args,
     'Usage: devspace agents continue <id> [--model <model>] [--effort <level>] "<prompt>"',
   );
-  return { agentId: parsed.target, prompt: parsed.prompt, model: parsed.model, effort: parsed.effort };
+  return {
+    agentId: parsed.target, prompt: parsed.prompt, model: parsed.model,
+    effort: parsed.effort, ...(parsed.context ? { context: parsed.context } : {}),
+  };
 }
 
 function parseAgentPromptArgs(
@@ -64,6 +70,7 @@ function parseAgentPromptArgs(
 
   let model: string | undefined;
   let effort: string | undefined;
+  let context: AgentContextRequest | undefined;
   const promptParts: string[] = [];
   let optionsEnded = false;
   for (let index = 0; index < rest.length; index += 1) {
@@ -98,6 +105,31 @@ function parseAgentPromptArgs(
       effort = value;
       continue;
     }
+    if (part === "--context") {
+      context ??= {};
+      continue;
+    }
+    const contextOption = [
+      "--workflow", "--context-file", "--memory-project", "--context-ref", "--context-max-bytes",
+    ].find((name) => part === name || part?.startsWith(name + "="));
+    if (contextOption) {
+      const value = parseOptionValue(part === contextOption ? rest[++index] : part?.slice(contextOption.length + 1), contextOption);
+      context ??= {};
+      switch (contextOption) {
+        case "--workflow": context.workflowId = value; break;
+        case "--context-file": (context.files ??= []).push(value); break;
+        case "--memory-project": context.memoryProject = value; break;
+        case "--context-ref": context.contextRef = value; break;
+        case "--context-max-bytes": {
+          const bytes = Number(value);
+          if (!Number.isInteger(bytes) || bytes < 2_000 || bytes > 20_000) {
+            throw new Error("--context-max-bytes must be between 2000 and 20000.");
+          }
+          context.maxBytes = bytes;
+        }
+      }
+      continue;
+    }
     if (part?.startsWith("-")) {
       throw unknownOptionError(part);
     }
@@ -109,7 +141,7 @@ function parseAgentPromptArgs(
     throw new Error(usage);
   }
 
-  return { target, prompt, model, effort };
+  return { target, prompt, model, effort, ...(context ? { context } : {}) };
 }
 
 function parseOptionValue(value: string | undefined, option: string): string {
@@ -143,7 +175,7 @@ export function resolveLocalAgentTarget(
     };
   }
 
-  if (isLocalAgentProvider(target)) {
+  if (isLocalAgentProvider(target) || providerConfigs.some((entry) => entry.id === target && entry.cli)) {
     const providerConfig = providerConfigs.find((entry) => entry.id === target);
     return {
       kind: "provider",

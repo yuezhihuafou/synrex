@@ -97,7 +97,13 @@ export class MultiNodeRouter {
     const node = this.store.getNode(route.nodeId);
     if (!node) throw new Error(`Workspace ${input.workspaceId} references unknown node ${route.nodeId}.`);
     if (node.health === "offline") {
-      throw new Error(`Workspace ${input.workspaceId} is temporarily unavailable because node ${node.alias ?? node.id} is offline.`);
+      throw new Error(`Workspace ${input.workspaceId} remains pinned to node ${node.alias ?? node.id}, which is offline. Recover the original peer and inspect existing task IDs; do not reroute or replay uncertain side effects.`);
+    }
+    // Draining peers stop accepting fresh work, but prior task receipts must
+    // remain inspectable. Never silently migrate a pinned workspace.
+    if (node.health === "draining" && !["read", "task_get", "task_wait", "process_status"].includes(input.name)
+      && !(input.name === "exec_command" && /^devspace-task\s+(?:get|wait|final)\s+task_/i.test(String(input.arguments.cmd ?? "")))) {
+      throw new Error(`Node ${node.alias ?? node.id} is draining; new work is refused, but existing task/status retrieval remains permitted.`);
     }
     assertNodeProtocolCompatible(node);
     assertNodeToolContract(node, input.name);

@@ -139,7 +139,10 @@ In stable mode, independently running durable task units survive Core
 restart; new MCP requests pause and accepted HTTP requests must drain.
 In legacy mode, known live tasks still block direct restart.
 
-**It is NOT installed on production.** A future controlled migration would:
+**The first swy1 cutover was completed on 2026-10-26.** The original
+Core now listens on :7677 and the independent stable ingress owns :7676.
+The steps below remain the required procedure for another host or recovery,
+not instructions to repeat the first cutover on swy1.
 
 1. Verify the Cloudflare remote ingress mapping and current service owner.
 2. Run the ingress on disposable QA ports against a fresh isolated Core/OAuth
@@ -151,6 +154,16 @@ In legacy mode, known live tasks still block direct restart.
 4. Arrange the **one-time** public `:7676` ownership cutover from Core to
    stable ingress. This cutover itself may cause a short interruption; do not
    market it as zero downtime without observing actual ChatGPT clients.
+   The guarded one-time procedure is
+   `deploy/migrate-stable-ingress.sh <immutable-release> <backup-dir>`,
+   launched in an independent user systemd transient unit, NOT from the
+   Core process being restarted. It snapshots the previous pinned drop-in,
+   verifies the existing Cloudflare/Core services, waits for initiating MCP
+   requests to finish, moves the Core to :7677, starts the ingress on :7676,
+   verifies public OAuth identity and topology, and only then enables the
+   ingress at boot. A failed handoff stops the gate and restores the previous
+   drop-in/Core at :7676. Its JSON receipt and QA evidence are placed in the
+   private backup directory. The first handoff has a short unavoidable gap.
 5. For subsequent releases, check active requests and preserve task IDs,
    waiting only a bounded period. If a Core exits mid-request, return an
    explicit unknown outcome and recover from saved run receipts, never replay
@@ -162,14 +175,136 @@ one-time ingress port cutover, exact systemd environment and authenticated
 client behavior before relying on it. Socket permissions are one layer of
 local owner authority; they do not replace production OAuth.
 
+After a successful one-time cutover, `activate-owner-release.sh`
+automatically detects the running ingress unit and its owner-local control
+socket. It will not accidentally revert to the legacy :7676 Core bind.
+Independent systemd durable task units are not grounds to block a safe
+stable-ingress Core upgrade; accepted HTTP requests must still drain within
+the bounded admission window. A failed drain cancels the upgrade rather
+than terminating ongoing tools or robot actions.
+
+**2026-10-26 canonical version protection:** Production had reached
+`e9114fb` while `origin/main` was still `9438b6b` (two Console usage
+commits ahead). This is a normal fast-forward opportunity, *not* permission
+to downgrade production with an older candidate. The release authority now
+calls `scripts/synrex-release-provenance.py` twice (before admission control
+and again after draining). It verifies the immutable candidate's manifest,
+dist build identity and asset SHA-256 hashes, that its source revision equals
+the **latest remote canonical main**, and that it descends from the **actual
+running production revision**. Any other branch advancing during a build or
+drain causes a refusal, not a forced overwrite. Other conversations can keep
+working; only the actual integration/publish and Core promotion are
+serialized. A private release receipt records activation or rollback.
+
+The Git Worktree default remains normal `HEAD` for arbitrary projects.
+For Synrex itself, new integration worktrees must explicitly start from the
+**fetched origin/main**; never use a stale mutable checkout HEAD as proof of
+the latest source. Changes from dirty gateway/other WTs must be selected and
+reviewed, not automatically swept into production.
+
+### One-command recurring production promotion
+
+Once *selected and tested* changes have been committed and pushed to canonical
+`main`, use its clean checkout (including a detached worktree checked out at
+the exact published SHA):
+
+```sh
+bash deploy/promote-main.sh --check .
+bash deploy/promote-main.sh --deploy .
+```
+
+The command refuses dirty source, a noncanonical remote, stale `HEAD`, a
+commit that does not contain the running production source, or a candidate
+with missing/changed immutable build assets. It runs the project build,
+supported regression tests and isolated OAuth/MCP/Console ingress checks
+before creating an immutable release under
+`/home/swy/services/devspace/releases/synrex-main-<SHA>`.
+The `--check` result is reusable: `--deploy` validates the same immutable
+package instead of rebuilding or overwriting it.
+
+Production promotion then backs up the authoritative OAuth/SQLite state and
+dispatches an independent **user systemd unit**, so terminating the launching
+MCP call cannot silently truncate the rollback script. That script takes a
+release lock, verifies the GitHub `main` SHA **again** immediately before
+changing Core, and pauses/drains the stable ingress for a bounded period.
+The Cloudflare Tunnel stays alive; detached systemd task units remain
+independent. A bad startup, public OAuth failure, later GitHub push during
+drain, or exhausted drain window refuses or reverses the switch. The
+per-release private directory records a receipt and preflight evidence.
+
+This is a **Core release protocol, not automatic promotion of every dirty
+worktree**. A newly pushed main is not secretly deployed. The owner starts
+the command when desired; other conversations keep coding. A publish that
+races the release causes a safe refusal, after which the newer main is built
+and promoted instead. Tests cannot guarantee that an external ChatGPT client
+resumes reasoning after a pre-existing network failure.
+
+Subsequent Core upgrades need bounded admission drain. To avoid a permanent
+block from idle, long-lived SSE **GET** notification subscriptions, the
+ingress closes only these read-only streams with an SSE reconnect comment
+before restarting Core. It **never** closes or retries a streaming POST/tool
+request; an unfinished POST remains a bounded release blocker, not a reason
+to cancel robot execution. Clients might briefly reconnect their GET stream;
+HTTP continuity does not prove lossless replay of unacknowledged notifications.
+The stable ingress remains running throughout ordinary Core deployment.
+
+### Truncated upstream streams must never permanently block rollout
+
+On 2026-10-26 a source-controlled main promotion refused to restart Core:
+the ingress counted five outstanding HTTP streams, although recent Core
+diagnostics did not show five unfinished tool calls. One possible mechanism
+was confirmed in the source: a server-side upstream `IncomingMessage` abort
+could leave the downstream proxy response open indefinitely. The ingress now
+closes truncated responses, deletes their active counts, and never retries a
+possibly side-effecting POST. Its STATUS response exposes bounded method,
+route category, response category and age only; no request path, query string,
+header, payload or credential is recorded. Dedicated tests simulate a
+half-written SSE stream and assert that the connection and activity count
+both terminate.
+
+**Live root-cause confirmation after installing the diagnostic ingress:**
+four constantly renewing `POST /_devspace/node/v1/poll` requests were
+identified from gateway. Actual Core logs showed each successful poll holds
+the connection for **25,000–25,002 ms** before returning HTTP 200 and
+immediately re-polling. They are normal peer infrastructure traffic, not
+unfinished user tool actions. The six-second `PAUSE` drain deadline therefore
+could not reliably reach zero. The updated activation and explicit rollback
+now bound their drain to **40 seconds**, which permits an in-progress peer
+poll to return while the gate queues its replacement. This does not abort
+side-effecting MCP POSTs or systemd durable tasks; an uncompleted request
+still blocks promotion after the deadline, with a recorded refusal.
+
+Upgrading the *stable ingress code itself* is exceptional, not part of routine
+Core deployments. `deploy/request-ingress-upgrade.sh <verified-main-release>`
+starts an independent user-systemd job with a pinned unit backup, preflight
+source checks, health and public OAuth checks and automatic old-unit recovery.
+It keeps the Core and Cloudflare untouched. **This one-time proxy upgrade can
+interrupt already-open HTTP streams.** Afterward the proxy remains pinned
+and continuously running for ordinary Core updates.
+
+### Explicit rollback to the previous verified production release
+
+The existing activation routine automatically restores the old Core if a
+deployment fails, but a healthy-looking release can still have a functional
+regression. `bash deploy/request-owner-rollback.sh --previous` launches a
+detached user-systemd rollback that selects only the current release's
+*recorded* `previousRelease` immutable sibling. Its manifest, build identity
+and file hashes must match, and the previous Core must support :7677.
+The same release lock, bounded ingress drain, health/OAuth checks, preserved
+task units and rollback receipt apply. This is an intentional operator
+exception to the normal no-downgrade policy; no arbitrary branch or mutable
+checkout can be promoted through it. A failed rollback restores the original
+Core and records the failure rather than making the public Tunnel a second
+runtime owner.
+
 ## P0 acceptance and remaining work
 
 | Scenario | Required evidence | Current status |
 | --- | --- | --- |
 | Concurrent Console/Mem/Subagent development | 3 independent Worktrees, no overwritten dirty files, selected commits integrated once | inventory and static integration plan implemented; full convergence pending |
 | Concurrent release requests | second operation refused without modifying unit/drop-in | isolated mocked systemd test |
-| Upgrade during durable robot simulation | restart refused while task is running, run ID survives reconnect | known-busy guard tested; real-client restart test pending |
-| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | isolated real-Core/Console/proxy restart probe passed; **not live deployed** |
+| Upgrade during durable robot simulation | task remains a separate systemd unit, ID and run receipt survive Core restart | stable-mode guard implemented; repeated real-client release test required |
+| Stable ingress handoff | no failures for new requests during bounded planned restart, active requests drain, single writer | first swy1 cutover completed; Core port :7677 / ingress :7676 live, subsequent Core upgrade test required |
 | Cloudflare/SSH/GPU peer | swy1 works with gateway offline; no duplicate public OAuth, no port conflict | live inventory partial; fault injection pending |
 | Console observability | actual process/port/tunnel + request/task/run causal timeline, unknowns labeled | core historical diagnostics exist; P0 inventory not yet wired to UI |
 | LayerFS | meaningful measured advantage versus Git Worktree | deliberately deferred |
@@ -181,6 +316,8 @@ python3 -m unittest discover -s tests -p 'test_synrex_p0.py' -v
 python3 -m unittest discover -s tests -p 'test_activate_owner_release.py' -v
 node --test scripts/ingress-gate.test.mjs
 node scripts/probe-stable-ingress.mjs .
+python3 -m unittest discover -s tests -p 'test_migrate_stable_ingress.py' -v
+python3 -m unittest discover -s tests -p 'test_release_provenance.py' -v
 pnpm typecheck && pnpm build
 ```
 

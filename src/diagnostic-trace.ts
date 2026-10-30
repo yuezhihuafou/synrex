@@ -25,7 +25,7 @@ const DIAGNOSTIC_DIR = "diagnostics";
 const DIAGNOSTIC_FILE = "recent.jsonl";
 
 export type DiagnosticEvent =
-  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent"
+  | "stage_started" | "stage_finished" | "mcp_body_ready" | "mcp_headers_sent" | "tool_tokens_measured"
   | "request_stalled" | "runtime_started" | "runtime_stopping"
   | "runtime_sampled"
   | "network_sampled" | "tunnel_registered" | "tunnel_disconnected" | "tunnel_retry" | "tunnel_auth_failed"
@@ -36,6 +36,7 @@ export type DiagnosticEvent =
   | "mailbox_registered" | "mailbox_delivered" | "mailbox_acknowledged" | "mailbox_error" | "learning_error"
   | "conversation_labeled"
   | "conversation_seen"
+  | "workspace_operation_waited"
   | "node_request_timeout"
   | "node_late_completion"
   | "mcp_received"
@@ -87,6 +88,8 @@ export interface DiagnosticEntry {
   errorCode?: string;
   inputBytes?: number;
   outputBytes?: number;
+  inputTokens?: number;
+  outputTokens?: number;
   queuedMs?: number;
   exitCode?: number;
   signal?: string;
@@ -123,7 +126,7 @@ const EVENT_NAMES: readonly string[] = [
   "task_created", "task_runner_started", "task_spawned", "task_first_output", "task_finished", "task_notification",
   "mailbox_registered", "mailbox_delivered", "mailbox_acknowledged", "mailbox_error", "learning_error",
   "conversation_labeled", "conversation_seen", "node_request_timeout", "node_late_completion",
-  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed",
+  "mcp_received", "mcp_handler_returned", "mcp_stream_closed", "mcp_finished", "mcp_closed_early", "mcp_failed", "tool_tokens_measured",
   "tool_execution_started", "tool_execution_stalled", "tool_execution_finished",
 ];
 
@@ -159,7 +162,7 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     const value = boundedString(fields[key], pattern!);
     if (value) (item as unknown as Record<string, unknown>)[key] = value;
   }
-  for (const key of ["pid", "inputBytes", "outputBytes", "queuedMs",
+  for (const key of ["pid", "inputBytes", "outputBytes", "inputTokens", "outputTokens", "queuedMs",
     "rssBytes", "heapUsedBytes", "cpuUserMicros", "cpuSystemMicros", "eventLoopLagMs",
     "eventLoopP95Ms", "eventLoopUtilizationPermille", "gcDurationMs", "gcCount", "activeToolCount",
     "otelSpanPending", "otelSpanDropped"] as const) {
@@ -214,8 +217,10 @@ export class DiagnosticTrace {
   readonly file: string;
   readonly previousFile: string;
   private warned = false;
+  private directoryReady = false;
 
-  constructor(stateDir: string, private readonly fileLimit = DIAGNOSTIC_FILE_LIMIT) {
+  constructor(stateDir: string, private readonly fileLimit = DIAGNOSTIC_FILE_LIMIT,
+    private readonly onRecord?: (entry: DiagnosticEntry) => void) {
     this.file = path.join(stateDir, DIAGNOSTIC_DIR, DIAGNOSTIC_FILE);
     this.previousFile = this.file + ".1";
   }
@@ -225,16 +230,24 @@ export class DiagnosticTrace {
       const entry = sanitizeDiagnostic(event, { ...diagnosticRuntime, ...fields });
       const line = JSON.stringify(entry) + "\n";
       const dir = path.dirname(this.file);
-      mkdirSync(dir, { recursive: true, mode: 0o700 });
-      chmodSync(dir, 0o700);
+      // The directory and an existing log only need permission correction
+      // once per trace writer. Avoid extra synchronous filesystem calls on
+      // every lifecycle event in the hot MCP request path.
+      if (!this.directoryReady) {
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
+        chmodSync(dir, 0o700);
+        if (existsSync(this.file)) chmodSync(this.file, 0o600);
+        this.directoryReady = true;
+      }
       if (existsSync(this.file) && statSync(this.file).size + Buffer.byteLength(line) > this.fileLimit) {
         renameSync(this.file, this.previousFile);
       }
       appendFileSync(this.file, line, { encoding: "utf8", mode: 0o600 });
-      chmodSync(this.file, 0o600);
       this.warned = false;
+      try { this.onRecord?.(entry); } catch { /* Best-effort metrics only. */ }
     } catch (error) {
       // Diagnostics must never break code execution or authenticated requests.
+      this.directoryReady = false;
       if (!this.warned) {
         this.warned = true;
         console.warn("Synrex diagnostic trace unavailable:", error instanceof Error ? error.name : "unknown");
@@ -243,7 +256,7 @@ export class DiagnosticTrace {
   }
 
   read(input: { minutes?: number; limit?: number; requestId?: string; conversationId?: string; title?: string } = {}): DiagnosticEntry[] {
-    const minutes = Math.min(Math.max(input.minutes ?? 30, 1), 24 * 60);
+    const minutes = Math.min(Math.max(input.minutes ?? 30, 1), 30 * 24 * 60);
     const limit = Math.min(Math.max(input.limit ?? 70, 1), 20_000);
     const cutoff = Date.now() - minutes * 60_000;
     const entries: DiagnosticEntry[] = [];
@@ -323,7 +336,9 @@ export function summarizeDiagnosticTrace(entries: DiagnosticEntry[]) {
       classification: observed.get(request.requestId)?.has("mcp_finished")
         ? "rev_http_completed"
         : observed.get(request.requestId)?.has("mcp_closed_early")
-          ? "connection_closed_early"
+          ? observed.get(request.requestId)?.has("tool_execution_finished")
+            ? "tool_completed_connection_closed"
+            : "connection_closed_early"
           : observed.get(request.requestId)?.has("mcp_failed")
             ? "rev_handler_error"
             : observed.get(request.requestId)?.has("tool_execution_finished")

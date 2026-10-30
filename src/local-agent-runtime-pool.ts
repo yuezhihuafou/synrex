@@ -129,6 +129,9 @@ export class LocalAgentRuntimePool {
         if (reservationError) throw reservationError;
         await inputCallbacks?.onSessionId?.(providerSessionId);
       },
+      onEvent: async (event) => {
+        await inputCallbacks?.onEvent?.(event);
+      },
     };
     const startedAt = this.now();
     try {
@@ -492,7 +495,8 @@ export class LocalAgentRuntimePool {
     event: string,
     fields: Record<string, unknown>,
   ): void {
-    this.logger?.(level, event, fields);
+    // A logger failure during runtime creation must not orphan the provider.
+    try { this.logger?.(level, event, fields); } catch { /* observational */ }
   }
 }
 

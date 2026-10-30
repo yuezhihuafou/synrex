@@ -13,6 +13,8 @@ export interface CodingWorkflowCheckpoint {
   blockers: string[];
   checks: string[];
   taskIds: string[];
+  /** Explicitly associated Subagent handles; never infer unrelated agents. */
+  agentIds?: string[];
   gitHead?: string;
   gitStatus?: string;
 }
@@ -225,6 +227,12 @@ export class CodingWorkflowStore {
       }
       if (current.status === "completed" || current.status === "cancelled") {
         throw new Error(`Workflow ${input.workflowId} is ${current.status} and cannot be changed.`);
+      }
+      if (input.status === "completed" && input.checkpoint.checks.length === 0) {
+        throw new Error("Cannot mark workflow completed without a recorded verification check. A checkpoint or partial result is not proof that acceptance criteria passed.");
+      }
+      if (input.status === "completed" && (input.checkpoint.nextSteps.length || input.checkpoint.blockers.length || input.checkpoint.taskIds.length)) {
+        throw new Error("Cannot complete workflow with pending steps, blockers, or unresolved task IDs. Verify the original goal first.");
       }
       const revision = current.revision + 1;
       const now = new Date().toISOString();

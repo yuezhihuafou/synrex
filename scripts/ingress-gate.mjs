@@ -13,7 +13,7 @@ const delay = (ms) => new Promise((done) => setTimeout(done, ms));
 
 export function createIngressGate({
   listenPort = 0, upstreamPort, controlSocket,
-  maxPending = 48, maxPendingMs = 20_000, pauseLeaseMs = 30_000,
+  maxPending = 48, maxPendingMs = 60_000, pauseLeaseMs = 75_000,
 }) {
   if (!Number.isInteger(upstreamPort) || upstreamPort < 1 || upstreamPort > 65535) {
     throw new Error('upstreamPort must be a valid local TCP port');
@@ -29,8 +29,20 @@ export function createIngressGate({
   let pending = 0;
   let pauseTimer;
   let listening = false;
+  let nextRequestId = 0;
+  const activeRequests = new Map();
+  // Long-lived read-only GET notification streams must not indefinitely
+  // prevent a Core rollout. Never close an SSE POST (may contain tool output).
+  const reconnectableGetStreams = new Set();
 
-  const snapshot = () => ({ paused, active, pending, upstreamPort });
+  const snapshot = () => ({
+    paused, active, pending, upstreamPort,
+    // Bounded, privacy-preserving metadata, never query strings, auth or bodies.
+    activeRequests: [...activeRequests.values()].slice(0, 40).map((item) => ({
+      method: item.method, route: item.route, response: item.response,
+      ageMs: Date.now() - item.startedAt,
+    })),
+  });
   function resume() {
     paused = false;
     if (pauseTimer) clearTimeout(pauseTimer);
@@ -42,6 +54,15 @@ export function createIngressGate({
     if (pauseTimer) clearTimeout(pauseTimer);
     pauseTimer = setTimeout(resume, pauseLeaseMs);
     pauseTimer.unref();
+    for (const stream of reconnectableGetStreams) {
+      if (stream.destroyed || stream.writableEnded) continue;
+      try {
+        // SSE clients may reconnect to the stable public endpoint after this
+        // controlled end-of-stream. No task/event replay is performed here.
+        stream.write(': synrex core updating; reconnect to continue\n\n');
+        stream.end();
+      } catch { stream.destroy(); }
+    }
   }
 
   async function waitReady(req, res) {
@@ -85,29 +106,55 @@ export function createIngressGate({
       return;
     }
     active += 1;
+    const id = ++nextRequestId;
+    const route = req.url?.startsWith('/mcp') ? 'mcp'
+      : req.url?.startsWith('/console') ? 'console'
+        : req.url?.startsWith('/healthz') ? 'health'
+          : req.url?.includes('/oauth') ? 'oauth' : 'other';
+    const info = { method: req.method, route, response: 'pending', startedAt: Date.now() };
+    activeRequests.set(id, info);
     let finished = false;
     function finish() {
       if (finished) return;
       finished = true;
       active -= 1;
+      activeRequests.delete(id);
+      reconnectableGetStreams.delete(res);
     }
     res.once('close', finish);
+    const failUpstream = () => {
+      // A response that was cut off *after headers* is not a complete MCP
+      // receipt. Its Core may have been restarted; do NOT replay its POST.
+      if (!res.headersSent && !res.destroyed) {
+        res.writeHead(502, { 'content-type': 'text/plain' });
+        res.end('Synrex upstream request outcome unknown');
+      } else if (!res.destroyed) res.destroy();
+      finish();
+    };
     const upstream = httpRequest({
       host: '127.0.0.1', port: upstreamPort, method: req.method,
       path: req.url, headers: req.headers,
       agent: false,
     }, (answer) => {
       res.writeHead(answer.statusCode ?? 502, answer.statusMessage, answer.headers);
+      const responseType = String(answer.headers['content-type'] ?? '');
+      info.response = /^text\/event-stream(?:;|$)/i.test(responseType)
+        ? 'sse' : /^application\/json(?:;|$)/i.test(responseType) ? 'json' : 'other';
+      if (req.method === 'GET' && /^text\/event-stream(?:;|$)/i.test(responseType)) {
+        reconnectableGetStreams.add(res);
+      }
+      // Node emits 'aborted'/'close' on the response, not reliably on the
+      // ClientRequest, when an established upstream streaming response dies.
+      // Without this the public connection can leak forever and deadlock
+      // every future PAUSE/drain release attempt.
+      answer.once('aborted', failUpstream);
+      answer.once('error', failUpstream);
+      answer.once('close', () => {
+        if (!answer.complete && !res.writableEnded) failUpstream();
+      });
       answer.pipe(res);
     });
-    upstream.once('error', () => {
-      // Never replay an already connected request: its side effects are unknown.
-      if (!res.headersSent && !res.destroyed) {
-        res.writeHead(502, { 'content-type': 'text/plain' });
-        res.end('Synrex upstream request outcome unknown');
-      } else if (!res.destroyed) res.destroy();
-      finish();
-    });
+    upstream.once('error', failUpstream);
     req.once('aborted', () => upstream.destroy());
     res.once('close', () => upstream.destroy());
     req.pipe(upstream);
@@ -152,8 +199,14 @@ export function createIngressGate({
       resume();
       if (!listening) return;
       listening = false;
+      const closing = new Promise((done) => server.close(done));
+      server.closeIdleConnections();
+      // An exceptional gate update must not hang forever on a broken or
+      // permanently subscribed stream. Core releases never call this path.
+      await Promise.race([closing, delay(2500)]);
+      server.closeAllConnections();
       await Promise.all([
-        new Promise((done) => server.close(done)),
+        closing,
         new Promise((done) => control.close(done)),
       ]);
       await unlink(controlSocket).catch(() => undefined);

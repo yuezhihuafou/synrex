@@ -204,3 +204,31 @@ test("required placement rules override model node selection and preferred rules
     rules: preferredRules,
   }).node.id, robot.id);
 });
+
+test("logical project binds ambiguous shared checkout paths to a single node", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "synrex-project-binding-"));
+  const store = new SqliteControlPlaneStore(dir);
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  const local = store.ensureLocalNode({ alias: "swy1", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {}, workspaceRoots: ["/home/swy"] } });
+  const gateway = store.registerRemoteNode({ id: "node_gateway_project", alias: "gateway",
+    platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {}, workspaceRoots: ["/home/swy"] } });
+  const projectBindings = [
+    { project: "synrex", node: "gateway", pathPrefix: "/home/swy/DevSpace" },
+    { project: "robotics", node: "swy1", pathPrefix: "/home/swy/robotics" },
+  ];
+  assert.equal(selectWorkspaceNode(store, { path: "/home/swy/DevSpace", localNodeId: local.id,
+    projectBindings }).node.id, gateway.id);
+  assert.equal(selectWorkspaceNode(store, { path: "/home/swy/robotics", project: "robotics",
+    localNodeId: local.id, projectBindings }).node.id, local.id);
+  assert.throws(() => selectWorkspaceNode(store, { path: "/home/swy/DevSpace", project: "synrex",
+    selector: "swy1", localNodeId: local.id, projectBindings }), /node override denied/);
+  assert.throws(() => selectWorkspaceNode(store, { path: "/home/swy/DevSpace", project: "robotics",
+    localNodeId: local.id, projectBindings }), /outside project/);
+  assert.throws(() => selectWorkspaceNode(store, { path: "/home/swy/DevSpace", project: "unknown",
+    localNodeId: local.id, projectBindings }), /Unknown Synrex project/);
+  store.setNodeHealth(gateway.id, "offline");
+  assert.throws(() => selectWorkspaceNode(store, { path: "/home/swy/DevSpace", localNodeId: local.id,
+    projectBindings }), /offline/);
+});

@@ -1,7 +1,44 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { openDatabase } from "./db/client.js";
+import { gitUsage } from "./console-usage.js";
+import { recordCodeReview } from "./usage-ledger.js";
+
+// Additive, lazy table creation deliberately does not advance the shared
+// strict migration version. Older pinned releases must remain able to open
+// this same SQLite database during rollback.
+function openNotesDatabase(stateDir: string) {
+  const db = openDatabase(stateDir);
+  try {
+    db.sqlite.exec(`
+      create table if not exists learning_notes (
+        id text primary key,
+        workspace_root text not null,
+        task_key text not null,
+        source text not null,
+        title text not null,
+        outcome text not null,
+        summary text not null,
+        root_cause text,
+        resolution_json text not null,
+        lessons_json text not null,
+        checks_json text not null,
+        next_steps_json text not null,
+        evidence_json text not null,
+        created_at text not null,
+        updated_at text not null,
+        unique(workspace_root, task_key)
+      );
+      create index if not exists learning_notes_workspace_updated_idx
+        on learning_notes(workspace_root, updated_at desc);
+    `);
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}
 
 const MAX_EPISODES_PER_WORKSPACE = 2_000;
 const MAX_INPUT_CHARS = 1_200;
@@ -50,6 +87,29 @@ export interface LearningCandidate {
 export interface LearningRecallResult {
   episodes: LearningEpisode[];
   candidates: LearningCandidate[];
+  notes: LearningNote[];
+}
+
+/** A task-level retrospective, distinct from a raw tool receipt or a
+ * validated project skill. Workflow checkpoints are self-reported; neither
+ * their checks nor their conclusions are promoted to verified evidence.
+ */
+export interface LearningNote {
+  id: string;
+  workspaceRoot: string;
+  taskKey: string;
+  source: "workflow" | "reflection";
+  title: string;
+  outcome: string;
+  summary: string;
+  rootCause?: string;
+  resolution: string[];
+  lessons: string[];
+  checks: string[];
+  nextSteps: string[];
+  evidenceEpisodeIds: string[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface VerifiedProcedureSuggestion {
@@ -87,7 +147,7 @@ export class LearningStore {
         inputSummary: summarizeInput(input.tool, input.toolInput),
         outputSummary: input.error
           ? truncate(redactSecrets(errorMessage(input.error)), MAX_OUTPUT_CHARS)
-          : summarizeOutput(input.toolOutput),
+          : summarizeOutput(input.toolOutput, input.tool),
         success: input.error === undefined && !responseIsError(input.toolOutput),
         createdAt: new Date().toISOString(),
       };
@@ -115,6 +175,14 @@ export class LearningStore {
           limit ?
         )
       `).run(input.workspaceRoot, input.workspaceRoot, MAX_EPISODES_PER_WORKSPACE);
+      if (episode.tool === "show_changes" && episode.success) {
+        const review = gitUsage(episode.outputSummary);
+        if (review) recordCodeReview(database.sqlite, {
+          workspace_root: episode.workspaceRoot, review_ref: review.reviewRef, created_at: episode.createdAt,
+          files: review.files, additions: review.additions, removals: review.removals,
+          path_hashes_json: JSON.stringify(review.pathHashes), paths_complete: review.pathsComplete ? 1 : 0,
+        });
+      }
     } finally {
       database.close();
     }
@@ -155,9 +223,167 @@ export class LearningStore {
         .sort((a, b) => b.score - a.score || b.candidate.updatedAt.localeCompare(a.candidate.updatedAt))
         .slice(0, Math.max(1, Math.min(limit, 20)))
         .map((item) => item.candidate);
-      return { episodes, candidates };
+      const notes = this.listNotes(workspaceRoot, 60)
+        .map((note) => ({
+          note,
+          score: textScore(tokens, `${note.title} ${note.summary} ${note.rootCause ?? ""} ${note.resolution.join(" ")} ${note.lessons.join(" ")}`),
+        }))
+        .filter((item) => tokens.length === 0 || item.score > 0)
+        .sort((a, b) => b.score - a.score || b.note.updatedAt.localeCompare(a.note.updatedAt))
+        .slice(0, Math.max(1, Math.min(limit, 20)))
+        .map((item) => item.note);
+      return { episodes, candidates, notes };
     } finally {
       database.close();
+    }
+  }
+
+  /** Idempotent, per-workspace task summary. Does not trust a checkpoint's
+   * claimed checks as machine verification. No model or network is invoked.
+   */
+  recordNote(input: {
+    workspaceRoot: string;
+    taskKey: string;
+    source: LearningNote["source"];
+    title: string;
+    outcome: string;
+    summary: string;
+    rootCause?: string;
+    resolution?: string[];
+    lessons?: string[];
+    checks?: string[];
+    nextSteps?: string[];
+    evidenceEpisodeIds?: string[];
+  }): LearningNote {
+    const taskKey = input.taskKey.trim();
+    if (!taskKey || taskKey.length > 200 || !input.title.trim() || !input.summary.trim()) {
+      throw new Error("Learning notes require a bounded taskKey, title and summary.");
+    }
+    const evidence = uniqueStrings(input.evidenceEpisodeIds ?? []).slice(0, 50);
+    const db = openNotesDatabase(this.stateDir);
+    try {
+      if (evidence.length) {
+        const found = db.sqlite.prepare(`select id from learning_episodes
+          where workspace_root = ? and id in (${evidence.map(() => "?").join(",")})`)
+          .all(input.workspaceRoot, ...evidence) as Array<{ id: string }>;
+        if (found.length !== evidence.length) {
+          throw new Error("Learning note evidence must belong to the current workspace.");
+        }
+      }
+      const now = new Date().toISOString();
+      const id = `note_${randomUUID()}`;
+      const cleaned = (s: string, max = 1200) => truncate(redactSecrets(s.trim()), max);
+      const cleanedList = (values: string[] | undefined) =>
+        uniqueStrings(values ?? []).slice(0, 30).map((s) => cleaned(s, 600));
+      db.sqlite.prepare(`
+        insert into learning_notes (
+          id, workspace_root, task_key, source, title, outcome, summary,
+          root_cause, resolution_json, lessons_json, checks_json, next_steps_json,
+          evidence_json, created_at, updated_at
+        ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        on conflict(workspace_root, task_key) do update set
+          source=excluded.source, title=excluded.title, outcome=excluded.outcome,
+          summary=excluded.summary, root_cause=excluded.root_cause,
+          resolution_json=excluded.resolution_json, lessons_json=excluded.lessons_json,
+          checks_json=excluded.checks_json, next_steps_json=excluded.next_steps_json,
+          evidence_json=excluded.evidence_json, updated_at=excluded.updated_at
+      `).run(
+        id, input.workspaceRoot, taskKey, input.source, cleaned(input.title, 200),
+        cleaned(input.outcome, 40), cleaned(input.summary, 2000),
+        input.rootCause ? cleaned(input.rootCause, 1200) : null,
+        JSON.stringify(cleanedList(input.resolution)),
+        JSON.stringify(cleanedList(input.lessons)),
+        JSON.stringify(cleanedList(input.checks)),
+        JSON.stringify(cleanedList(input.nextSteps)),
+        JSON.stringify(evidence), now, now,
+      );
+      const row = db.sqlite.prepare("select * from learning_notes where workspace_root = ? and task_key = ?")
+        .get(input.workspaceRoot, taskKey) as LearningNoteRow;
+      return rowToNote(row);
+    } finally {
+      db.close();
+    }
+  }
+
+  listNotes(workspaceRoot: string, limit = 20): LearningNote[] {
+    const db = openNotesDatabase(this.stateDir);
+    try {
+      const rows = db.sqlite.prepare(`select * from learning_notes
+        where workspace_root = ? order by updated_at desc limit ?`)
+        .all(workspaceRoot, Math.max(1, Math.min(limit, 100))) as LearningNoteRow[];
+      return rows.map(rowToNote);
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * Explicit read-only project recall for a new conversation using a
+   * different worktree of the same registered source checkout.
+   *
+   * Do not merge raw execution episodes, elevate self-reported notes into
+   * verified evidence, or silently widen the default workspace boundary.
+   * The caller must pass a sourceRoot verified by WorkspaceRegistry; this
+   * query additionally demands the stored worktree source_root to match.
+   */
+  recallSiblingNotes(sourceRoot: string, currentRoot: string, query: string, limit = 6): LearningNote[] {
+    const db = openNotesDatabase(this.stateDir);
+    try {
+      const rows = db.sqlite.prepare(`select * from learning_notes
+        where workspace_root <> ?
+          and (
+            workspace_root = ?
+            or workspace_root in (
+              select distinct root from workspace_sessions
+              where source_root = ? and mode = 'worktree'
+            )
+          )
+        order by updated_at desc limit 120`)
+        .all(currentRoot, sourceRoot, sourceRoot) as LearningNoteRow[];
+      const tokens = queryTokens(query);
+      return rows.map(rowToNote)
+        .map((note) => ({
+          note,
+          score: textScore(tokens, `${note.title} ${note.summary} ${note.rootCause ?? ""} ${note.resolution.join(" ")} ${note.lessons.join(" ")}`),
+        }))
+        .filter((item) => tokens.length === 0 || item.score > 0)
+        .sort((a, b) => b.score - a.score || b.note.updatedAt.localeCompare(a.note.updatedAt))
+        .slice(0, Math.max(1, Math.min(limit, 8)))
+        .map((item) => item.note);
+    } finally {
+      db.close();
+    }
+  }
+
+  getNote(workspaceRoot: string, noteId: string): LearningNote {
+    const db = openNotesDatabase(this.stateDir);
+    try {
+      const row = db.sqlite.prepare("select * from learning_notes where workspace_root = ? and id = ?")
+        .get(workspaceRoot, noteId) as LearningNoteRow | undefined;
+      if (!row) throw new Error(`Unknown learning note in this workspace: ${noteId}`);
+      return rowToNote(row);
+    } finally {
+      db.close();
+    }
+  }
+
+  /** Digest exposes the actual outcomes rather than pretending that tool
+   * traces can explain root causes without GPT's analysis. */
+  review(workspaceRoot: string): {
+    notes: LearningNote[];
+    failures: LearningEpisode[];
+    verifiedChecks: VerifiedProcedureSuggestion[];
+  } {
+    const db = openDatabase(this.stateDir);
+    try {
+      const failures = (db.sqlite.prepare(`select * from learning_episodes
+        where workspace_root = ? and success = 0 and not ${LEGACY_UNVERIFIED_DISPATCH_SQL}
+        order by created_at desc limit 12`).all(workspaceRoot) as LearningEpisodeRow[])
+        .map(rowToEpisode);
+      return { notes: this.listNotes(workspaceRoot, 12),
+        failures, verifiedChecks: this.suggestVerifiedProcedures(workspaceRoot, 5) };
+    } finally {
+      db.close();
     }
   }
 
@@ -429,8 +655,8 @@ export class LearningStore {
     return this.getCandidate(workspaceRoot, candidateId);
   }
 
-  stats(workspaceRoot: string): { episodes: number; successful: number; candidates: number; promoted: number } {
-    const database = openDatabase(this.stateDir);
+  stats(workspaceRoot: string): { episodes: number; successful: number; notes: number; candidates: number; promoted: number } {
+    const database = openNotesDatabase(this.stateDir);
     try {
       const episode = database.sqlite.prepare(`
         select count(*) as total,
@@ -441,9 +667,12 @@ export class LearningStore {
         select count(*) as total, sum(case when status = 'promoted' then 1 else 0 end) as promoted
         from learning_candidates where workspace_root = ?
       `).get(workspaceRoot) as { total: number; promoted: number | null };
+      const notes = database.sqlite.prepare("select count(*) as total from learning_notes where workspace_root = ?")
+        .get(workspaceRoot) as { total: number };
       return {
         episodes: episode.total,
         successful: episode.successful ?? 0,
+        notes: notes.total,
         candidates: candidate.total,
         promoted: candidate.promoted ?? 0,
       };
@@ -490,6 +719,38 @@ interface LearningCandidateRow {
   skill_path: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface LearningNoteRow {
+  id: string;
+  workspace_root: string;
+  task_key: string;
+  source: LearningNote["source"];
+  title: string;
+  outcome: string;
+  summary: string;
+  root_cause: string | null;
+  resolution_json: string;
+  lessons_json: string;
+  checks_json: string;
+  next_steps_json: string;
+  evidence_json: string;
+  created_at: string;
+  updated_at: string;
+}
+
+function rowToNote(row: LearningNoteRow): LearningNote {
+  return {
+    id: row.id, workspaceRoot: row.workspace_root, taskKey: row.task_key,
+    source: row.source, title: row.title, outcome: row.outcome,
+    summary: row.summary, rootCause: row.root_cause ?? undefined,
+    resolution: JSON.parse(row.resolution_json) as string[],
+    lessons: JSON.parse(row.lessons_json) as string[],
+    checks: JSON.parse(row.checks_json) as string[],
+    nextSteps: JSON.parse(row.next_steps_json) as string[],
+    evidenceEpisodeIds: JSON.parse(row.evidence_json) as string[],
+    createdAt: row.created_at, updatedAt: row.updated_at,
+  };
 }
 
 function rowToEpisode(row: LearningEpisodeRow): LearningEpisode {
@@ -540,7 +801,7 @@ function summarizeInput(tool: string, value: unknown): string {
   return truncate(redactSecrets(JSON.stringify(summary)), MAX_INPUT_CHARS);
 }
 
-function summarizeOutput(value: unknown): string {
+function summarizeOutput(value: unknown, tool?: string): string {
   const result = recordValue(value);
   const structured = recordValue(result.structuredContent);
   const primary = typeof structured.result === "string"
@@ -548,6 +809,22 @@ function summarizeOutput(value: unknown): string {
     : Array.isArray(result.content)
       ? result.content.map((item) => recordValue(item).text).filter((item): item is string => typeof item === "string").join("\n")
       : JSON.stringify(structured);
+  if (tool === "show_changes" && typeof structured.reviewRef === "string" && /^[a-f0-9]{40,64}$/.test(structured.reviewRef)) {
+    const card = recordValue(recordValue(result._meta).card);
+    const summary = recordValue(card.summary);
+    const numbers = [summary.files, summary.additions, summary.removals];
+    if (numbers.every((v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v < 10_000_000)) {
+      const files = Array.isArray(card.files) ? card.files : [];
+      const paths = files.slice(0, 50).map((f) => recordValue(f).path)
+        .filter((v): v is string => typeof v === "string" && v.length > 0 && v.length < 4096)
+        .map((p) => createHash("sha256").update(p).digest("hex").slice(0, 20));
+      const usage = { reviewRef: structured.reviewRef, files: numbers[0], additions: numbers[1], removals: numbers[2],
+        pathHashes: paths, pathsComplete: files.length === numbers[0] && paths.length === files.length && files.length <= 50 };
+      // Only numeric Git counts and hashed filenames are retained; never the patch body.
+      // This is a snapshot of reviewed changes, not a claim of successful task completion.
+      return truncate(redactSecrets(`${primary.slice(0, 160)}\n@@synrex-usage:${JSON.stringify(usage)}`), MAX_OUTPUT_CHARS);
+    }
+  }
   return truncate(redactSecrets(primary || "ok"), MAX_OUTPUT_CHARS);
 }
 

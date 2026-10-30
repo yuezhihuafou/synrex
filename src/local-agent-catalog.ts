@@ -28,7 +28,8 @@ export function buildLocalAgentProviderStatuses(
   config: SubagentsConfig,
   availability: readonly LocalAgentProviderAvailability[],
 ): LocalAgentProviderStatus[] {
-  return LOCAL_AGENT_PROVIDERS.map((id) => {
+  const ids = new Set([...LOCAL_AGENT_PROVIDERS, ...config.providers.map((entry) => entry.id)]);
+  return [...ids].map((id) => {
     const configured = config.providers.find((entry) => entry.id === id);
     const live = availability.find((entry) => entry.name === id);
     const enabled = configured?.enabled === true;

@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "Synrex Browser Trace",
+  "version": "0.3.0",
+  "description": "Locally correlate browser request metadata with Synrex diagnostics.",
+  "permissions": ["webRequest", "storage"],
+  "host_permissions": ["https://chatgpt.com/*", "https://chat.openai.com/*"],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{"matches": ["https://devspace.yuezhihuafou.dpdns.org/console*"], "js": ["bridge.js"]}]
+}

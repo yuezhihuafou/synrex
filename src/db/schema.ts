@@ -147,6 +147,25 @@ export const localAgentSessions = sqliteTable(
   ],
 );
 
+export const localAgentEvents = sqliteTable(
+  "local_agent_events",
+  {
+    seq: integer("seq").primaryKey({ autoIncrement: true }),
+    agentId: text("agent_id").notNull().references(() => localAgentSessions.id, { onDelete: "cascade" }),
+    at: text("at").notNull(),
+    kind: text("kind").notNull(),
+    label: text("label"),
+    durationMs: integer("duration_ms"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    thinkingTokens: integer("thinking_tokens"),
+    cacheReadTokens: integer("cache_read_tokens"),
+    totalTokens: integer("total_tokens"),
+    outputBytes: integer("output_bytes"),
+  },
+  (table) => [index("local_agent_events_agent_seq_idx").on(table.agentId, table.seq)],
+);
+
 export const executionNodes = sqliteTable(
   "execution_nodes",
   {

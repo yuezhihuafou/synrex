@@ -68,6 +68,19 @@ class FakeManager implements LocalAgentDaemonManager {
     return Result.ok([record]);
   }
 
+  events(_id: string, _scope: { workspaceId: string; workspaceRoot: string }) {
+    return Result.ok([{ seq: 1, agentId: record.id, at: "now", kind: "turn_started" as const }]);
+  }
+
+  stats(_scope: { workspaceId: string; workspaceRoot: string }) {
+    return Result.ok({
+      sessions: 1, running: 1, completed: 0, failed: 0,
+      turns: 0, successfulTurns: 0, failedTurns: 0, durationMs: 0,
+      inputTokens: null, outputTokens: null, thinkingTokens: null,
+      cacheReadTokens: null, totalTokens: null, outputBytes: null, byProvider: {},
+    });
+  }
+
   async evictIdle(): Promise<void> {}
 
   async close(): Promise<void> {
@@ -88,6 +101,10 @@ const client = new LocalAgentClient({
   requestTimeoutMs: 2_000,
   spawnDaemon: () => { void daemon.start(); },
 });
+
+// The same authenticated RPC surface serves bounded live events and aggregate statistics.
+const eventsBeforeStart = manager.events(record.id, { workspaceId: "ws_test", workspaceRoot: record.workspaceRoot });
+assert.equal(eventsBeforeStart.isOk(), true);
 
 const missingDaemonStateDir = join(root, "missing-daemon-state");
 let diagnosticSpawnCount = 0;
@@ -199,6 +216,8 @@ try {
   const recordScope = { workspaceId: record.workspaceId!, workspaceRoot: record.workspaceRoot };
   assert.equal(unwrap(await client.get(record.id, recordScope)).id, record.id);
   assert.equal(unwrap(await client.list(recordScope))[0]?.id, record.id);
+  assert.equal(unwrap(await client.events(record.id, recordScope))[0]?.kind, "turn_started");
+  assert.equal(unwrap(await client.stats(recordScope)).sessions, 1);
   assert.equal(unwrap(await client.status()).state, "ready");
 
   unwrap(await client.stop());
@@ -365,10 +384,10 @@ const upgradeClient = new LocalAgentClient({
   },
 });
 try {
-  assert.equal(unwrap(await upgradeClient.ensureReady()).protocolVersion, 3);
+  assert.equal(unwrap(await upgradeClient.ensureReady()).protocolVersion, LOCAL_AGENT_DAEMON_PROTOCOL_VERSION);
   assert.equal(replacementSpawns, 1);
   assert.equal(spawnedBeforeLegacyLockReleased, false);
-  assert.deepEqual(legacyMethods.slice(0, 3), ["hello:3", "hello:1", "daemon.stop:1"]);
+  assert.deepEqual(legacyMethods.slice(0, 3), ["hello:" + LOCAL_AGENT_DAEMON_PROTOCOL_VERSION, "hello:1", "daemon.stop:1"]);
 } finally {
   legacyLock.release();
   await replacementDaemon.close();
@@ -561,7 +580,7 @@ try {
 
   const unauthorized = await sendRawRequest(socketDaemon.paths.endpoint, JSON.stringify({
     requestId: "unauthorized",
-    protocolVersion: 3,
+    protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
     authToken: "wrong-secret",
     method: "hello",
     params: {},

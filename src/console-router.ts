@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
 import type { ServerConfig } from "./config.js";
-import { readConsoleSnapshot } from "./console-snapshot.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { readOtelFileTail } from "./otel-file-reader.js";
 import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
@@ -198,15 +197,6 @@ function serveConsoleHtml(config: ServerConfig, hostHeader: string | undefined):
 </head><body><div id="app"></div></body></html>`;
 }
 
-function actualRelease(): string {
-  const manifest = path.resolve(fileURLToPath(new URL("../release-manifest.json", import.meta.url)));
-  if (!existsSync(manifest)) return "development";
-  try {
-    const parsed = JSON.parse(readFileSync(manifest, "utf8")) as { release?: string };
-    return parsed.release ?? "development";
-  } catch { return "development"; }
-}
-
 /**
  * Separate browser session from MCP OAuth. No arbitrary command execution or
  * editable data routes. This console intentionally has no access to model host
@@ -315,18 +305,19 @@ export function registerSynrexConsole(app: Express, config: ServerConfig, servic
     try {
       const file=path.join(config.stateDir,"observability","console-snapshot.json");
       if(existsSync(file)){
-        const snap=JSON.parse(readFileSync(file,"utf8")) as {generatedAt?:string};
+        const snap=JSON.parse(readFileSync(file,"utf8")) as {generatedAt?:string;sourceHealth?:{available:boolean}};
         const age=Date.now()-Date.parse(snap.generatedAt??"");
         if(Number.isFinite(age)){
           res.setHeader("X-Synrex-Snapshot-Age-Ms",String(Math.max(0,Math.round(age))));
-          res.json({...snap,snapshotAgeMs:age,snapshotStale:age>45000});
+          res.json({...snap,snapshotAgeMs:age,snapshotStale:age>45000||snap.sourceHealth?.available===false});
           return;
         }
       }
-      // Bootstrap/fault fallback, not the steady state. Never silently label
-      // a missing worker as a current sample.
-      res.json({...readConsoleSnapshot(config.stateDir,actualRelease()),
-        snapshotStale:true,snapshotMode:"inline_fallback"});
+      // Never build a snapshot synchronously on the owner MCP HTTP thread.
+      // The independent collector owns DB/log/system queries. Missing output is
+      // an explicit degraded state rather than a deceptively fresh fallback.
+      res.setHeader("Cache-Control", "no-store");
+      res.status(503).json({ error: "Console snapshot collector unavailable", snapshotStale: true });
     } catch {
       res.status(503).json({ error: "Status data temporarily unavailable" });
     }

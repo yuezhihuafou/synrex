@@ -18,6 +18,10 @@ import {
   resolveLocalAgentTarget,
 } from "./local-agent-targets.js";
 import {
+  type LocalAgentEvent,
+  type LocalAgentEventData,
+  type LocalAgentEventKind,
+  type LocalAgentStats,
   type LocalAgentRecord,
   type LocalAgentStore,
   type LocalAgentWorkspaceScope,
@@ -30,7 +34,15 @@ import {
   type LocalAgentWriteMode,
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
-import { assertAllowedPath } from "./roots.js";
+import {
+  LocalAgentContextPacks, type AgentContextRequest, type AgentContextMetrics,
+} from "./local-agent-context-pack.js";
+import {
+  captureAgentGit,
+  LocalAgentEvidenceStore,
+  type AgentGitObservation,
+} from "./local-agent-evidence.js";
+import { authorizeAgentWorkspaceRoot, type ManagedWorktreeAuthorization } from "./managed-worktree-authorization.js";
 import {
   isSubagentProviderEnabled,
   type SubagentsConfig,
@@ -44,12 +56,14 @@ export interface StartLocalAgentInput {
   model?: string;
   effort?: string;
   writeMode?: LocalAgentWriteMode;
+  context?: AgentContextRequest;
 }
 
 export interface RunOverrides {
   model?: string;
   effort?: string;
   writeMode?: LocalAgentWriteMode;
+  context?: AgentContextRequest;
 }
 
 export interface LocalAgentManagerLogger {
@@ -63,8 +77,11 @@ export interface LocalAgentManagerOptions {
   loadProfiles: (workspaceRoot: string) => Promise<LocalAgentProfile[]>;
   agentDir?: string;
   allowedRoots?: readonly string[];
+  managedWorktrees?: ManagedWorktreeAuthorization;
   logger?: LocalAgentManagerLogger;
   subagents: SubagentsConfig;
+  evidenceStore?: LocalAgentEvidenceStore;
+  contextPacks?: LocalAgentContextPacks;
 }
 
 export type AgentStartError = AgentTargetError | AgentScopeError | AgentConflictError | AgentStoreError;
@@ -84,8 +101,11 @@ export class LocalAgentManager {
   private readonly loadProfiles: (workspaceRoot: string) => Promise<LocalAgentProfile[]>;
   private readonly agentDir?: string;
   private readonly allowedRoots?: readonly string[];
+  private readonly managedWorktrees?: ManagedWorktreeAuthorization;
   private readonly logger?: LocalAgentManagerLogger;
   private readonly subagents: SubagentsConfig;
+  private readonly evidenceStore?: LocalAgentEvidenceStore;
+  private readonly contextPacks?: LocalAgentContextPacks;
   private readonly activeTurns = new Map<string, Promise<void>>();
   private accepting = true;
   private closePromise?: Promise<void>;
@@ -97,8 +117,11 @@ export class LocalAgentManager {
     this.loadProfiles = options.loadProfiles;
     this.agentDir = options.agentDir;
     this.allowedRoots = options.allowedRoots;
+    this.managedWorktrees = options.managedWorktrees;
     this.logger = options.logger;
     this.subagents = options.subagents;
+    this.evidenceStore = options.evidenceStore;
+    this.contextPacks = options.contextPacks;
   }
 
   reconcileActiveRuns(message?: string): BetterResult<number, AgentStoreError> {
@@ -153,6 +176,7 @@ export class LocalAgentManager {
         model: target.model,
         effort: target.effort,
         writeMode: input.writeMode,
+        context: input.context,
       }, input.workspaceId);
     });
   }
@@ -180,6 +204,7 @@ export class LocalAgentManager {
   get(
     agentId: string,
     scope: LocalAgentWorkspaceScope,
+    options: { includeEvidence?: boolean; evidenceRef?: string } = {},
   ): BetterResult<LocalAgentRecord, AgentLookupError> {
     const lookup = this.store.getByIdResult(agentId);
     if (lookup.isErr()) return lookup;
@@ -187,7 +212,26 @@ export class LocalAgentManager {
     if (!record) return Result.err(agentNotFound(agentId));
     const scoped = this.agentWorkspaceResult(record, scope, "get");
     if (scoped.isErr()) return scoped;
-    return Result.ok(record);
+    if (!this.evidenceStore) return Result.ok(record);
+    try {
+      const evidenceSummary = this.evidenceStore.latest(record.id);
+      if (!evidenceSummary) return Result.ok(record);
+      return Result.ok({
+        ...record,
+        evidenceSummary,
+        ...(options.includeEvidence ? {
+          evidence: this.evidenceStore.read(record.id, options.evidenceRef ?? evidenceSummary.ref),
+        } : {}),
+      });
+    } catch (error) {
+      this.log("warn", "local_agent_evidence_read_failed", {
+        agentId: record.id, error: errorMessage(error),
+      });
+      if (options.includeEvidence) {
+        return Result.err(new AgentStoreError("read_agent_evidence", error));
+      }
+      return Result.ok(record);
+    }
   }
 
   list(scope: LocalAgentWorkspaceScope): BetterResult<LocalAgentRecord[], AgentListError> {
@@ -196,6 +240,18 @@ export class LocalAgentManager {
         workspaceId: scope.workspaceId,
         workspaceRoot,
       })
+    ));
+  }
+
+  events(agentId: string, scope: LocalAgentWorkspaceScope, afterSeq = 0, limit = 100): BetterResult<LocalAgentEvent[], AgentLookupError> {
+    const existing = this.get(agentId, scope);
+    if (existing.isErr()) return existing;
+    return this.store.listEventsResult(agentId, afterSeq, limit);
+  }
+
+  stats(scope: LocalAgentWorkspaceScope): BetterResult<LocalAgentStats, AgentListError> {
+    return this.authorizeWorkspace(scope.workspaceRoot, scope.workspaceId, "stats").andThen((workspaceRoot) => (
+      this.store.statsResult({ workspaceId: scope.workspaceId, workspaceRoot })
     ));
   }
 
@@ -256,6 +312,7 @@ export class LocalAgentManager {
       errorRetryable: undefined,
     });
     if (updated.isErr()) return updated;
+    this.recordEvent(record.id, "turn_started", { label: record.provider });
     // Defer invocation until after the tracking entry is visible. This keeps
     // cleanup correct even if runTurn later gains a synchronous completion path.
     const turn = Promise.resolve().then(() => (
@@ -273,6 +330,8 @@ export class LocalAgentManager {
     workspaceId?: string,
   ): Promise<void> {
     const startedAt = Date.now();
+    let beforeGit: AgentGitObservation | undefined;
+    let contextMetrics: AgentContextMetrics | undefined;
     this.log("info", "agent_run_started", {
       provider: record.provider,
       agentId: record.id,
@@ -285,6 +344,7 @@ export class LocalAgentManager {
         return;
       }
       const workspaceRoot = authorized.value;
+      beforeGit = this.evidenceStore ? captureAgentGit(workspaceRoot) : undefined;
       const authorizedRecord = workspaceRoot === record.workspaceRoot
         ? record
         : { ...record, workspaceRoot };
@@ -302,6 +362,35 @@ export class LocalAgentManager {
       if (input.isErr()) {
         this.persistRunError(record, input.error, startedAt);
         return;
+      }
+      if (overrides.context) {
+        try {
+          if (!this.contextPacks) throw new Error("Subagent context pack support is not configured.");
+          const compiled = await this.contextPacks.build({
+            workspaceRoot, query: prompt, request: overrides.context,
+          });
+          contextMetrics = compiled.metrics;
+          input.value.prompt = input.value.prompt + "\n\n" + compiled.pack.rendered;
+          this.log("info", "agent_context_pack_prepared", {
+            agentId: record.id, ...contextMetrics,
+          });
+        } catch (error) {
+          const reason = errorMessage(error).slice(0, 400);
+          this.saveEvidence(record, {
+            outcome: "failed", startedAt, beforeGit, workspaceRoot,
+            error: "Context preparation rejected: " + reason,
+          });
+          const persisted = this.store.updateResult(record.id, {
+            status: "error",
+            error: "Context preparation rejected: " + reason,
+            errorCode: "CONTEXT_PREPARATION_FAILED",
+            errorRetryable: false,
+          });
+          this.log("warn", "agent_context_pack_failed", {
+            agentId: record.id, error: reason, persistenceFailed: persisted.isErr(),
+          });
+          return;
+        }
       }
       const driver = this.driverResult(record.provider, "run", record.id);
       if (driver.isErr()) {
@@ -325,17 +414,30 @@ export class LocalAgentManager {
           if (!current.value || current.value.providerSessionId === providerSessionId) return;
           const updated = this.store.updateResult(record.id, { providerSessionId });
           if (updated.isErr()) throw updated.error;
+          this.recordEvent(record.id, "session_saved");
+        },
+        onEvent: (event) => {
+          this.recordEvent(record.id, "progress", { label: event.label, ...event.usage });
         },
       };
       const result = await this.pool.run(driver.value, context, input.value, callbacks);
       if (result.isErr()) {
-        this.persistRunError(record, result.error, startedAt);
+        this.persistRunError(record, result.error, startedAt, beforeGit);
         return;
       }
       const runResult = result.value;
       const current = this.store.getByIdResult(record.id);
       if (current.isErr()) throw current.error;
       if (!current.value) return;
+      this.saveEvidence(record, {
+        outcome: "completed",
+        startedAt,
+        beforeGit,
+        workspaceRoot,
+        response: runResult.finalResponse,
+        items: runResult.items,
+        context: contextMetrics,
+      });
       const updated = this.store.updateResult(record.id, {
         providerSessionId: runResult.providerSessionId ?? current.value.providerSessionId,
         status: "idle",
@@ -345,6 +447,11 @@ export class LocalAgentManager {
         errorRetryable: undefined,
       });
       if (updated.isErr()) throw updated.error;
+      this.recordEvent(record.id, "turn_completed", {
+        durationMs: Math.max(0, Date.now() - startedAt),
+        outputBytes: runResult.outputBytes,
+        ...runResult.usage,
+      });
       this.log("info", "agent_run_completed", {
         provider: updated.value.provider,
         agentId: updated.value.id,
@@ -353,14 +460,24 @@ export class LocalAgentManager {
       });
     } catch (error) {
       if (isLocalAgentError(error)) {
-        this.persistRunError(record, error, startedAt);
+        this.persistRunError(record, error, startedAt, beforeGit);
         return;
       }
+      this.saveEvidence(record, {
+        outcome: "failed", startedAt, beforeGit,
+        workspaceRoot: record.workspaceRoot,
+        error: "Unexpected internal subagent failure.",
+        context: contextMetrics,
+      });
       const persisted = this.store.updateResult(record.id, {
         status: "error",
         error: "Unexpected internal subagent failure.",
         errorCode: "AGENT_INTERNAL_ERROR",
         errorRetryable: false,
+      });
+      this.recordEvent(record.id, "turn_failed", {
+        durationMs: Math.max(0, Date.now() - startedAt),
+        label: "AGENT_INTERNAL_ERROR",
       });
       this.log("error", "agent_run_failed", {
         provider: record.provider,
@@ -381,12 +498,25 @@ export class LocalAgentManager {
     record: LocalAgentRecord,
     error: LocalAgentError,
     startedAt: number,
+    beforeGit?: AgentGitObservation,
   ): void {
+    this.saveEvidence(record, {
+      outcome: "failed", startedAt, beforeGit,
+      workspaceRoot: record.workspaceRoot,
+      error: error.message,
+      ...("cause" in error && error.cause ? {
+        items: [{ type: "provider_error_details", cause: error.cause }],
+      } : {}),
+    });
     const persisted = this.store.updateResult(record.id, {
       status: "error",
       error: error.message,
       errorCode: error.code,
       errorRetryable: error.retryable,
+    });
+    this.recordEvent(record.id, "turn_failed", {
+      durationMs: Math.max(0, Date.now() - startedAt),
+      label: error.code,
     });
     this.log("error", "agent_run_failed", {
       provider: record.provider,
@@ -398,6 +528,51 @@ export class LocalAgentManager {
       causeType: safeCauseType("cause" in error ? error.cause : undefined),
       persistenceFailed: persisted.isErr(),
     });
+  }
+
+  private recordEvent(agentId: string, kind: LocalAgentEventKind, data: LocalAgentEventData = {}): void {
+    const result = this.store.appendEventResult(agentId, kind, data);
+    if (result.isErr()) {
+      this.log("warn", "agent_event_write_failed", { agentId, kind, error: result.error.message });
+    }
+  }
+
+  private saveEvidence(
+    record: LocalAgentRecord,
+    input: {
+      outcome: "completed" | "failed";
+      startedAt: number;
+      workspaceRoot: string;
+      beforeGit?: AgentGitObservation;
+      response?: string;
+      error?: string;
+      items?: unknown[];
+      context?: AgentContextMetrics;
+    },
+  ): void {
+    if (!this.evidenceStore) return;
+    try {
+      this.evidenceStore.save({
+        agentId: record.id,
+        provider: record.provider,
+        workspaceRoot: input.workspaceRoot,
+        model: record.model,
+        startedAt: new Date(input.startedAt).toISOString(),
+        outcome: input.outcome,
+        response: input.response,
+        error: input.error,
+        items: input.items,
+        context: input.context,
+        gitBefore: input.beforeGit,
+        gitAfter: input.beforeGit ? captureAgentGit(input.workspaceRoot) : undefined,
+      });
+    } catch (error) {
+      // Evidence write failure does not falsify the provider's execution
+      // result or prevent essential agent status persistence.
+      this.log("warn", "local_agent_evidence_write_failed", {
+        agentId: record.id, error: errorMessage(error),
+      });
+    }
   }
 
   private buildRunInputResult(
@@ -462,15 +637,6 @@ export class LocalAgentManager {
     operation: string,
     agentId?: string,
   ): BetterResult<LocalAgentDriver, AgentTargetError> {
-    if (!isLocalAgentProvider(provider)) {
-      return Result.err(new AgentTargetError({
-        code: "PROVIDER_NOT_CONFIGURED",
-        target: provider,
-        operation,
-        retryable: false,
-        message: `No local agent driver is configured for provider: ${provider}.`,
-      }));
-    }
     const driver = this.drivers.get(provider);
     if (!driver) {
       return Result.err(new AgentTargetError({
@@ -490,7 +656,6 @@ export class LocalAgentManager {
     target: string,
     operation: string,
   ): BetterResult<void, AgentTargetError> {
-    if (!isLocalAgentProvider(provider)) return Result.ok(undefined);
     if (isSubagentProviderEnabled(this.subagents, provider)) return Result.ok(undefined);
     return Result.err(new AgentTargetError({
       code: "PROVIDER_DISABLED",
@@ -524,7 +689,12 @@ export class LocalAgentManager {
     const normalized = resolve(workspaceRoot);
     if (!workspaceId || !this.allowedRoots) return Result.ok(normalized);
     try {
-      return Result.ok(assertAllowedPath(normalized, [...this.allowedRoots]));
+      return Result.ok(authorizeAgentWorkspaceRoot({
+        workspaceRoot: normalized,
+        workspaceId,
+        allowedRoots: this.allowedRoots,
+        managedWorktrees: this.managedWorktrees,
+      }));
     } catch (cause) {
       return Result.err(new AgentScopeError({
         code: "WORKSPACE_NOT_ALLOWED",
@@ -580,7 +750,9 @@ export class LocalAgentManager {
     event: string,
     fields: Record<string, unknown>,
   ): void {
-    this.logger?.(level, event, fields);
+    // Agent state transitions must not depend on an optional telemetry sink.
+    // In particular, the first run-start log precedes the turn's try/finally.
+    try { this.logger?.(level, event, fields); } catch { /* observational */ }
   }
 }
 

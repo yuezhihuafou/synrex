@@ -18,6 +18,7 @@ import type {
 } from "./local-agent-runtime.js";
 import { LocalAgentRuntimePool } from "./local-agent-runtime-pool.js";
 import { LocalAgentStore } from "./local-agent-store.js";
+import { LocalAgentEvidenceStore } from "./local-agent-evidence.js";
 import type { SubagentsConfig } from "./local-agent-config.js";
 
 const root = await mkdtemp(join(tmpdir(), "devspace-agent-manager-test-"));
@@ -126,6 +127,7 @@ store.update(stale.id, { status: "running", latestResponse: "previous response" 
 
 const manager = new LocalAgentManager({
   store,
+  evidenceStore: new LocalAgentEvidenceStore(stateDir),
   drivers: [driver],
   pool: new LocalAgentRuntimePool(),
   loadProfiles: async () => [profile, disabledProfile],
@@ -223,6 +225,10 @@ assert.equal(getRecord(stale.id).latestResponse, "previous response");
 assert.equal(getRecord(stale.id).error, "Synrex restarted while this agent turn was running.");
 assert.equal(getRecord(stale.id).errorCode, "DAEMON_UNAVAILABLE");
 assert.equal(getRecord(stale.id).errorRetryable, true);
+const staleEvents = unwrap(manager.events(stale.id, scope));
+assert.deepEqual(staleEvents.map((event) => event.kind), ["turn_failed"]);
+assert.equal(staleEvents[0]?.label, "DAEMON_UNAVAILABLE");
+assert.equal(unwrap(manager.stats(scope)).failedTurns, 1);
 
 const first = unwrap(await manager.start({
   target: "reviewer",
@@ -243,6 +249,12 @@ if (conflict.isErr()) {
 
 runtimes.get(first.id)!.release();
 await waitFor(() => getRecord(first.id).status === "idle");
+const evidenceAfterFirst = unwrap(manager.get(first.id, scope, { includeEvidence: true }));
+assert.equal(evidenceAfterFirst.evidenceSummary?.outcome, "completed");
+assert.equal(evidenceAfterFirst.evidence?.agentId, first.id);
+assert.equal(evidenceAfterFirst.evidence?.outcome, "completed");
+assert.equal(evidenceAfterFirst.evidence?.answerPreview?.includes("hold"), true);
+const stableEvidenceRef = evidenceAfterFirst.evidenceSummary!.ref;
 assert.equal(getRecord(first.id).providerSessionId, "thread_test");
 assert.match(getRecord(first.id).latestResponse ?? "", /Task:\nhold/);
 
@@ -252,6 +264,10 @@ const continued = unwrap(await manager.continue(first.id, "continue", {
 }, scope));
 assert.equal(continued.status, "running");
 await waitFor(() => getRecord(first.id).status === "idle");
+const historicalEvidence = unwrap(manager.get(first.id, scope, {
+  includeEvidence: true, evidenceRef: stableEvidenceRef,
+}));
+assert.equal(historicalEvidence.evidence?.ref, stableEvidenceRef, "old evidence remains addressable");
 assert.equal(getRecord(first.id).model, "gpt-run");
 assert.equal(getRecord(first.id).effort, "high");
 
@@ -272,6 +288,7 @@ const failed = unwrap(await manager.start({
   workspaceRoot: root,
 }));
 await waitFor(() => getRecord(failed.id).status === "error");
+assert.equal(unwrap(manager.get(failed.id, scope, { includeEvidence: true })).evidence?.outcome, "failed");
 assert.equal(getRecord(failed.id).error, "provider failed");
 assert.equal(getRecord(failed.id).errorCode, "PROVIDER_EXECUTION_ERROR");
 assert.equal(getRecord(failed.id).errorRetryable, false);
@@ -352,6 +369,23 @@ assert.equal(runtimes.get(shuttingDown.id)?.closed, true);
 await closing;
 
 await manager.close();
+const noisyStore = new LocalAgentStore(join(root, "noisy-logger-state"));
+const noisyManager = new LocalAgentManager({
+  store: noisyStore,
+  drivers: [driver],
+  pool: new LocalAgentRuntimePool({ logger: () => { throw new Error("runtime telemetry unavailable"); } }),
+  logger: () => { throw new Error("manager telemetry unavailable"); },
+  loadProfiles: async () => [profile],
+  allowedRoots: [root],
+  subagents,
+});
+const noisyAgent = unwrap(await noisyManager.start({
+  target: "reviewer", prompt: "logger errors should not stop work",
+  workspaceId: scope.workspaceId, workspaceRoot: root,
+}));
+await waitFor(() => unwrap(noisyManager.get(noisyAgent.id, scope)).status === "idle");
+assert.equal(noisyManager.activeTurnCount, 0, "logging failure cannot strand an active agent turn");
+await noisyManager.close();
 await rm(root, { recursive: true, force: true });
 await rm(directRoot, { recursive: true, force: true });
 

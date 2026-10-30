@@ -1,10 +1,11 @@
 import * as z from "zod/v4";
+import { basename } from "node:path";
 import {
   ArchitectureModelManager,
   type ArchitectureContract,
   type ArchitectureIssue,
 } from "./architecture-model.js";
-import { LearningStore, type LearningCandidate, type LearningEpisode } from "./learning-store.js";
+import { LearningStore, type LearningCandidate, type LearningEpisode, type LearningNote } from "./learning-store.js";
 import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
 import { logToolCall, textBlock } from "./tool-surfaces/shared.js";
 import {
@@ -15,7 +16,7 @@ const PROJECT_ACTIONS = [
   "help",
   "arch_init", "arch_brief", "arch_affected", "arch_validate", "arch_refresh",
   "arch_annotate", "arch_policy", "arch_change_open", "arch_change_close", "arch_render",
-  "learn_recall", "learn_suggest", "learn_distill", "learn_candidates", "learn_promote", "learn_reject", "learn_stats",
+  "learn_recall", "learn_review", "learn_record", "learn_suggest", "learn_distill", "learn_candidates", "learn_promote", "learn_reject", "learn_stats",
 ] as const;
 type ProjectAction = typeof PROJECT_ACTIONS[number];
 
@@ -45,7 +46,7 @@ export function registerProjectIntelligenceTools(
     "project",
     {
       title: "Project",
-      description: "Architecture governance and validated workflow learning.",
+      description: "Project architecture and development learning.",
       inputSchema: {
         workspaceId: z.string(),
         action: z.string().min(1).max(80).describe("Project action. Use action=help to discover supported operations."),
@@ -91,10 +92,20 @@ export function registerProjectIntelligenceTools(
       const trigger = optionalString(values, "trigger", 1_000);
       const procedure = optionalStringArray(values, "procedure", 50, 2_000);
       const evidenceEpisodeIds = optionalStringArray(values, "evidenceEpisodeIds", 50, 200);
+      const noteId = optionalString(values, "noteId", 200);
+      const taskKey = optionalString(values, "taskKey", 200);
+      const outcome = optionalString(values, "outcome", 40);
+      const rootCause = optionalString(values, "rootCause", 1_200);
+      const resolution = optionalStringArray(values, "resolution", 30, 600);
+      const lessons = optionalStringArray(values, "lessons", 30, 600);
+      const checks = optionalStringArray(values, "checks", 30, 600);
+      const nextSteps = optionalStringArray(values, "nextSteps", 30, 600);
       const candidateId = optionalString(values, "candidateId", 200);
       const validationNote = optionalString(values, "validationNote", 2_000);
       const status = optionalCandidateStatus(values, "status");
       const detail = optionalBoolean(values, "detail");
+      // Opt-in only: a different worktree is not the current workspace.
+      const includeProjectWorktrees = optionalBoolean(values, "includeProjectWorktrees") ?? false;
       let result: string;
       let details: Record<string, unknown> = { action };
 
@@ -102,7 +113,7 @@ export function registerProjectIntelligenceTools(
         result = [
           "Architecture: arch_init, arch_brief(target), arch_affected(paths), arch_validate(semanticEvidence?), arch_refresh, arch_change_open(intent, paths, architectureChange?, rationale?), arch_annotate(changeId + target + summary/contracts/tags), arch_policy(changeId + acyclic/maxDepth/dependencyRules), arch_change_close(changeId), arch_render.",
           "Architecture intent is versioned in .devspace-architecture.json and protected: annotations and policies may change only inside an explicit architecture change with rationale. note contracts document intent; forbid_dependency/require_dependency contracts are executable.",
-          "Learning: learn_recall(query), learn_suggest, learn_distill(title, trigger, procedure, evidenceEpisodeIds?), learn_candidates(status?), learn_promote(candidateId, validationNote), learn_reject(candidateId, validationNote?), learn_stats. Suggested evidence is read-only; promotion requires a recent successful verification command explicitly named in the procedure.",
+          "Learning: learn_review(includeProjectWorktrees?), learn_record(taskKey,title,summary,outcome?,rootCause?,resolution?,lessons?,checks?,nextSteps?,evidenceEpisodeIds?), learn_recall(query,includeProjectWorktrees?), learn_suggest, learn_distill(title?,trigger?,procedure?,noteId?,evidenceEpisodeIds?), learn_candidates(status?), learn_promote(candidateId,validationNote), learn_reject(candidateId), learn_stats. Related worktree recall is explicit read-only self-reported context; it cannot act as verified evidence. Workflow checkpoints update self-reported notes. After a substantive task, review evidence and record root cause, fix and pitfalls. Skill promotion requires a recent successful command named in the procedure.",
           "Set detail=true to expand supported read results. Legacy args remains accepted for older hosts.",
         ].join("\n");
       } else if (projectAction === "arch_init") {
@@ -194,13 +205,59 @@ export function registerProjectIntelligenceTools(
         details = { ...details, ...rendered };
       } else if (projectAction === "learn_recall") {
         const recalled = learning.recall(workspace.root, query ?? "", 8);
-        result = formatRecall(recalled.episodes, recalled.candidates);
+        const siblingNotes = includeProjectWorktrees
+          ? learning.recallSiblingNotes(workspace.sourceRoot ?? workspace.root, workspace.root, query ?? "", 6)
+          : [];
+        result = [formatRecall(recalled.episodes, recalled.candidates, recalled.notes),
+          ...(includeProjectWorktrees ? [
+            `Related registered worktrees: ${siblingNotes.length} matching retrospective(s); summaries are self-reported, not verified command receipts.`,
+            ...siblingNotes.map((note) =>
+              `- related ${basename(note.workspaceRoot)} note ${note.id} [${note.outcome}] ${note.title}: ${compactLine(note.summary, 180)}`),
+          ] : [])].join("\n");
         details = {
           ...details,
           episodeIds: recalled.episodes.map((item) => item.id),
           candidateIds: recalled.candidates.map((item) => item.id),
-          ...(detail ? { detail: recalled } : {}),
+          noteIds: recalled.notes.map((item) => item.id),
+          ...(includeProjectWorktrees ? { relatedNoteIds: siblingNotes.map((item) => item.id) } : {}),
+          ...(detail ? { detail: { ...recalled, ...(includeProjectWorktrees ? { relatedNotes: siblingNotes } : {}) } } : {}),
         };
+      } else if (projectAction === "learn_review") {
+        const review = learning.review(workspace.root);
+        const siblingNotes = includeProjectWorktrees
+          ? learning.recallSiblingNotes(workspace.sourceRoot ?? workspace.root, workspace.root, "", 6)
+          : [];
+        result = [
+          `Recent retrospectives: ${review.notes.length}; failed execution episodes: ${review.failures.length}; repeatable verified checks: ${review.verifiedChecks.length}.`,
+          ...review.notes.slice(0, 8).map((note) =>
+            `- note ${note.id} [${note.outcome}, ${note.source}] ${note.title}: ${compactLine(note.summary, 180)}`),
+          ...review.failures.slice(0, 6).map((ep) =>
+            `- failure ${ep.id} ${ep.tool} ${compactLine(ep.inputSummary, 90)} => ${compactLine(ep.outputSummary, 140)}`),
+          ...review.verifiedChecks.map((item) =>
+            `- check ${item.command}: ${item.occurrences} verified runs; episodes ${item.evidenceEpisodeIds.join(",")}`),
+          ...(includeProjectWorktrees ? [
+            `Related registered worktrees: ${siblingNotes.length} retrospective(s), read-only and unverified.`,
+            ...siblingNotes.map((note) =>
+              `- related ${basename(note.workspaceRoot)} note ${note.id} [${note.outcome}] ${note.title}: ${compactLine(note.summary, 160)}`),
+          ] : []),
+          "Evidence is execution history, not an inferred root cause. Use learn_record to save verified insights; cite episode IDs where available.",
+        ].join("\n");
+        details = { ...details, noteCount: review.notes.length, failureCount: review.failures.length,
+          ...(includeProjectWorktrees ? { relatedNoteIds: siblingNotes.map((note) => note.id) } : {}),
+          ...(detail ? { detail: { ...review, ...(includeProjectWorktrees ? { relatedNotes: siblingNotes } : {}) } } : {}) };
+      } else if (projectAction === "learn_record") {
+        if (!taskKey || !title || !summary) {
+          throw new Error("project learn_record requires taskKey, title and summary.");
+        }
+        const note = learning.recordNote({
+          workspaceRoot: workspace.root,
+          taskKey: `reflection:${taskKey}`,
+          source: "reflection",
+          title, outcome: outcome ?? "unknown", summary, rootCause,
+          resolution, lessons, checks, nextSteps, evidenceEpisodeIds,
+        });
+        result = `Retrospective ${note.id} saved (outcome=${note.outcome}; ${note.evidenceEpisodeIds.length} cited episode(s)). Recall it with learn_recall; optional Skill candidate via learn_distill(noteId).`;
+        details = { ...details, noteId: note.id, ...(detail ? { detail: { note } } : {}) };
       } else if (projectAction === "learn_suggest") {
         const suggestions = learning.suggestVerifiedProcedures(workspace.root, 5);
         result = suggestions.length
@@ -209,15 +266,25 @@ export function registerProjectIntelligenceTools(
         details = { ...details, suggestionCount: suggestions.length,
           ...(detail ? { detail: { suggestions } } : {}) };
       } else if (projectAction === "learn_distill") {
-        if (!title || !trigger || !procedure?.length) {
-          throw new Error("project learn_distill requires title, trigger, and procedure.");
+        const note = noteId ? learning.getNote(workspace.root, noteId) : undefined;
+        const distilledTitle = title ?? note?.title;
+        const distilledTrigger = trigger ?? (note ? `Use when addressing: ${note.title}.` : undefined);
+        const distilledProcedure = procedure?.length ? procedure : note
+          ? [...note.resolution, ...note.lessons, ...note.checks.map((item) => `Verify: ${item}`)]
+          : undefined;
+        const selectedEvidence = evidenceEpisodeIds?.length ? evidenceEpisodeIds : note?.evidenceEpisodeIds;
+        if (note && !selectedEvidence?.length) {
+          throw new Error("A retrospective is not verified evidence by itself. Cite successful execution episode IDs when distilling a note.");
+        }
+        if (!distilledTitle || !distilledTrigger || !distilledProcedure?.length) {
+          throw new Error("project learn_distill requires title, trigger, and procedure, or a structured noteId with reusable steps.");
         }
         const candidate = learning.distill({
           workspaceRoot: workspace.root,
-          title,
-          trigger,
-          procedure,
-          evidenceEpisodeIds,
+          title: distilledTitle,
+          trigger: distilledTrigger,
+          procedure: distilledProcedure,
+          evidenceEpisodeIds: selectedEvidence,
         });
         result = `Candidate ${candidate.id} distilled from ${candidate.evidenceEpisodeIds.length} supporting episode(s). Evidence count is not a reliability probability; validate before promotion.`;
         details = {
@@ -254,7 +321,7 @@ export function registerProjectIntelligenceTools(
         details = { ...details, candidateId: candidate.id, status: candidate.status, ...(detail ? { detail: { candidate } } : {}) };
       } else {
         const stats = learning.stats(workspace.root);
-        result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.candidates} candidates, ${stats.promoted} promoted.`;
+        result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.notes} retrospectives, ${stats.candidates} candidates, ${stats.promoted} promoted.`;
         details = { ...details, stats };
       }
 
@@ -305,8 +372,11 @@ function formatAffected(changedPaths: string[], moduleIds: string[]): string {
   return `Changed paths: ${boundedList(changedPaths)}\nAffected modules: ${boundedList(moduleIds, 40)}`;
 }
 
-function formatRecall(episodes: LearningEpisode[], candidates: LearningCandidate[]): string {
-  const lines = [`Recall: ${episodes.length} episode(s), ${candidates.length} candidate(s).`];
+function formatRecall(episodes: LearningEpisode[], candidates: LearningCandidate[], notes: LearningNote[]): string {
+  const lines = [`Recall: ${episodes.length} episode(s), ${notes.length} retrospective(s), ${candidates.length} candidate(s).`];
+  for (const note of notes.slice(0, 5)) {
+    lines.push(`- note ${note.id} [${note.outcome}] ${note.title}: ${compactLine(note.summary, 180)}; root cause: ${compactLine(note.rootCause ?? "not established", 150)}; lesson: ${compactLine(note.lessons.join("; "), 190)}`);
+  }
   for (const candidate of candidates.slice(0, 5)) {
     lines.push(`- candidate ${candidate.id} [${candidate.status}, evidence=${candidate.evidenceEpisodeIds.length}] ${candidate.title}: ${candidate.trigger}`);
   }

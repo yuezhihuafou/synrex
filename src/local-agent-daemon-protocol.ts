@@ -1,5 +1,7 @@
 import type {
   LocalAgentRecord,
+  LocalAgentEvent,
+  LocalAgentStats,
   LocalAgentStatus,
   LocalAgentWorkspaceScope,
 } from "./local-agent-store.js";
@@ -8,6 +10,7 @@ import type {
   StartLocalAgentInput,
 } from "./local-agent-manager.js";
 import type { LocalAgentWriteMode } from "./local-agent-runtime.js";
+import type { AgentContextRequest } from "./local-agent-context-pack.js";
 import { LOCAL_AGENT_DAEMON_PROTOCOL_VERSION } from "./local-agent-daemon-lifecycle.js";
 
 export type LocalAgentDaemonMethod =
@@ -16,6 +19,8 @@ export type LocalAgentDaemonMethod =
   | "agent.continue"
   | "agent.get"
   | "agent.list"
+  | "agent.events"
+  | "agent.stats"
   | "daemon.status"
   | "daemon.stop"
   | "daemon.logs";
@@ -24,8 +29,13 @@ export type LocalAgentDaemonRequest =
   | AgentDaemonRequestBase<"hello", Record<string, never>>
   | AgentDaemonRequestBase<"agent.start", StartLocalAgentInput>
   | AgentDaemonRequestBase<"agent.continue", { id: string; prompt: string; scope: LocalAgentWorkspaceScope; overrides?: RunOverrides }>
-  | AgentDaemonRequestBase<"agent.get", { id: string; scope: LocalAgentWorkspaceScope }>
+  | AgentDaemonRequestBase<"agent.get", {
+      id: string; scope: LocalAgentWorkspaceScope;
+      includeEvidence?: boolean; evidenceRef?: string;
+    }>
   | AgentDaemonRequestBase<"agent.list", LocalAgentWorkspaceScope>
+  | AgentDaemonRequestBase<"agent.events", { id: string; scope: LocalAgentWorkspaceScope; afterSeq?: number; limit?: number }>
+  | AgentDaemonRequestBase<"agent.stats", LocalAgentWorkspaceScope>
   | AgentDaemonRequestBase<"daemon.status", Record<string, never>>
   | AgentDaemonRequestBase<"daemon.stop", Record<string, never>>
   | AgentDaemonRequestBase<"daemon.logs", { lines?: number }>;
@@ -123,6 +133,9 @@ export function decodeLocalAgentDaemonRequest(value: unknown): LocalAgentDaemonR
         params: {
           id: requiredString(asRecord(params)?.id, "id"),
           scope: decodeWorkspaceScope(asRecord(params)?.scope),
+          ...(asRecord(params)?.includeEvidence === true ? { includeEvidence: true } : {}),
+          ...(optionalString(asRecord(params)?.evidenceRef)
+            ? { evidenceRef: optionalString(asRecord(params)?.evidenceRef) } : {}),
         },
       } as LocalAgentDaemonRequest;
     case "agent.list":
@@ -133,6 +146,28 @@ export function decodeLocalAgentDaemonRequest(value: unknown): LocalAgentDaemonR
         method,
         params: decodeListScope(params),
       } as LocalAgentDaemonRequest;
+    case "agent.events": {
+      const paramsRecord = asRecord(params);
+      const afterSeq = paramsRecord?.afterSeq;
+      const limit = paramsRecord?.limit;
+      if (afterSeq !== undefined && (!Number.isSafeInteger(afterSeq) || (afterSeq as number) < 0)) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "afterSeq must be a non-negative integer.");
+      }
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || (limit as number) < 1 || (limit as number) > 500)) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "limit must be between 1 and 500.");
+      }
+      return {
+        requestId, protocolVersion, authToken, method,
+        params: {
+          id: requiredString(paramsRecord?.id, "id"),
+          scope: decodeWorkspaceScope(paramsRecord?.scope),
+          afterSeq: afterSeq as number | undefined,
+          limit: limit as number | undefined,
+        },
+      };
+    }
+    case "agent.stats":
+      return { requestId, protocolVersion, authToken, method, params: decodeWorkspaceScope(params) };
     case "daemon.logs":
       return {
         requestId,
@@ -192,6 +227,12 @@ export function decodeAgentRecord(value: unknown): LocalAgentRecord {
     error: optionalContentString(record?.error),
     errorCode: optionalString(record?.errorCode),
     errorRetryable: optionalBoolean(record?.errorRetryable),
+    ...(asRecord(record?.evidenceSummary) ? {
+      evidenceSummary: record!.evidenceSummary as LocalAgentRecord["evidenceSummary"],
+    } : {}),
+    ...(asRecord(record?.evidence) ? {
+      evidence: record!.evidence as LocalAgentRecord["evidence"],
+    } : {}),
     createdAt: requiredString(record?.createdAt, "createdAt"),
     updatedAt: requiredString(record?.updatedAt, "updatedAt"),
   };
@@ -200,6 +241,32 @@ export function decodeAgentRecord(value: unknown): LocalAgentRecord {
 export function decodeAgentRecordList(value: unknown): LocalAgentRecord[] {
   if (!Array.isArray(value)) throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Daemon returned an invalid agent list.");
   return value.map(decodeAgentRecord);
+}
+
+export function decodeAgentEvents(value: unknown): LocalAgentEvent[] {
+  if (!Array.isArray(value)) throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Invalid agent event list.");
+  return value.map((value) => {
+    const event = asRecord(value);
+    if (!event) throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Invalid agent event.");
+    return {
+      ...event,
+      seq: requiredInteger(event.seq, "seq"),
+      agentId: requiredString(event.agentId, "agentId"),
+      at: requiredString(event.at, "at"),
+      kind: requiredString(event.kind, "kind"),
+    } as LocalAgentEvent;
+  });
+}
+
+export function decodeAgentStats(value: unknown): LocalAgentStats {
+  const result = asRecord(value);
+  if (!result || !asRecord(result.byProvider)) {
+    throw new LocalAgentDaemonProtocolError("INVALID_RESULT", "Invalid agent statistics.");
+  }
+  for (const key of ["sessions", "running", "completed", "failed", "turns", "successfulTurns", "failedTurns", "durationMs"]) {
+    requiredInteger(result[key], key);
+  }
+  return result as unknown as LocalAgentStats;
 }
 
 export function decodeDaemonStatus(value: unknown): LocalAgentDaemonStatus {
@@ -251,6 +318,7 @@ function decodeStartInput(value: unknown): StartLocalAgentInput {
     model: optionalString(record?.model),
     effort: optionalString(record?.effort),
     writeMode: decodeWriteMode(record?.writeMode),
+    context: decodeContextRequest(record?.context),
   };
 }
 
@@ -265,8 +333,41 @@ function decodeContinueInput(value: unknown): { id: string; prompt: string; scop
       model: optionalString(overrides.model),
       effort: optionalString(overrides.effort),
       writeMode: decodeWriteMode(overrides.writeMode),
+      context: decodeContextRequest(overrides.context),
     } } : {}),
   };
+}
+
+function decodeContextRequest(value: unknown): AgentContextRequest | undefined {
+  if (value === undefined) return undefined;
+  const data = asRecord(value);
+  if (!data) throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Context must be an object.");
+  if (Object.keys(data).some((key) => !["workflowId", "files", "memoryProject", "contextRef", "maxBytes"].includes(key))) {
+    throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Unknown context option.");
+  }
+  const out: AgentContextRequest = {};
+  for (const key of ["workflowId", "memoryProject", "contextRef"] as const) {
+    if (data[key] !== undefined) {
+      if (typeof data[key] !== "string" || data[key].length > 512) {
+        throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Invalid context " + key + ".");
+      }
+      out[key] = data[key] as string;
+    }
+  }
+  if (data.files !== undefined) {
+    if (!Array.isArray(data.files) || data.files.length > 16 ||
+        data.files.some((file) => typeof file !== "string" || file.length > 300)) {
+      throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Invalid context file hints.");
+    }
+    out.files = data.files as string[];
+  }
+  if (data.maxBytes !== undefined) {
+    if (!Number.isInteger(data.maxBytes) || (data.maxBytes as number) < 2_000 || (data.maxBytes as number) > 20_000) {
+      throw new LocalAgentDaemonProtocolError("INVALID_PARAMS", "Invalid context byte budget.");
+    }
+    out.maxBytes = data.maxBytes as number;
+  }
+  return out;
 }
 
 function decodeWorkspaceScope(value: unknown): LocalAgentWorkspaceScope {

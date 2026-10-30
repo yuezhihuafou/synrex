@@ -76,7 +76,7 @@ try {
     [
       "---",
       "name: custom",
-      "description: Unsupported custom agent.",
+      "description: Configurable CLI agent.",
       "provider: custom",
       "---",
       "",
@@ -84,8 +84,9 @@ try {
       "",
     ].join("\n"),
   );
-  const profilesWithInvalid = await loadLocalAgentProfiles(enabledConfig, workspaceRoot);
-  assert.deepEqual(profilesWithInvalid.map((profile) => profile.name), ["reviewer"]);
+  const profilesWithCustom = await loadLocalAgentProfiles(enabledConfig, workspaceRoot);
+  assert.deepEqual(profilesWithCustom.map((profile) => profile.name), ["custom", "reviewer"]);
+  assert.equal(profilesWithCustom[0]?.provider, "custom");
 
   const disabledConfig = loadConfig(writeTestDevspaceConfig(configDir, {
     workspaces: { allowedRoots: [workspaceRoot] },

@@ -20,6 +20,30 @@ class FakeTransport implements NodeTransport {
   }
 }
 
+test("draining and offline gateway never reroute or replay new work; existing reads still work", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "synrex-peer-drain-"));
+  const store = new SqliteControlPlaneStore(dir);
+  t.after(async () => { store.close(); await rm(dir, {recursive:true,force:true}); });
+  const owner = store.ensureLocalNode({alias:"swy1",platform:{os:"linux",arch:"x64"},
+    capabilities:{toolMode:"codex",features:[],labels:{}}});
+  const peer = store.registerRemoteNode({id:"node_gateway_draining",alias:"gateway",
+    platform:{os:"linux",arch:"x64"},capabilities:{toolMode:"codex",features:[],labels:{}}});
+  const transport = new FakeTransport();
+  const router = new MultiNodeRouter(store, transport, owner.id);
+  const opened = await router.openWorkspace({node:peer.id, arguments:{path:"/gateway/project"}});
+  const workspaceId = (opened.structuredContent as {workspaceId:string}).workspaceId;
+  store.setNodeHealth(peer.id, "draining");
+  const read = await router.callWorkspaceTool({workspaceId,name:"read",arguments:{path:"README.md"}});
+  assert.equal((read.structuredContent as {ok:boolean}).ok, true);
+  await assert.rejects(()=>router.callWorkspaceTool({workspaceId,name:"exec_command",
+    arguments:{cmd:"touch unsafe"}}), /draining/);
+  assert.equal(transport.calls.filter(c=>c.input.name==="exec_command").length,0);
+  store.setNodeHealth(peer.id,"offline");
+  await assert.rejects(()=>router.callWorkspaceTool({workspaceId,name:"read",arguments:{path:"README.md"}}),
+    /remains pinned.*offline/);
+  assert.equal(transport.calls.filter(c=>c.input.name==="read").length,1);
+});
+
 test("router keeps host schema stable and rewrites only workspace identity", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "devspace-router-"));
   const store = new SqliteControlPlaneStore(stateDir);

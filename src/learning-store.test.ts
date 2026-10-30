@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { openDatabase } from "./db/client.js";
 import { LearningStore } from "./learning-store.js";
+import { SqliteWorkspaceStore } from "./workspace-store.js";
 
 test("learning store recalls bounded traces and redacts common secrets", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "devspace-learning-"));
@@ -23,6 +24,123 @@ test("learning store recalls bounded traces and redacts common secrets", async (
   assert.equal(recall.episodes[0]?.success, true);
   assert.doesNotMatch(recall.episodes[0]?.outputSummary ?? "", /super-secret-value/);
   assert.match(recall.episodes[0]?.outputSummary ?? "", /REDACTED/);
+});
+
+test("development retrospectives persist, update idempotently and stay workspace-scoped", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-retrospective-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const workspaceRoot = join(root, "project");
+  const store = new LearningStore(stateDir);
+  const first = store.recordNote({
+    workspaceRoot, taskKey: "workflow:wf_123", source: "workflow",
+    title: "Debug flaky checks", outcome: "active", summary: "Diagnosis in progress.",
+    checks: ["pnpm test (self-reported)"],
+  });
+  const finished = store.recordNote({
+    workspaceRoot, taskKey: "workflow:wf_123", source: "workflow",
+    title: "Debug flaky checks", outcome: "completed",
+    summary: "Fixed intermittent test runner crash.",
+    rootCause: "Unexpected timeout token=super-secret-value",
+    resolution: ["Use bounded wait."],
+    lessons: ["Check terminal receipts before claiming completion."],
+    checks: ["pnpm test"],
+  });
+  assert.equal(first.id, finished.id, "repeated workflow checkpoints update one note");
+  const db = openDatabase(stateDir);
+  try {
+    const row = db.sqlite.prepare("select max(version) as version from devspace_schema_migrations")
+      .get() as { version: number };
+    assert.equal(row.version, 11, "optional notes must not break older pinned releases with a new migration version");
+  } finally { db.close(); }
+  assert.equal(store.stats(workspaceRoot).notes, 1);
+  assert.equal(store.listNotes(workspaceRoot)[0]?.outcome, "completed");
+  assert.doesNotMatch(finished.rootCause ?? "", /super-secret-value/);
+  assert.match(finished.rootCause ?? "", /REDACTED/);
+  const recall = new LearningStore(stateDir).recall(workspaceRoot, "intermittent test");
+  assert.equal(recall.notes.length, 1, "notes survive new LearningStore instances");
+  assert.deepEqual(store.listNotes(join(root, "other")), []);
+  assert.equal(store.review(workspaceRoot).notes.length, 1);
+});
+
+test("explicit sibling recall uses registered source checkout and never merges unrelated worktrees", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-learning-siblings-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const stateDir = join(root, "state");
+  const source = join(root, "synrex-repo");
+  const otherSource = join(root, "other-repo");
+  const current = join(root, "worktrees", "chat-a");
+  const related = join(root, "worktrees", "chat-b");
+  const unrelated = join(root, "worktrees", "unrelated");
+  const sessions = new SqliteWorkspaceStore(stateDir);
+  try {
+    sessions.createSession({ id: "ws_a", root: current, sourceRoot: source, mode: "worktree", managed: true });
+    sessions.createSession({ id: "ws_b", root: related, sourceRoot: source, mode: "worktree", managed: true });
+    sessions.createSession({ id: "ws_b_dup", root: related, sourceRoot: source, mode: "worktree", managed: true });
+    sessions.createSession({ id: "ws_foreign", root: unrelated, sourceRoot: otherSource, mode: "worktree", managed: true });
+  } finally { sessions.close(); }
+  const learning = new LearningStore(stateDir);
+  learning.recordNote({
+    workspaceRoot: current, taskKey: "own", source: "reflection", title: "Own check",
+    outcome: "active", summary: "Only in current chat",
+  });
+  learning.recordNote({
+    workspaceRoot: related, taskKey: "peer", source: "reflection", title: "Timeout recovery",
+    outcome: "completed", summary: "Investigated timeout and restored the long-running task",
+  });
+  learning.recordNote({
+    workspaceRoot: source, taskKey: "source", source: "reflection", title: "Source checkout rollback",
+    outcome: "completed", summary: "Verified rollback from an original project checkout",
+  });
+  learning.recordNote({
+    workspaceRoot: unrelated, taskKey: "foreign", source: "reflection", title: "Foreign timeout",
+    outcome: "completed", summary: "Different project has its own timeout",
+  });
+  assert.equal(learning.recall(current, "timeout").notes.length, 0,
+    "default learning recall must stay in the current workspace");
+  const relevant = learning.recallSiblingNotes(source, current, "timeout");
+  assert.deepEqual(relevant.map((note) => note.title), ["Timeout recovery"],
+    "a duplicate session must not duplicate a retrospective");
+  assert.deepEqual(learning.recallSiblingNotes(source, current, "unrelated"), [],
+    "other repositories cannot be queried through sibling recall");
+  assert.equal(learning.recallSiblingNotes(source, current, "").length, 2,
+    "notes from the canonical checkout and sibling worktrees are both available");
+  const retention = new SqliteWorkspaceStore(stateDir);
+  try {
+    const pruned = retention.markSessionPruned("ws_b");
+    assert.equal(pruned.isErr(), false);
+  } finally { retention.close(); }
+  assert.equal(learning.recallSiblingNotes(source, current, "timeout").length, 1,
+    "pruning a worktree must not erase its project learning history");
+});
+
+test("retrospective records cite local failures but cannot forge skill validation", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-reflection-evidence-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new LearningStore(join(root, "state"));
+  const one = join(root, "one");
+  const two = join(root, "two");
+  store.recordToolCall({ workspaceRoot: one, tool: "exec_command",
+    toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { exitCode: 1, result: "failed" } } });
+  const failure = store.recall(one, "pnpm test").episodes[0]!;
+  assert.equal(failure.success, false);
+  assert.throws(() => store.recordNote({
+    workspaceRoot: two, taskKey: "first", source: "reflection",
+    title: "Wrong project", outcome: "failed", summary: "Failed", evidenceEpisodeIds: [failure.id],
+  }), /current workspace/i);
+  const note = store.recordNote({
+    workspaceRoot: one, taskKey: "retry", source: "reflection", title: "Repair tests",
+    outcome: "failed", summary: "The test command failed before a fix.",
+    rootCause: "Undetermined", lessons: ["Inspect the saved execution log."],
+    evidenceEpisodeIds: [failure.id],
+  });
+  assert.equal(note.evidenceEpisodeIds[0], failure.id);
+  assert.equal(store.review(one).failures[0]?.id, failure.id);
+  assert.throws(() => store.distill({ workspaceRoot: one, title: note.title,
+    trigger: "after failed tests", procedure: ["Run pnpm test."],
+    evidenceEpisodeIds: note.evidenceEpisodeIds,
+  }), /successful evidence/i, "failure evidence is useful for reflection, never sufficient for skill promotion");
 });
 
 test("learning candidate requires validation before promotion to a project skill", async (t) => {

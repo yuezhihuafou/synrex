@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { lstat, mkdir, realpath, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, readdir, readlink, realpath, rm, stat } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
 import { Result, TaggedError, type Result as BetterResult } from "better-result";
 import type { ServerConfig } from "./config.js";
@@ -65,10 +65,13 @@ export interface ManagedWorktreeCleanupResult {
     recoveryRef?: string;
     recoverySha?: string;
   }>;
+  /** Read-only preview: eligible clean, already-integrated worktrees. */
+  wouldRemove: string[];
   missing: string[];
   skipped: Array<{
     workspaceId: string;
-    reason: "untracked_files";
+    reason: "untracked_files" | "tracked_changes" | "unmerged_commits"
+      | "ignored_state" | "active_process" | "missing_path";
   }>;
   failed: Array<{
     workspaceId: string;
@@ -138,9 +141,14 @@ export async function cleanupManagedWorktrees(input: {
   worktreeRoot: string;
   allowedRoots: string[];
   staleBefore: Date;
+  /** Additional non-destructive gate: clean worktree whose HEAD is in origin/main. */
+  safeOnly?: boolean;
+  /** Never remove directories, update Git refs, or change persisted sessions. */
+  dryRun?: boolean;
 }): Promise<BetterResult<ManagedWorktreeCleanupResult, WorkspaceStoreError>> {
   const result: ManagedWorktreeCleanupResult = {
     removed: [],
+    wouldRemove: [],
     missing: [],
     skipped: [],
     failed: [],
@@ -166,8 +174,11 @@ export async function cleanupManagedWorktrees(input: {
       case "missing":
         result.missing.push(session.id);
         break;
+      case "eligible":
+        result.wouldRemove.push(session.id);
+        break;
       case "skipped":
-        result.skipped.push({ workspaceId: session.id, reason: "untracked_files" });
+        result.skipped.push({ workspaceId: session.id, reason: cleaned.value.reason });
         break;
     }
   }
@@ -270,19 +281,23 @@ type CleanupOutcome =
       entry: ManagedWorktreeCleanupResult["removed"][number];
     }
   | { kind: "missing" }
-  | { kind: "skipped" };
+  | { kind: "eligible" }
+  | { kind: "skipped"; reason: ManagedWorktreeCleanupResult["skipped"][number]["reason"] };
 
 async function cleanupManagedWorktree(input: {
   session: WorkspaceSession;
   store: WorkspaceStore;
   worktreeRoot: string;
   allowedRoots: string[];
+  safeOnly?: boolean;
+  dryRun?: boolean;
 }): Promise<BetterResult<CleanupOutcome, ManagedWorktreeFeatureError>> {
   const { session } = input;
 
   const prepared = await captureManagedWorktreeResult(session.id, "prune", async () => {
     const worktreePath = assertAllowedPath(session.root, [input.worktreeRoot]);
     if (!(await isDirectory(worktreePath))) {
+      if (input.dryRun) return { kind: "skipped", reason: "missing_path" } as const;
       return { kind: "missing" } as const;
     }
     if (!session.sourceRoot) {
@@ -296,10 +311,36 @@ async function cleanupManagedWorktree(input: {
       worktreePath,
     );
     if (status.split("\n").some((line) => line.startsWith("?? "))) {
-      return { kind: "skipped" } as const;
+      return { kind: "skipped", reason: "untracked_files" } as const;
     }
 
     const hasTrackedChanges = status.trim().length > 0;
+    if (input.safeOnly || input.dryRun) {
+      if (hasTrackedChanges) {
+        return { kind: "skipped", reason: "tracked_changes" } as const;
+      }
+      // An orphaned commit is still user work even if its tree is clean.
+      // Fail closed when origin/main is not available locally.
+      const unique = await git(
+        ["rev-list", "--count", "refs/remotes/origin/main..HEAD"],
+        worktreePath,
+      );
+      if (Number(unique.trim()) !== 0) {
+        return { kind: "skipped", reason: "unmerged_commits" } as const;
+      }
+      const ignored = await git(
+        ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=normal"],
+        worktreePath,
+      );
+      if (ignored.split("\n").some((line) => line.startsWith("!! ")
+        && !["!! dist/", "!! node_modules/"].includes(line.trim()))) {
+        return { kind: "skipped", reason: "ignored_state" } as const;
+      }
+      if (await isLiveProcessInWorktree(worktreePath)) {
+        return { kind: "skipped", reason: "active_process" } as const;
+      }
+      if (input.dryRun) return { kind: "eligible" } as const;
+    }
     const headSha = (await git(["rev-parse", "HEAD"], worktreePath)).trim();
     let recoverySha: string | undefined;
     let recoveryKind: WorkspaceRecoveryKind | undefined;
@@ -324,7 +365,10 @@ async function cleanupManagedWorktree(input: {
 
     // Revalidate immediately before the only destructive filesystem operation.
     await assertManagedWorktreePath(worktreePath, input.worktreeRoot);
-    await git(["worktree", "remove", "--force", worktreePath], sourceRoot);
+    // Recovery-aware pruning preserves legacy behavior. Conservative pruning
+    // must let Git refuse an unexpected new modification rather than forcing
+    // a race with another conversation's editor.
+    await git(["worktree", "remove", ...(input.safeOnly ? [] : ["--force"]), worktreePath], sourceRoot);
     return {
       kind: "removed",
       entry: { workspaceId: session.id, recoveryRef, recoverySha },
@@ -337,7 +381,9 @@ async function cleanupManagedWorktree(input: {
     const deleted = input.store.deleteSession(session.id);
     return deleted.isErr() ? deleted : Result.ok(prepared.value);
   }
-  if (prepared.value.kind === "skipped") return Result.ok(prepared.value);
+  if (prepared.value.kind === "skipped" || prepared.value.kind === "eligible") {
+    return Result.ok(prepared.value);
+  }
 
   const markedPruned = input.store.markSessionPruned(session.id, prepared.value.recoveryKind);
   if (markedPruned.isOk()) {
@@ -369,6 +415,19 @@ async function cleanupManagedWorktree(input: {
     ));
   }
   return Result.err(markedPruned.error);
+}
+
+async function isLiveProcessInWorktree(worktreePath: string): Promise<boolean> {
+  if (process.platform !== "linux") return false;
+  // Best-effort physical process check. A disappeared /proc entry is normal;
+  // unreadable /proc as a whole is treated as unsafe to prune.
+  const pids = await readdir("/proc");
+  for (const pid of pids) {
+    if (!/^\d+$/.test(pid)) continue;
+    const cwd = await readlink(`/proc/${pid}/cwd`).catch(() => undefined);
+    if (cwd && isPathInsideRoot(cwd, worktreePath)) return true;
+  }
+  return false;
 }
 
 function worktreeError(

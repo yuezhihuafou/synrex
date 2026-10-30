@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { access, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -16,6 +17,7 @@ import { createReviewCheckpointManager } from "./review-checkpoints.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { DurableTaskManager } from "./durable-tasks.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
+import { LearningStore } from "./learning-store.js";
 import { runDurableTask } from "./durable-task-runner.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { createMcpServer, createServer } from "./server.js";
@@ -23,6 +25,8 @@ import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 import { expectedToolNames } from "./tool-surface-manifest.js";
+import { EXECUTION_OUTCOME_LOOP } from "./execution-outcome-loop.js";
+import { FAILURE_CONTINUATION_HINT } from "./execution-outcome-loop.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,6 +57,91 @@ test("MCP initialization identifies Synrex and preserves the coding tool surface
   assert.ok(tools.tools.some((tool) => tool.name === "open_workspace"));
 });
 
+test("real MCP initialize delivers the goal-completion rule in both tool modes", async (t) => {
+  for (const mode of ["codex", "claude"] as const) {
+    await t.test(mode, async (nested) => {
+      const context = await fixture(nested, { toolMode: mode, uiEnabled: false });
+      const instruction = context.client.getInstructions() ?? "";
+      assert.ok(instruction.includes(EXECUTION_OUTCOME_LOOP), `${mode} MCP initialize must deliver the rule`);
+      assert.equal(instruction.split(EXECUTION_OUTCOME_LOOP).length, 2, "avoid duplicated instructions");
+      assert.match(instruction, /default to the NEXT authorized action/);
+      assert.match(instruction, /concrete external blocker or missing authority/);
+      assert.match(instruction, /stop condition is the original observable acceptance criteria/);
+    });
+  }
+});
+
+test("MCP supports a controlled failed command -> repair -> verified goal sequence", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true, uiEnabled: false });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const cmd = "test -f recovered.txt && grep -qx recovered recovered.txt";
+  const failed = await context.client.callTool({ name: "exec_command", arguments: { workspaceId, cmd } });
+  assert.notEqual(failed.isError, true, "nonzero command is data, not MCP failure");
+  assert.equal(structuredContent(failed).commandFailed, true);
+  assert.equal(typeof structuredContent(failed).runId, "string");
+  assert.notEqual(structuredContent(failed).exitCode, 0);
+  const repaired = await context.client.callTool({ name: "apply_patch", arguments: {
+    workspaceId, patch: "*** Begin Patch\n*** Add File: recovered.txt\n+recovered\n*** End Patch",
+  } });
+  assert.notEqual(repaired.isError, true, "repair must be applied through the normal tool");
+  const verified = await context.client.callTool({ name: "exec_command", arguments: { workspaceId, cmd } });
+  assert.notEqual(verified.isError, true, "the original acceptance command should now pass");
+  assert.equal(structuredContent(verified).exitCode, 0);
+});
+
+test("project learning can explicitly recall sibling ChatGPT worktree notes without granting cross-worktree promotion", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", git: true, uiEnabled: false });
+  const first = await context.client.callTool({
+    name: "open_workspace", arguments: { path: context.project, mode: "worktree" },
+  });
+  const second = await context.client.callTool({
+    name: "open_workspace", arguments: { path: context.project, mode: "worktree" },
+  });
+  assert.notEqual(first.isError, true, contentText(first));
+  assert.notEqual(second.isError, true, contentText(second));
+  const sourceId = structuredContent(first).workspaceId as string;
+  const targetId = structuredContent(second).workspaceId as string;
+  assert.notEqual(sourceId, targetId);
+  const added = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: sourceId, action: "learn_record",
+      args: { taskKey: "cross-chat-recovery", title: "Cross-chat recovery lesson",
+        summary: "Check task receipts before replaying uncertain commands.", outcome: "completed" },
+    },
+  });
+  assert.notEqual(added.isError, true, contentText(added));
+  const oldNoteId = structuredContent(added).noteId as string;
+  const defaultRecall = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_recall", args: { query: "recovery" },
+    },
+  });
+  assert.doesNotMatch(contentText(defaultRecall), /Cross-chat recovery lesson/);
+  const explicit = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_recall",
+      args: { query: "recovery", includeProjectWorktrees: true },
+    },
+  });
+  assert.notEqual(explicit.isError, true, contentText(explicit));
+  assert.match(contentText(explicit), /Cross-chat recovery lesson/);
+  assert.deepEqual(structuredContent(explicit).relatedNoteIds, [oldNoteId]);
+  const review = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_review",
+      args: { includeProjectWorktrees: true },
+    },
+  });
+  assert.notEqual(review.isError, true, contentText(review));
+  assert.match(contentText(review), /Cross-chat recovery lesson/);
+  const promotion = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId: targetId, action: "learn_distill", args: { noteId: oldNoteId },
+    },
+  });
+  assert.equal(promotion.isError, true, "read-only sibling recall must not grant write or promotion rights");
+});
+
 test("batch read preserves separate file ranges and existing single-file reads", async (t) => {
   const context = await fixture(t);
   await writeFile(join(context.project, "a.ts"), "alpha\nbeta\n");
@@ -70,6 +159,53 @@ test("batch read preserves separate file ranges and existing single-file reads",
   const original = await context.client.callTool({ name: "read", arguments: { workspaceId, path: "a.ts" } });
   assert.notEqual(original.isError, true);
   assert.match(String(structuredContent(original).result), /alpha/);
+});
+
+test("parallel MCP conversations preserve independent edits to the same checkout", async (t) => {
+  const context = await fixture(t, { toolMode: "codex" });
+  const a = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const b = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  assert.notEqual(a, b, "different conversations have distinct workspace identities");
+  const count = 20;
+  const original = Array.from({ length: count }, (_, i) => `unique-${i}`).join("\n") + "\n";
+  await writeFile(join(context.project, "parallel.txt"), original);
+  const results = await Promise.all(Array.from({ length: count }, (_, i) => context.client.callTool({
+    name: "apply_patch",
+    arguments: {
+      workspaceId: i % 2 ? a : b,
+      patch: `*** Begin Patch\n*** Update File: parallel.txt\n@@\n-unique-${i}\n+changed-${i}\n*** End Patch`,
+    },
+  })));
+  assert.equal(results.filter((result) => result.isError).length, 0);
+  assert.equal(await readFile(join(context.project, "parallel.txt"), "utf8"),
+    Array.from({ length: count }, (_, i) => `changed-${i}`).join("\n") + "\n");
+});
+
+test("MCP read delivers bounded visual evidence and preserves image blocks across batch reads", async t => {
+  const context = await fixture(t);
+  await copyFile(fileURLToPath(new URL("../docs/assets/v11-review-ui-before.png", import.meta.url)),
+    join(context.project, "screenshot.png"));
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const single = await context.client.callTool({ name: "read", arguments: { workspaceId, path: "screenshot.png" } });
+  assert.notEqual(single.isError, true);
+  const image = (single.content as Array<{ type: string; data?: string; mimeType?: string }>)
+    .find(item => item.type === "image");
+  assert.ok(image && typeof image.data === "string");
+  assert.equal(image.mimeType, "image/jpeg");
+  assert.ok(Buffer.from(image.data, "base64").length <= 120_000);
+  const meta = structuredContent(single).observation as { source: { kind: string; workspaceId: string }; previewOnly: boolean; imageCount: number };
+  assert.equal(meta.source.kind, "file.image");
+  assert.equal(meta.source.workspaceId, workspaceId);
+  assert.equal(meta.previewOnly, true);
+  assert.equal(meta.imageCount, 1);
+  const batch = await context.client.callTool({
+    name: "read", arguments: { workspaceId, files: [{ path: "screenshot.png" }] },
+  });
+  assert.notEqual(batch.isError, true);
+  assert.equal((batch.content as Array<{ type: string }>).filter(item => item.type === "image").length, 1);
+  const batchMeta = structuredContent(batch) as { observations: Array<{ path: string }> };
+  assert.equal(batchMeta.observations[0]?.path, "screenshot.png");
+  assert.ok(!JSON.stringify(structuredContent(batch)).includes(image.data));
 });
 
 test("MCP open_workspace records an actual chat title against a pseudonymous session", async (t) => {
@@ -129,6 +265,7 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
   });
   assert.notEqual(newWorkflow.isError, true);
   const created = structuredContent(newWorkflow);
+  assert.match(contentText(newWorkflow), /Acceptance: Tests pass/);
   const workflowId = created.workflowId as string;
   assert.match(workflowId, /^wf_[a-f0-9]{24}$/);
   const replayedCreate = await context.client.callTool({
@@ -140,6 +277,16 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
     },
   });
   assert.equal(structuredContent(replayedCreate).workflowId, workflowId);
+  const unjustifiedCompletion = await context.client.callTool({
+    name: "workflow_checkpoint",
+    arguments: {
+      workspaceId, workflowId, expectedRevision: 0, status: "completed",
+      phase: "done", summary: "Claimed without verification",
+      completedSteps: [], nextSteps: [], blockers: [], checks: [], taskIds: [],
+    },
+  });
+  assert.equal(unjustifiedCompletion.isError, true);
+  assert.match(contentText(unjustifiedCompletion), /without a recorded verification check/);
   const checkpoint = await context.client.callTool({
     name: "workflow_checkpoint",
     arguments: {
@@ -152,6 +299,79 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
   });
   assert.notEqual(checkpoint.isError, true);
   assert.equal(structuredContent(checkpoint).revision, 1);
+  const learning = new LearningStore(join(context.project, "..", ".state"));
+  const retrospective = learning.listNotes(context.project);
+  assert.equal(retrospective.length, 1, "workflow checkpoint creates a durable retrospective");
+  assert.equal(retrospective[0]?.outcome, "active");
+  assert.match(retrospective[0]?.summary ?? "", /starting tests/);
+  assert.deepEqual(retrospective[0]?.checks, ["pnpm typecheck: not run yet"]);
+  const review = await context.client.callTool({
+    name: "project", arguments: { workspaceId, action: "learn_review" },
+  });
+  assert.notEqual(review.isError, true);
+  assert.match(contentText(review), /P2 resume test/);
+  const captured = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_record",
+      args: { taskKey: "wait-for-test", title: "Avoid premature task completion",
+        summary: "Pending commands do not prove a passing test.", outcome: "partial",
+        rootCause: "Task handle only", lessons: ["Inspect terminal results."] },
+    },
+  });
+  assert.notEqual(captured.isError, true, contentText(captured));
+  assert.equal(learning.listNotes(context.project).length, 2);
+  const noteId = structuredContent(captured).noteId as string;
+  const noEvidence = await context.client.callTool({
+    name: "project", arguments: { workspaceId, action: "learn_distill", args: { noteId } },
+  });
+  assert.equal(noEvidence.isError, true, "retrospective text alone is not a verified Skill");
+  learning.recordToolCall({
+    workspaceRoot: context.project, tool: "exec_command",
+    toolInput: { cmd: "pnpm test" },
+    toolOutput: { structuredContent: { running: false, exitCode: 0, result: "passed" } },
+  });
+  const passed = learning.recall(context.project, "pnpm test").episodes.find((ep) => ep.success);
+  assert.ok(passed);
+  const refined = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_record", args: {
+        taskKey: "wait-for-test", title: "Avoid premature task completion",
+        summary: "Wait for a terminal command receipt.",
+        outcome: "completed", rootCause: "Task handle only",
+        resolution: ["Wait until the command finishes."],
+        lessons: ["Inspect terminal results."],
+        checks: ["pnpm test"],
+        evidenceEpisodeIds: [passed.id],
+      },
+    },
+  });
+  assert.notEqual(refined.isError, true, contentText(refined));
+  assert.equal(structuredContent(refined).noteId, noteId, "reflection updates are idempotent");
+  const distilled = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_distill", args: { noteId },
+    },
+  });
+  assert.notEqual(distilled.isError, true, contentText(distilled));
+  const candidateId = structuredContent(distilled).candidateId as string;
+  const promoted = await context.client.callTool({
+    name: "project", arguments: {
+      workspaceId, action: "learn_promote", args: {
+        candidateId, validationNote: "pnpm test passed in the selected workspace.",
+      },
+    },
+  });
+  assert.notEqual(promoted.isError, true, contentText(promoted));
+  assert.match(contentText(promoted), /promoted to \.agents\/skills\//);
+  // This test also asserts a clean Git handoff snapshot below. Verify the
+  // materialized Skill, then remove only the test-created file.
+  const skillPath = structuredContent(promoted).skillPath as string;
+  await access(join(context.project, skillPath));
+  await rm(join(context.project, skillPath));
+  const restored = await context.client.callTool({
+    name: "project", arguments: { workspaceId, action: "learn_recall", args: { query: "premature" } },
+  });
+  assert.match(contentText(restored), /Avoid premature task completion/);
   const stale = await context.client.callTool({
     name: "workflow_checkpoint",
     arguments: {
@@ -175,6 +395,8 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
     name: "workflow_status",
     arguments: { workspaceId: reopened.workspaceId, workflowId },
   });
+  assert.match(contentText(inspection), /Goal: Build and verify a code change/);
+  assert.match(contentText(inspection), /Acceptance: Tests pass/);
   assert.equal((structuredContent(inspection).history as unknown[]).length, 1);
   const handoff = structuredContent(inspection).handoff as {
     workspaceRoot: string;
@@ -196,6 +418,25 @@ test("GPT coding workflow checkpoints are resumable through MCP after a new work
   const changedHandoff = structuredContent(changed).handoff as typeof handoff;
   assert.equal(changedHandoff.checkpointGitMatchesCurrent, false);
   assert.match(changedHandoff.liveGit.gitStatus ?? "", /changed-after-checkpoint.txt/);
+});
+
+test("workflow listing uses bounded concise model text with full structured evidence retained", async(t)=>{
+  const context=await fixture(t,{toolMode:"codex",git:true});
+  const workspaceId=structuredContent(await callOpen(context.client,context.project)).workspaceId as string;
+  for(let i=0;i<8;i++){
+    const created=await context.client.callTool({name:"workflow_open",arguments:{
+      workspaceId, title:`Task ${i}`,goal:`Implement ${i} ${"specific requirement ".repeat(15)}`,
+      acceptanceCriteria:["real output validated","regression passed"],constraints:["no unsafe retries"]
+    }});
+    assert.notEqual(created.isError,true);
+  }
+  const listed=await context.client.callTool({name:"workflow_status",arguments:{workspaceId}});
+  const full=JSON.stringify(structuredContent(listed));
+  const preview=contentText(listed);
+  assert.match(preview,/next=/);
+  assert.ok(Buffer.byteLength(preview)<Buffer.byteLength(full)/2,
+    "model-facing response must be substantially smaller than full persisted records");
+  assert.equal((structuredContent(listed).workflows as unknown[]).length,8);
 });
 
 test("project tool exposes a typed stable schema while retaining legacy args", async (t) => {
@@ -243,7 +484,7 @@ test("model-facing file mutation tools cannot bypass protected architecture inte
   });
 });
 
-test("codex process failures expose MCP error state and exit code", async (t) => {
+test("codex process failures preserve structured exit evidence without MCP error", async (t) => {
   const context = await fixture(t, { toolMode: "codex" });
   const opened = structuredContent(await callOpen(context.client, context.project));
   const response = await context.client.callTool({
@@ -255,9 +496,45 @@ test("codex process failures expose MCP error state and exit code", async (t) =>
     },
   });
 
-  assert.equal(response.isError, true);
+  assert.notEqual(response.isError, true);
   assert.equal(structuredContent(response).exitCode, 7);
+  assert.equal(structuredContent(response).commandFailed, true);
+  assert.equal((structuredContent(response).failure as { kind:string }).kind, "indeterminate");
   assert.match(contentText(response), /expected-error/);
+  assert.match(contentText(response), /acceptance criteria remain unmet/);
+  assert.equal(structuredContent(response).result, contentText(response));
+});
+
+test("invalid MCP tool arguments remain protocol errors rather than shell result data", async(t)=>{
+  const context=await fixture(t,{toolMode:"codex"});
+  const response=await context.client.callTool({
+    name:"exec_command", arguments:{workspaceId:"ws_nonexistent",cmd:"printf must-not-run"},
+  });
+  assert.equal(response.isError,true);
+  assert.equal(response.structuredContent,undefined, "protocol failure has no completed shell receipt");
+});
+
+test("failed durable shell command remains structured data with repair-next hint", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const launched = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "sleep 2; printf 'expected-build-error\\n'; exit 13" },
+  });
+  const taskId = structuredContent(launched).taskId as string;
+  assert.match(taskId, /^task_[a-f0-9]{16}$/);
+  const terminal = await context.client.callTool({ name: "task_wait", arguments: { workspaceId, taskId, final: true } });
+  assert.equal(structuredContent(terminal).status, "completed");
+  assert.equal(structuredContent(terminal).exitCode, 13);
+  assert.notEqual(terminal.isError, true, "completed shell task with nonzero exit must remain readable to ChatGPT");
+  assert.equal(structuredContent(terminal).commandFailed, true);
+  assert.match(contentText(terminal), /acceptance criteria remain unmet/);
+  assert.match(contentText(terminal), /fix or alternative/);
+  assert.match(contentText(terminal), /Final command failed \(exit 13\)/);
+  assert.doesNotMatch(contentText(terminal), /Final dependency is completed/);
+  const observed = await context.client.callTool({ name: "task_get", arguments: { workspaceId, taskId } });
+  assert.notEqual(observed.isError, true);
+  assert.equal(structuredContent(observed).commandFailed, true);
+  assert.ok(contentText(observed).includes(FAILURE_CONTINUATION_HINT));
 });
 
 test("codex process tools keep wait and output budgets server-managed", async (t) => {
@@ -271,6 +548,27 @@ test("codex process tools keep wait and output budgets server-managed", async (t
     assert.equal("yieldTimeMs" in properties, false);
     assert.equal("maxOutputTokens" in properties, false);
   }
+});
+
+test("MCP task_get distinguishes output silence from runner heartbeat", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", durableTasks: true, git: true });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project)).workspaceId as string;
+  const launched = await context.client.callTool({
+    name: "exec_command", arguments: { workspaceId, cmd: "printf 'begin\\n'; sleep 8; printf 'end\\n'" },
+  });
+  const taskId = structuredContent(launched).taskId as string;
+  assert.match(taskId, /^task_[a-f0-9]{16}$/);
+  await new Promise((resolve) => setTimeout(resolve, 5_400));
+  const observed = await context.client.callTool({ name: "task_get", arguments: { workspaceId, taskId, detail: true } });
+  const state = structuredContent(observed);
+  assert.equal(state.status, "working");
+  const detail = state.detail as { lastActivityAt?: string; lastUpdatedAt?: string };
+  assert.equal(typeof detail.lastActivityAt, "string");
+  assert.ok(Date.parse(detail.lastUpdatedAt as string) - Date.parse(detail.lastActivityAt as string) > 3_000,
+    "task heartbeat should not reset time since stdout/stderr activity");
+  const terminal = await context.client.callTool({ name: "task_wait", arguments: { workspaceId, taskId, final: true } });
+  assert.equal(structuredContent(terminal).status, "completed");
+  assert.equal(structuredContent(terminal).exitCode, 0);
 });
 
 test("completion mailbox relays a finished background job only in the originating chat scope", async (t) => {
@@ -353,7 +651,7 @@ test("legacy final task command waits and reports a terminal final barrier recei
   assert.equal(result.status, "completed");
   assert.equal((result.finalBarrier as { stage: string; nextCheckMs: number }).stage, "terminal");
   assert.equal((result.finalBarrier as { nextCheckMs: number }).nextCheckMs, 0);
-  assert.match(contentText(settled), /verify logs and objective before completion/);
+  assert.match(contentText(settled), /verify the user's original acceptance criteria/);
 });
 
 test("codex tool surface stays compact without dropping capabilities", async (t) => {
@@ -680,6 +978,8 @@ test("task_wait completes durable commands without repeated host polling", async
   assert.equal(sixToolResult.status, "completed");
   assert.equal(sixToolResult.exitCode, 0);
   assert.equal(sixToolResult.runId, structuredContent(start).runId);
+  assert.match(sixToolResult.result as string, /wait-completed/);
+  assert.equal(sixToolResult.outputTruncated, false);
   const waited = await context.client.callTool({
     name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId },
   });
@@ -688,11 +988,31 @@ test("task_wait completes durable commands without repeated host polling", async
   assert.equal(result.status, "completed");
   assert.equal(result.exitCode, 0);
   assert.equal(result.unchanged, undefined);
+  assert.match(result.result as string, /wait-completed/);
   const terminal = await context.client.callTool({
     name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId, sinceRevision: result.revision },
   });
   assert.equal(structuredContent(terminal).status, "completed");
   assert.equal(structuredContent(terminal).unchanged, undefined);
+
+  const failed = await context.client.callTool({
+    name: "exec_command",
+    arguments: {
+      workspaceId: opened.workspaceId,
+      cmd: "sleep 2; node -e 'process.stderr.write(\"E\".repeat(4096))'; exit 7",
+    },
+  });
+  const failedTaskId = structuredContent(failed).taskId as string;
+  assert.match(failedTaskId, /^task_[0-9a-f]{16}$/);
+  const failedWait = await context.client.callTool({
+    name: "task_wait", arguments: { workspaceId: opened.workspaceId, taskId: failedTaskId },
+  });
+  const failedReceipt = structuredContent(failedWait);
+  assert.equal(failedReceipt.exitCode, 7);
+  assert.equal(failedReceipt.outputTruncated, true);
+  assert.match(failedReceipt.result as string, /Task output tail \(truncated\)/);
+  assert.match(failedReceipt.result as string, /Full log: devspace-log tail/);
+  assert.ok((failedReceipt.result as string).length < 2_500);
 });
 
 test("project tool keeps architecture results compact unless detail is requested", async (t) => {
@@ -1025,6 +1345,9 @@ test("open_workspace advertises subagent instructions on demand by default", asy
   const skills = opened.skills as Array<Record<string, unknown>>;
   assert.equal(skills.some((skill) => skill.name === "subagents"), true);
   assert.doesNotMatch(String(opened.instruction), /# Synrex subagents/);
+  assert.match(context.client.getInstructions() ?? "", /Delegate only when a separate bounded worker materially improves/);
+  assert.match(context.client.getInstructions() ?? "", /GPT owns requirements, architecture, decisions and final verification/);
+  assert.match(context.client.getInstructions() ?? "", /Agent completed means its turn ended, NEVER that the user's request is done/);
 });
 
 test("open_workspace preloads subagent instructions when configured", async (t) => {
@@ -1056,6 +1379,26 @@ test("open_workspace scopes checkout reuse to OpenAI session metadata", async (t
   assert.notEqual(structuredContent(unscoped).workspaceId, structuredContent(first).workspaceId);
   assert.ok(Array.isArray(structuredContent(otherSession).agentsFiles));
   assert.ok(Array.isArray(structuredContent(unscoped).agentsFiles));
+});
+
+test("reused and new ChatGPT sessions recover bounded original-goal context, not only a workspace ID", async(t)=>{
+  const context=await fixture(t,{toolMode:"codex",git:true});
+  const first=structuredContent(await callOpen(context.client,context.project,"goal-chat-A"));
+  const workspaceId=first.workspaceId as string;
+  const created=await context.client.callTool({name:"workflow_open",arguments:{
+    workspaceId,title:"Product repair",goal:"Deliver the working deployed artifact",
+    acceptanceCriteria:["Artifact is installed","Production smoke test passes"],constraints:[],
+  }});
+  assert.notEqual(created.isError,true);
+  const again=await callOpen(context.client,context.project,"goal-chat-A");
+  const reuseText=contentText(again);
+  assert.match(reuseText,/Deliver the working deployed artifact/);
+  assert.match(reuseText,/Artifact is installed/);
+  assert.match(reuseText,/ORIGINAL request/);
+  assert.ok(Buffer.byteLength(reuseText)<2500, "recovery should not dump a full project prompt");
+  const other=await callOpen(context.client,context.project,"goal-chat-B");
+  assert.match(contentText(other),/Deliver the working deployed artifact/);
+  assert.match(contentText(other),/candidate context only/);
 });
 
 test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) => {

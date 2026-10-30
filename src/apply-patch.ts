@@ -340,16 +340,22 @@ export async function isSamePatchFile(
   }
 }
 
-export async function applyPatch(root: string, patch: string): Promise<ApplyPatchResult> {
+export async function applyPatch(
+  root: string,
+  patch: string,
+  options: { beforeCommit?: () => Promise<void> } = {},
+): Promise<ApplyPatchResult> {
   const actions = parsePatch(patch);
   const results: AppliedPatchFile[] = [];
   const patches: string[] = [];
   const staged = new Map<string, StagedTextFile>();
+  const originals = new Map<string, StagedTextFile>();
 
   const readStagedOptional = async (absolute: string, displayPath: string): Promise<StagedTextFile> => {
     if (staged.has(absolute)) return staged.get(absolute) ?? null;
     const file = await readOptionalTextFile(absolute, displayPath);
     staged.set(absolute, file);
+    originals.set(absolute, file);
     return file;
   };
 
@@ -393,6 +399,18 @@ export async function applyPatch(root: string, patch: string): Promise<ApplyPatc
       staged.set(absolute, { content: updated, mode: file.mode });
       patches.push(unifiedFilePatch(action.path, action.path, file.content, updated));
       results.push({ path: action.path, operation: "update" });
+    }
+  }
+
+  // Preflight the entire patch before touching any destination. Another
+  // process (a shell, editor, or peer) may have changed a file after it was
+  // read. The in-process workspace gate closes the remaining file-tool race;
+  // this check detects out-of-band changes observed before commit.
+  await options.beforeCommit?.();
+  for (const [absolute, expected] of originals) {
+    const current = await readOptionalTextFile(absolute, relative(root, absolute));
+    if (current?.content !== expected?.content) {
+      throw patchError(`workspace changed concurrently: ${relative(root, absolute)}; inspect and rebase the patch before retrying`);
     }
   }
 

@@ -1,11 +1,55 @@
 # Synrex: product boundary and delivery roadmap
 
+**2026-10-27 Subagent delegation follow-up (source candidate):** The compact
+MCP task-level delegation rule and detailed managed Subagent Skill now favor
+bounded independent multi-file work, with explicit session/Context Pack reuse
+and isolated writer boundaries. Console reads local 24-hour MCP tool starts
+and Agent turn evidence by workspace, without falsely claiming per-user-task
+attribution or model-side token data. See
+`docs/decisions/20261027-subagent-delegation-console.md`; source integration,
+deployment and measured GPT-tool savings are separate gates.
+
+**2026-10-27 cross-conversation WIP review:** Recorded source-level reconciliation
+is in `docs/platform/CONVERSATION_WIP_INTEGRATION_REVIEW_20261027.md`.
+LearningStore now has an explicitly requested, bounded read-only
+`project learn_recall/learn_review` view for other registered worktrees
+sharing the same source checkout. Default isolation, verified evidence rules,
+the single-owner release model, and optional gateway placement remain
+unchanged. Git source publication and production activation are separate
+acceptance gates; this text alone does not claim deployment.
+
+The corresponding Console follow-up labels independent node/workflow/task/
+diagnostic/runtime last-activity timestamps separately from the snapshot
+refresh. Old `active` workflow checkpoints are history, not evidence of
+an actively executing system process; no background polling service is added.
+
+**2026-10-27 Git/worktree reconciliation:** The inspected, immutable swy1
+production source remains `126a63c` until an explicitly verified release
+switch. The regression and retention record is
+`docs/platform/WORKTREE_REGRESSION_RECONCILIATION_20261027.md`. A new
+source candidate adds safe worktree preview/pruning and a local concurrency
+regression benchmark without changing existing recovery-aware pruning.
+This statement is not a claim of production deployment of those additions.
+
+**2026-10-27 cross-worktree integration:** Worktree inventory and selected
+feature/repair candidates are recorded in
+`docs/platform/WORKTREE_INTEGRATION_AUDIT_20261027.md`. The integration
+preserves existing production/OAuth/Console behavior, adds optional project
+node bindings (empty by default), physical-workspace tool coordination and
+optimistic patch checks, and treats the Research Harness and old private QA
+assets as separate from Synrex Core. This paragraph describes source-level
+work; actual GitHub and production release identities must be verified from
+remote refs, pinned release manifests, and live tests rather than assumed.
+
 **2026-10-26 P0 implementation note:** Parallel-chat integration, ingress
 continuity and Tunnel/port ownership form one engineering effort. Consult
 `docs/platform/SYNREX_P0_CONTINUITY_INTEGRATION.md` for the measured baseline,
 read-only inventory tools, release-lock source and isolated ingress prototype.
-That source work is **not** a claim that the proxy or revised activation guard
-is already deployed on swy1's public ingress.
+The stable proxy has been deployed on swy1; Core listens privately on :7677,
+with the stable owner ingress on :7676. The promotion implementation also
+requires exact remote main + active production ancestry and immutable build
+verification. Git publication, candidate verification and production activation
+are separate observable states, not one implied action.
 
 ## Product identity
 
@@ -36,6 +80,28 @@ Synrex already contains React/Vite-based MCP App cards for workspace and change
 review. These are **not** a standalone browser Console. Reuse build tooling,
 design tokens, view models and safe utilities where sensible, but keep the
 host-embedded cards and management application as independent entrypoints.
+
+### Usage & Productivity Console candidate (2026-10-26)
+
+An isolated source candidate adds a read-only Usage & Productivity page to the
+standalone Console with 24h / 7d / 30d selection, UTC usage trends, tool ranking,
+workspace-specific Git review totals, and client-side CSV export. It reuses
+the owner-authenticated `/console/api/snapshot` route. A best-effort in-process
+observer batches **hourly MCP traffic counters** into supplemental tables in
+the existing owner SQLite database (without changing the versioned core DB
+migration chain); a separate table retains verified `show_changes` Git review
+snapshots and deduplicates `(workspace_root, review_ref)`. No new service, port,
+database, agent or OAuth authority is introduced. The feature cannot see
+ChatGPT's model identity, inference tokens or hidden conversation context.
+Only observed MCP payload byte counts are converted to an explicitly labeled
+rough text-token equivalent; missing content lengths remain unknown. Historical
+data before recording began can be incomplete, hourly 24h windows are only
+approximate, and Git review deltas measure snapshots, not validated task wins.
+
+**Delivery status:** source candidate, unit + authenticated HTTP snapshot tests,
+typecheck, and frontend build passed. No pinned-production promotion or real
+browser acceptance has yet occurred; the running Console must not be labeled
+updated until those gates pass.
 
 ## Revised execution order
 
@@ -322,6 +388,18 @@ evidence-to-intent semantic checks are still outside the verified milestone.
 The read-only `project learn_suggest` action lists repeated successful check
 commands and their supporting episode IDs, without creating or promoting
 skills. Suggestions are not proof of end-to-end productivity or correctness.
+
+**2026-10-26 source candidate (not a production-delivery claim):** Task-level
+retrospectives now have a project-scoped SQLite note index. Workflow checkpoints
+update a self-reported retrospective idempotently; GPT can call `project
+learn_review` and `learn_record` to preserve root causes, resolution steps,
+lessons, checks and evidence references. Recall includes notes alongside tool
+episodes and Skill candidates, including a read-only six-tool fallback.
+`learn_distill(noteId)` can draft a candidate from a retrospective when
+successful episode IDs are cited, but only the existing independently verified
+`learn_promote` can write a project Skill. See
+`docs/DEVELOPMENT_LEARNING.md`. Real-client deployment, semantic quality and
+reuse-versus-baseline improvement remain separate acceptance gates.
 
 **UI1: guarded owner operations**
 

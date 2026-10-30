@@ -30,3 +30,14 @@ test("legacy worker remains loadable with its previous peer transport", () => {
   assert.equal(config.cluster.role, "worker");
   assert.equal(joinsDirectory(config.cluster.role), true);
 });
+
+test("logical project binding config is validated and defaults empty", () => {
+  assert.deepEqual(devspaceConfigSchema.parse({ configVersion: 1 }).cluster.projectBindings, []);
+  const config = devspaceConfigSchema.parse({ configVersion: 1, cluster: {
+    projectBindings: [{ project: "synrex", node: "gateway", pathPrefix: "/home/swy/DevSpace" }],
+  } });
+  assert.equal(config.cluster.projectBindings[0]?.node, "gateway");
+  assert.equal(devspaceConfigSchema.safeParse({ configVersion: 1, cluster: {
+    projectBindings: [{ project: "synrex", node: "gateway" }],
+  } }).success, false);
+});

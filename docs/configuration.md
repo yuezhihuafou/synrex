@@ -262,14 +262,67 @@ Subagent providers are explicit. Omitted providers are disabled:
 Both modes only make the workflow available; neither tells the model to prefer
 subagents for routine work.
 
+### Generic headless CLI providers
+
+New headless tools can be registered through configuration instead of adding a
+TypeScript adapter for every vendor. For example, a CLI that accepts a model,
+session ID, prompt, and emits JSON lines with a final `result` event:
+
+```jsonc
+{
+  "subagents": {
+    "enabled": true,
+    "providers": [
+      { "id": "antigravity", "enabled": true, "model": "gemini-3.8-flash-medium" },
+      {
+        "id": "custom-agent",
+        "enabled": true,
+        "cli": {
+          "command": "/path/to/custom-agent",
+          "args": ["--output-format", "stream-json"],
+          "outputFormat": "stream-json",
+          "modelFlag": "--model",
+          "promptFlag": "--print",
+          "sessionFlag": "--conversation",
+          "successStatus": "SUCCESS",
+          "responseField": "response",
+          "sessionField": "conversation_id"
+        }
+      }
+    ]
+  }
+}
+```
+
+CLI arguments are passed directly, without a shell. The provider's streaming
+event names and usage counters are retained as bounded structured metadata,
+without recording raw model reasoning or entire tool outputs. `synrex agents
+events <id> [after-seq] --json` permits incremental polling; `synrex agents
+watch <id> --json` tails an active agent; `synrex agents stats --json` returns
+per-workspace turn outcomes, durations and **reported** token counts (`null`
+when the provider did not supply them). Data is stored in the existing Synrex
+SQLite database, not a second service.
+
+The bundled Antigravity profile uses the generic CLI driver, `agy` stream-json,
+and native `conversation_id` / `--conversation` continuation. It also uses a
+verified Linux mount namespace for filesystem isolation. Each AGY agent keeps
+a private state copy under `<stateDir>/subagent-cli-sessions/<agentId>` so
+resuming a conversation does not lose the CLI's local history; this copy may
+include authentication state. The directory is owner-only and does **not**
+modify the canonical AGY login. It uses extra disk space until the owner
+cleans up retired agent state. Other generic CLIs run under the current user;
+the generic driver rejects `read_only` unless an explicit isolation mechanism
+exists. An arbitrary CLI configuration is not itself a sandbox.
+
 Profiles are loaded from `~/.devspace/agents/*.md` and project
 `.devspace/agents/*.md`. `devspace agents targets` prints the configured targets
 available in the current workspace.
 
 Provider executable discovery remains process-scoped. The supported overrides
 are `CODEX_COMMAND`, `CODEX_HOME`, `CLAUDE_COMMAND`, `CURSOR_COMMAND`,
-`COPILOT_COMMAND`, `GROK_COMMAND`, and `GROK_AGENT_PROFILE`. Synrex does not
-persist provider credentials.
+`COPILOT_COMMAND`, `GROK_COMMAND`, `GROK_AGENT_PROFILE`, `ANTIGRAVITY_COMMAND`,
+and `ANTIGRAVITY_MODEL`. Synrex does not provision provider credentials; the
+AGY isolation behavior above retains an owner-only copy of existing CLI state.
 
 ## Native artifact download
 

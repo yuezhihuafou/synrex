@@ -30,8 +30,14 @@ class ActivationTests(unittest.TestCase):
         (self.release / "scripts/synrex-p0.py").write_text(
             "import os,sys,json\nprint(json.dumps({'readyForRestart': not os.getenv('FAKE_BUSY')}))\n"
             "sys.exit(2 if os.getenv('FAKE_BUSY') else 0)\n")
+        (self.release / "scripts/synrex-release-provenance.py").write_text(
+            "import os,sys,json\n"
+            "print(json.dumps({'ready': not os.getenv('FAKE_STALE')}))\n"
+            "sys.exit(75 if os.getenv('FAKE_STALE') else 0)\n")
         (self.bin / "systemctl").write_text(
             "#!/bin/sh\necho \"$*\" >>\"$FAKE_SYSTEMD_CALLS\"\n"
+            "if [ \"$2\" = is-active ] && [ \"$4\" = synrex-ingress.service ]; "
+            "then exit 3; fi\n"
             "if [ \"$2\" = restart ] && [ \"$FAKE_RESTART_FAIL\" = 1 ] "
             "&& [ ! -e \"$HOME/.mock-restart-failed\" ]; then "
             "touch \"$HOME/.mock-restart-failed\"; exit 1; fi\n"
@@ -53,10 +59,18 @@ class ActivationTests(unittest.TestCase):
     def test_busy_preflight_never_calls_systemctl(self):
         result = self.activate(FAKE_BUSY="1")
         self.assertEqual(result.returncode, 75, result.stderr)
-        self.assertFalse(self.calls.exists())
+        self.assertNotIn("restart devspace.service", self.calls.read_text())
         self.assertFalse((self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf").exists())
         report = json.loads((self.backup / "preflight.json").read_text())
         self.assertFalse(report["readyForRestart"])
+
+    def test_stale_main_or_production_regression_never_restarts_core(self):
+        result = self.activate(FAKE_STALE="1")
+        self.assertEqual(result.returncode, 75, result.stderr)
+        self.assertIn("candidate is stale", result.stderr)
+        self.assertFalse(self.calls.exists(), "Provenance check must precede systemd")
+        self.assertFalse((self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf").exists())
+        self.assertFalse(json.loads((self.backup / "provenance-preflight.json").read_text())["ready"])
 
     def test_activation_switches_only_after_preflight(self):
         result = self.activate()
@@ -65,6 +79,9 @@ class ActivationTests(unittest.TestCase):
         self.assertIn("restart devspace.service", self.calls.read_text())
         dropin = self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf"
         self.assertIn(str(self.release / "dist/cli.js"), dropin.read_text())
+        receipt = json.loads((self.backup / "release-receipt.json").read_text())
+        self.assertEqual(receipt["status"], "activated")
+        self.assertEqual(receipt["sourceRevision"], "a" * 40)
 
     def test_rejects_concurrent_activation_without_touching_release(self):
         directory = self.home / ".local/state/synrex"
@@ -76,11 +93,35 @@ class ActivationTests(unittest.TestCase):
             self.assertIn("already running", result.stderr)
         self.assertFalse(self.calls.exists())
 
+    def test_inherited_release_lock_reuses_the_promotion_transaction(self):
+        directory = self.home / ".local/state/synrex"
+        directory.mkdir(parents=True)
+        with (directory / "owner-release.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # The promotion worker and activation child share one open file
+            # description: no unlock/relock gap between build and cutover.
+            result = subprocess.run(
+                ["bash", str(SCRIPT), str(self.release), str(self.backup)],
+                env={**self.env, "SYNREX_INHERITED_RELEASE_LOCK_FD": str(lock.fileno())},
+                pass_fds=(lock.fileno(),), capture_output=True, text=True, timeout=10,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("OWNER_RELEASE_ACTIVATED", result.stdout)
+            competing = self.activate()
+            self.assertEqual(competing.returncode, 75)
+            self.assertIn("already running", competing.stderr)
+
+    def test_spoofed_inherited_fd_is_rejected_before_any_changes(self):
+        result = self.activate(SYNREX_INHERITED_RELEASE_LOCK_FD="8")
+        self.assertEqual(result.returncode, 75)
+        self.assertIn("invalid or unowned inherited transaction lock", result.stderr)
+        self.assertFalse(self.calls.exists())
+
     def test_configured_but_missing_ingress_control_blocks_before_restart(self):
         result = self.activate(SYNREX_INGRESS_CONTROL_SOCKET=str(self.root / "not-running.sock"))
         self.assertEqual(result.returncode, 75)
-        self.assertIn("controller is unavailable", result.stderr)
-        self.assertFalse(self.calls.exists())
+        self.assertIn("stable unit is not active", result.stderr)
+        self.assertNotIn("restart devspace.service", self.calls.read_text())
 
     def test_failed_activation_restores_previous_dropin(self):
         dropin = self.home / ".config/systemd/user/devspace.service.d/90-owner-pinned-release.conf"
@@ -91,6 +132,7 @@ class ActivationTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(dropin.read_text(), "previous pinned core\n")
         self.assertIn("OWNER_RELEASE_ROLLED_BACK", result.stderr)
+        self.assertEqual(json.loads((self.backup / "release-receipt.json").read_text())["status"], "rolled-back")
 
 
 if __name__ == "__main__":

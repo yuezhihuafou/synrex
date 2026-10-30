@@ -5,6 +5,8 @@ import { compactPreview } from "../compact-runtime/output-policy.js";
 import { waitForTaskChange } from "../durable-task-wait.js";
 import type { TaskWaitResult } from "../durable-task-wait.js";
 import { finalBarrierReceipt } from "../task-final-barrier.js";
+import { EXECUTION_OUTCOME_LOOP, FAILURE_CONTINUATION_HINT } from "../execution-outcome-loop.js";
+import { assessFailure, failureGuidance } from "../execution-failures.js";
 import { ArchitectureModelManager } from "../architecture-model.js";
 import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
@@ -35,7 +37,7 @@ function execYieldMs(command: string): number {
   return likelyLong ? CODEX_LONG_EXEC_YIELD_MS : CODEX_EXEC_YIELD_MS;
 }
 
-const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs/checkpoint, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. Six-tool clients can inspect project memory/architecture read-only with 'devspace-project learn-suggest', 'devspace-project learn-recall QUERY', 'devspace-project learn-stats', and 'devspace-project arch-validate'; never claim memory promotion or architectural approval from these reads. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
+const CODEX_INSTRUCTIONS = `Use ${toolNames.read} for direct file reads, apply_patch for file changes, and exec_command for commands. Batch independent inspections or checks when safe; never skip validation. ${EXECUTION_OUTCOME_LOOP} Long commands return durable taskId/runId handles. While waiting, do useful independent work: a completed local command may announce itself in a later same-workspace tool response (Completion Mailbox); verify task_get before using it. At the final dependency use task_wait(final=true), or 'devspace-task final <taskId>' in a six-tool host, for a bounded final barrier; after 60s inspect logs and recover if stalled, never assume success or silently replay. Ordinary waits use task_wait or 'devspace-task wait <taskId>' (8s max); status uses task_get or 'devspace-task get <taskId>'; task_cancel cancels. Six-tool clients can inspect project memory/architecture read-only with 'devspace-project learn-suggest', 'devspace-project learn-recall QUERY', 'devspace-project learn-stats', and 'devspace-project arch-validate'; never claim memory promotion or architectural approval from these reads. No wait or mailbox can wake GPT after its turn ends. task_update is reserved for protocol compatibility. Retrieve logs with devspace-log meta/read/tail/grep; use meta-full only for deep diagnostics. Interactive sessionId uses process_status/write_stdin. Commands are not sandboxed. Honor explicit user deployment targets: QA-only is not production. Follow ${toolNames.openWorkspace} instructions and applicable instruction/skill files.`;
 
 export function codexInstructions(): string {
   return CODEX_INSTRUCTIONS;
@@ -211,15 +213,21 @@ function processIsError(snapshot: ProcessSnapshot): boolean {
 }
 
 function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) {
-  const result = processResult(snapshot);
+  const failed = processIsError(snapshot);
+  const classification = failed ? assessFailure({ exitCode: snapshot.exitCode, error: snapshot.output }) : undefined;
+  const result = processResult(snapshot)
+    + (failed ? `\n${FAILURE_CONTINUATION_HINT} ${failureGuidance(classification!)}` : "");
   const isTask = Boolean(snapshot.taskId && snapshot.running);
   const content = [textBlock(result)];
   const terminal = !snapshot.running;
   return {
     content,
-    isError: processIsError(snapshot),
+    // A command's nonzero exit is an observed execution result, not an MCP
+    // transport/protocol failure. MCP isError causes some ChatGPT hosts to
+    // discard structuredContent and turn a repairable exit into tool failure.
     structuredContent: {
       result,
+      commandFailed: failed,
       ...(snapshot.sessionId !== undefined ? { sessionId: snapshot.sessionId } : {}),
       ...(isTask ? {
         taskId: snapshot.taskId,
@@ -232,6 +240,7 @@ function processToolResponse(snapshot: ProcessSnapshot, task?: DurableTaskView) 
       outputLines: snapshot.outputLines,
       outputTruncated: snapshot.outputTruncated,
       ...(terminal && snapshot.exitCode !== undefined ? { exitCode: snapshot.exitCode } : {}),
+      ...(classification ? { failure: classification } : {}),
       ...(terminal && snapshot.signal ? { signal: snapshot.signal } : {}),
       ...(snapshot.running && !isTask ? { nextPollMs: recommendedPollMs(snapshot) } : {}),
       ...(snapshot.outputTruncated ? { outputTruncated: true } : {}),
@@ -259,15 +268,22 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
     ? `completed${view.result?.isError ? " error" : ""}`
     : view.status;
   const terminalExit = view.result?.exitCode;
+  const failed = view.status === "failed" || view.result?.isError === true;
+  const runnerFailed = view.status === "failed";
+  const classification = failed ? assessFailure({ exitCode: view.result?.exitCode }) : undefined;
   const result = `task=${view.taskId} ${state} rev=${view.revision}`
     + (view.pollIntervalMs ? ` poll=${view.pollIntervalMs}ms` : "")
     + (terminalExit !== null && terminalExit !== undefined ? ` exit=${terminalExit}` : "")
-    + ` log=${view.runId}`;
+    + ` log=${view.runId}`
+    + (failed ? `\n${FAILURE_CONTINUATION_HINT} ${failureGuidance(classification!)}` : "");
   return {
     content: [textBlock(result)],
-    isError: view.status === "failed",
+    // A failed runner/receipt is a tool error. A completed command with a
+    // nonzero exit is normal data and must reach the model as structured data.
+    ...(runnerFailed ? { isError: true } : {}),
     structuredContent: {
       result,
+      commandFailed: failed,
       taskId: view.taskId,
       status: view.status,
       revision: view.revision,
@@ -280,6 +296,7 @@ function taskViewResponse(view: DurableTaskView, options: { detail?: boolean; un
         ...(view.result.signal ? { signal: view.result.signal } : {}),
       } : {}),
       ...(view.error ? { error: { code: view.error.code, message: view.error.message } } : {}),
+      ...(classification ? { failure: classification } : {}),
       ...(options.detail ? { detail: view } : {}),
     },
   };
@@ -308,7 +325,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
     {
       title: "Apply patch",
       description:
-        "Apply one Codex-style patch in a workspace. Supports adding, overwriting, updating, deleting, and moving files. Use this for all file modifications. Paths must be relative to the workspace.",
+        "Apply a Codex patch to workspace files (add/update/delete/move). Use for edits; paths are relative.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         patch: z.string().describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),
@@ -638,7 +655,14 @@ async function handleProjectCompatCommand(command: string, root: string, stateDi
   const learning = new LearningStore(stateDir);
   let result: string;
   if (!action || action === "help") {
-    result = "Read-only six-tool project commands: devspace-project learn-suggest | learn-recall QUERY | learn-stats | arch-validate. Use the project tool for explicit architecture changes or verified learning promotion when available.";
+    result = "Read-only six-tool project commands: devspace-project learn-review | learn-suggest | learn-recall QUERY | learn-stats | arch-validate. Use the project tool for recording retrospectives or verified Skill promotion when available.";
+  } else if (action === "learn-review") {
+    const review = learning.review(root);
+    result = [
+      ...review.notes.slice(0, 5).map((note) => `note=${note.id} [${note.outcome}] ${note.title}: ${note.summary.slice(0, 150)}`),
+      ...review.failures.slice(0, 5).map((ep) => `failure=${ep.id} ${ep.tool}: ${ep.outputSummary.slice(0, 150)}`),
+      ...review.verifiedChecks.map((entry) => `verified-check=${entry.command} count=${entry.occurrences}`),
+    ].join("\n") || "No retrospective notes or relevant recent failures/checks.";
   } else if (action === "learn-suggest") {
     const suggestions = learning.suggestVerifiedProcedures(root, 5);
     result = suggestions.length ? suggestions.map((entry) => (
@@ -646,12 +670,13 @@ async function handleProjectCompatCommand(command: string, root: string, stateDi
     )).join("\n") : "No recent repeated verified checks. No skill was created or promoted.";
   } else if (action === "learn-stats") {
     const stats = learning.stats(root);
-    result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.candidates} candidates, ${stats.promoted} promoted.`;
+    result = `Learning: ${stats.episodes} episodes (${stats.successful} successful), ${stats.notes} retrospectives, ${stats.candidates} candidates, ${stats.promoted} promoted.`;
   } else if (action.startsWith("learn-recall ")) {
     const query = action.slice("learn-recall ".length).trim();
     if (!query || query.length > 140) throw new Error("learn-recall query must contain 1-140 characters.");
     const recalled = learning.recall(root, query, 5);
     const lines = [
+      ...recalled.notes.map((note) => `note=${note.id} [${note.outcome}] ${note.title} summary=${note.summary.slice(0, 150)} lesson=${note.lessons.join("; ").slice(0, 130)}`),
       ...recalled.candidates.map((candidate) => `candidate=${candidate.id} status=${candidate.status} title=${candidate.title.slice(0, 100)}`),
       ...recalled.episodes.map((episode) => `episode=${episode.id} ${episode.success ? "ok" : "failed"} tool=${episode.tool} input=${episode.inputSummary.slice(0, 135)} output=${episode.outputSummary.slice(0, 135)}`),
     ];
@@ -734,8 +759,32 @@ async function waitForDurableTask(
   if (!waited.unchanged && ["completed", "failed", "cancelled"].includes(waited.view.status)) {
     await durableTasks.get(workspaceRoot, taskId); // acknowledge terminal notification
   }
-  return final ? finalWaitResponse(waited, taskId)
+  const response = final ? await finalWaitResponse(waited, taskId)
     : taskViewResponse(waited.view, { unchanged: waited.unchanged });
+  if (waited.unchanged || !["completed", "failed", "cancelled"].includes(waited.view.status)) {
+    return response;
+  }
+  try {
+    const output = await durableTasks.outputTail(workspaceRoot, taskId);
+    if (!output?.text) return response;
+    const preview = `--- ${output.truncated ? "Task output tail (truncated)" : "Task output (complete)"} ---\n`
+      + output.text
+      + (output.truncated ? `\nFull log: devspace-log tail ${waited.view.runId}` : "");
+    return {
+      ...response,
+      content: [...response.content, textBlock(preview)],
+      structuredContent: {
+        ...response.structuredContent,
+        // Preserve legacy clients that read result instead of content blocks;
+        // outputTail is capped at 1,280 bytes by durableTasks.
+        result: `${response.structuredContent.result}\n${preview}`,
+        outputTruncated: output.truncated,
+      },
+    };
+  } catch {
+    // Missing or rotated output must not turn a completed command into a tool error.
+    return response;
+  }
 }
 
 async function finalWaitResponse(waited: TaskWaitResult, taskId: string) {
@@ -763,12 +812,14 @@ async function finalWaitResponse(waited: TaskWaitResult, taskId: string) {
     }
   }
   const hint = barrier.stage === "investigate"
-    ? `Final dependency ${taskId} still running for ${Math.ceil(barrier.elapsedMs / 1000)}s; inspect devspace-log tail/grep ${barrier.runId}, validate task/peer health and checkpoint unresolved work. Never repeat the command automatically.`
+    ? `Final dependency ${taskId} still running for ${Math.ceil(barrier.elapsedMs / 1000)}s; no new stdout/stderr for ${Math.ceil(barrier.idleMs / 1000)}s (not proof of a stall). Inspect devspace-log tail/grep ${barrier.runId} and task/peer health. If stalled, diagnose and try a feasible alternative; if progressing, continue waiting or independent work. Elapsed time or a checkpoint alone is not grounds to cancel or abandon the user's goal. Never blindly replay the command.`
     : barrier.stage === "waiting"
       ? `Final dependency pending; next suggested check after ~${barrier.nextCheckMs}ms, or continue independent work.`
       : barrier.stage === "input_required"
         ? `Final dependency ${taskId} requests input; inspect the request or cancel instead of polling.`
-        : `Final dependency is ${waited.view.status}; verify logs and objective before completion.`;
+      : waited.view.result?.isError || waited.view.status === "failed"
+        ? `Final command failed (exit ${waited.view.result?.exitCode ?? "unknown"}). Process termination does not complete the user's goal; fix the cause or use a feasible alternative, then verify the original acceptance criteria.`
+        : `Final dependency is ${waited.view.status}; verify the user's original acceptance criteria, not just this command's status. If unmet, diagnose, repair or try another feasible approach before ending.`;
   return {
     ...response,
     content: [...response.content, textBlock(hint)],

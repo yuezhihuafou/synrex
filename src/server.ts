@@ -1,10 +1,13 @@
 import { registerOAuthRecovery } from "./oauth-recovery.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { startRuntimeSampler } from "./runtime-sampler.js";
+import { DIAGNOSTIC_FILE_LIMIT } from "./diagnostic-trace.js";
+import { UsageTrafficRecorder } from "./usage-ledger.js";
 import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
 import { traceEvent, traceStage, errorCategory } from "./trace-stages.js";
 import { registerSynrexConsole } from "./console-router.js";
 import { watchToolExecution } from "./tool-execution-watch.js";
+import { WorkspaceOperationGate } from "./workspace-operation-gate.js";
 import { hostsDirectory, joinsDirectory } from "./multinode/topology.js";
 import { readFileSync } from "node:fs";
 import { access, realpath } from "node:fs/promises";
@@ -41,6 +44,10 @@ import {
   runWithRequestLogContext,
 } from "./logger.js";
 import { readFileTool } from "./pi-tools.js";
+import { isImagePath, readBoundedImagePreview } from "./image-preview.js";
+import { isVideoPath, parseVideoReadPath, readVideoFrames } from "./media-read.js";
+import { readRosImage } from "./ros2-camera-read.js";
+import { captureObservation, withObservationEvidence } from "./observation/evidence.js";
 import { readBatch, validateBatchFiles } from "./batch-read.js";
 import { SingleUserOAuthProvider } from "./oauth-provider.js";
 import {
@@ -66,6 +73,8 @@ import { DEVSPACE_VERSION } from "./version.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { withCodingWorkflowStore } from "./coding-workflows.js";
 import { registerCodingWorkflowTools } from "./coding-workflow-tools.js";
+import { workspaceRecoveryHint } from "./workspace-recovery.js";
+import { createOptionalProjectMemoryPort } from "./memhub-memory-adapter.js";
 import { formatAgentsPath, WorkspaceRegistry } from "./workspaces.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
 import { localNodeRegistration } from "./multinode/local-node.js";
@@ -113,6 +122,14 @@ import {
 } from "./tool-surfaces/types.js";
 
 const WORKSPACE_APP_MANIFEST_ENTRY = "workspace-app.html";
+
+// Shared by all HTTP host sessions and the peer invoker. Detached commands
+// can write outside this gate; use Git worktrees to isolate those workflows.
+const workspaceOperationGate = new WorkspaceOperationGate();
+const GATED_READ_TOOLS = new Set(["read", "semantic_code"]);
+// show_changes also persists a review checkpoint; treat it as a mutation so
+// concurrent reviews cannot race with another checkpoint or source write.
+const GATED_WRITE_TOOLS = new Set(["apply_patch", "semantic_edit", "write", "edit", "show_changes"]);
 
 function mcpServerInfo() {
   return {
@@ -180,8 +197,11 @@ function serverInstructions(
   const placement = " In multi-node mode, normally omit the open_workspace node selector and let Synrex resolve placement. Never guess a node. Set node only when the user explicitly identifies a host or Synrex reports an ambiguity with candidate nodes; required placement rules cannot be overridden by the model.";
   const intelligence = " Use project for relevant architecture changes or verified local experience, not for repetitive approval of ordinary reads/edits. Do not run the same project check without new evidence.";
   const workflows = " For genuinely long or multi-session tasks, use workflow_open/checkpoint at meaningful handoff boundaries, not after each step. Batch independent reads, prefer task_wait to repeated task_get polling, and run focused tests during edits with final comprehensive checks before release. Keep GPT responsible for design and correctness; deterministic execution needs no repeated model confirmations. On recovery check current Git/tasks rather than trusting summaries. Synrex cannot resume GPT reasoning after a host turn ends.";
+  const delegation = config.subagents.enabled
+    ? " GPT owns requirements, architecture, decisions and final verification. Delegate only when a separate bounded worker materially improves a substantial independent outcome; do not add an agent to simple work. Agent completed means its turn ended, NEVER that the user's request is done. On partial, failed or empty agent evidence, inspect its ID/diff/tests, continue the same agent once if useful or use native Synrex tools, then verify the ORIGINAL acceptance criteria within this turn. Do not turn agent failure into a plan or a new approval step. Give writers separate worktrees; never race production. Subagent invocation is an explicit GPT decision, not an automatic planner."
+    : "";
 
-  return `${common}${placement} ${toolSurface.instructions({ agents, skills })}${intelligence}${workflows}${artifactInstruction}${showChangesInstruction}`;
+  return `${common}${placement} ${toolSurface.instructions({ agents, skills })}${intelligence}${workflows}${delegation}${artifactInstruction}${showChangesInstruction}`;
 }
 
 function formatVisibleAgent(agent: {
@@ -395,6 +415,7 @@ function registerMcpSurface(
   trackToolActivity?: TrackToolActivity,
   durableTasks?: DurableTaskManager,
   semantic?: SerenaSemanticManager,
+  usageRecorder?: UsageTrafficRecorder,
 ): void {
   const learning = new LearningStore(config.stateDir);
   const registrationTarget = withTrackedToolHandlers(
@@ -404,6 +425,7 @@ function registerMcpSurface(
     learning,
     workspaces,
     durableTasks,
+    usageRecorder,
   );
   const toolSurface = getToolSurface(config.toolMode);
 
@@ -467,6 +489,8 @@ function registerMcpSurface(
           .describe("Explicit node alias/id, only when needed."),
         conversationTitle: z.string().max(120).optional()
           .describe("Optional actual chat title for diagnostics. Do not guess."),
+        project: z.string().trim().min(1).max(128).optional()
+          .describe("Explicit registered Synrex logical project; select its bound execution node. ChatGPT project identity is not inferred."),
       },
       outputSchema: {
         workspaceId: z.string(),
@@ -537,22 +561,22 @@ function registerMcpSurface(
       const allPendingTasks = durableTasks?.available
         ? await durableTasks.pendingNotifications(workspace.root)
         : [];
-      const pendingTasks = allPendingTasks.slice(0, 8).map((task) => ({
+      const pendingTasks = allPendingTasks.slice(0, 3).map((task) => ({
         taskId: task.taskId,
         status: task.status,
       }));
       const allActiveTasks = durableTasks?.available
         ? await durableTasks.activeTaskHandles(workspace.root)
         : [];
-      const resumableWorkflows = withCodingWorkflowStore(config.stateDir, (store) =>
-        store.list(workspace.root, { limit: 5 }).map((workflow) => ({
+      const unfinishedWorkflows = withCodingWorkflowStore(config.stateDir, (store) =>
+        store.list(workspace.root, { limit: 5 }));
+      const resumableWorkflows = unfinishedWorkflows.map((workflow) => ({
           workflowId: workflow.workflowId,
           title: workflow.title,
           status: workflow.status as "active" | "blocked",
           revision: workflow.revision,
-          summary: workflow.checkpoint.summary,
-        })),
-      );
+          summary: `${workflow.checkpoint.summary.slice(0, 100)}; next=${(workflow.checkpoint.nextSteps[0] ?? "inspect acceptance").slice(0, 95)}; tasks=${workflow.checkpoint.taskIds.slice(0, 3).join(",") || "none"}`,
+        }));
       const preloadSubagents = config.subagents.enabled
         && config.subagents.instructions === "preload";
       const subagentsSkill = workspace.skills.find((skill) => skill.name === "subagents");
@@ -606,11 +630,14 @@ function registerMcpSurface(
         ? [
             `Workspace already open as ${workspace.id}.`,
             "Continue with this workspaceId.",
-            "Keep following the project instructions, nested instruction files, skills, agent profiles, and diagnostics already provided for this workspace.",
+            workspaceRecoveryHint(unfinishedWorkflows),
           ].join("\n\n")
-        : workspace.mode === "worktree"
-          ? "Use this workspaceId for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
-          : cardInstruction;
+        : [
+            workspace.mode === "worktree"
+              ? "Use this workspaceId for subsequent work in this isolated worktree. Keep reusing it while working in this worktree. Follow the project instructions, nested instruction files, skills, agent profiles, and diagnostics returned for it."
+              : cardInstruction,
+            ...(unfinishedWorkflows.length ? [workspaceRecoveryHint(unfinishedWorkflows)] : []),
+          ].join("\n\n");
       const instruction = preloadedSubagentInstructions && includeBootstrapContext
         ? [
             workspaceInstruction,
@@ -651,10 +678,10 @@ function registerMcpSurface(
               ? `Unacknowledged TERMINAL command receipts (${allPendingTasks.length} historical results, not active processes): ${pendingTasks.map((task) => `${task.taskId}=${task.status}`).join(", ")}. A completed command does not prove the user's objective is done. Use task_get or 'devspace-task get <taskId>' to inspect results. Unrelated receipts do not block this request.`
               : undefined,
             allActiveTasks.length > 0
-              ? `Currently ACTIVE durable commands (${allActiveTasks.length}): ${allActiveTasks.slice(0, 8).map((task) => `${task.taskId}=${task.status}`).join(", ")}. Inspect these handles before retrying or cancelling work.`
+              ? `Currently ACTIVE durable commands (${allActiveTasks.length}): ${allActiveTasks.slice(0, 4).map((task) => `${task.taskId}=${task.status}`).join(", ")}. These may belong to other sessions; inspect matching handles before retrying or cancelling.`
               : undefined,
             resumableWorkflows.length > 0
-              ? `Resumable coding workflows: ${resumableWorkflows.map((item) => `${item.workflowId}(${item.status},rev=${item.revision}): ${item.title}`).join("; ")}. Use workflow_open with workflowId to resume, and check actual code and test evidence.`
+              ? `Resumable coding workflows: ${resumableWorkflows.map((item) => `${item.workflowId}(${item.status},rev=${item.revision}): ${item.title.slice(0, 48)}; ${item.summary}`).join("; ")}. Resume by workflowId; verify original goal, tasks, current Git and test evidence before acting.`
               : undefined,
             instruction,
           ].filter(Boolean).join("\n"),
@@ -727,7 +754,7 @@ function registerMcpSurface(
     toolNames.read,
     {
       title: "Read file",
-      description: "Read path or up to 8 file ranges via files, concurrently; full text and errors, not summaries. Read nested AGENTS and matching skills from open_workspace first. Advertised skill paths may be outside workspace.",
+      description: "Read text/images, sampled video frames, a ROS2 image topic, or up to 8 text/image files. Media is returned as real image blocks. Read applicable AGENTS and skills first.",
       inputSchema: {
         workspaceId: z
           .string()
@@ -751,6 +778,11 @@ function registerMcpSurface(
           .max(500)
           .optional()
           .describe("1-500 lines; default 250."),
+        frames: z.number().int().min(1).max(6).optional().describe("Video preview: 1-6 frames."),
+        startSeconds: z.number().min(0).optional().describe("Video interval start in seconds."),
+        endSeconds: z.number().positive().optional().describe("Video interval end in seconds."),
+        compare: z.boolean().optional().describe("Video: include a pixel difference preview."),
+        rosTopic: z.string().max(160).optional().describe("Read-only single snapshot from an ROS2 image topic on the workspace node."),
         files: z.array(z.object({
           path: z.string().min(1),
           offset: z.number().int().positive().optional(),
@@ -763,25 +795,92 @@ function registerMcpSurface(
       const startedAt = performance.now();
       const workspace = await workspaces.getWorkspace(workspaceId);
       if (input.files !== undefined) {
-        if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined) {
+        if (input.path !== undefined || input.offset !== undefined || input.limit !== undefined
+          || input.frames !== undefined || input.startSeconds !== undefined
+          || input.endSeconds !== undefined || input.compare !== undefined || input.rosTopic !== undefined) {
           throw new Error("Use read.path or read.files, not both.");
         }
         const response = await readBatch(validateBatchFiles(input.files), async (file) => {
+          if (isVideoPath(file.path)) throw new Error("Read videos individually using read.path.");
           const readPath = workspaces.resolveReadPath(workspace, file.path);
-          const result = await readFileTool({ ...file, path: readPath.absolutePath }, {
+          const preview = isImagePath(file.path) ? await readBoundedImagePreview(readPath.absolutePath) : undefined;
+          const result = preview ?? await readFileTool({ ...file, path: readPath.absolutePath }, {
             cwd: workspace.root, root: workspace.root, readRoots: readPath.readRoots,
           });
-          return { ...result, structuredContent: { result: contentText(result.content) } };
+          const originalStructured = "structuredContent" in result ? result.structuredContent : undefined;
+          const normalized = { ...result, structuredContent: {
+            ...originalStructured, result: originalStructured?.result ?? contentText(result.content),
+          } };
+          const observed = isImagePath(file.path) && !("isError" in result && result.isError === true)
+            ? withObservationEvidence(normalized, {
+              kind: "file.image", locator: file.path, workspaceId,
+            }, { previewOnly: preview !== undefined }) : normalized;
+          return observed;
         });
         logToolCall(config, { tool: toolNames.read, workspaceId,
           success: response.structuredContent.errorCount === 0,
           durationMs: Math.round(performance.now() - startedAt) });
         return response;
       }
-      if (typeof input.path !== "string" || !input.path.trim()) {
-        throw new Error("read.path is required when read.files is not supplied.");
+      const legacyRosTopic = input.path?.startsWith("ros2://") ? input.path.slice("ros2://".length) : undefined;
+      if (input.rosTopic !== undefined || legacyRosTopic !== undefined) {
+        if ((input.path !== undefined && input.path !== `ros2://${legacyRosTopic}`)
+          || (input.rosTopic !== undefined && legacyRosTopic !== undefined)
+          || input.offset !== undefined || input.limit !== undefined || input.frames !== undefined
+          || input.startSeconds !== undefined || input.endSeconds !== undefined || input.compare !== undefined) {
+          throw new Error("ROS2 snapshot uses rosTopic or ros2://path without other read options.");
+        }
+        const topic = input.rosTopic ?? legacyRosTopic!;
+        const response = await captureObservation({ capture: () => readRosImage(topic) }, {
+          kind: "ros2.image", locator: topic, workspaceId,
+        }, { previewOnly: true });
+        logToolCall(config, { tool: toolNames.read, workspaceId,
+          success: true, durationMs: Math.round(performance.now() - startedAt) });
+        return response;
       }
-      const readPath = workspaces.resolveReadPath(workspace, input.path);
+      if (typeof input.path !== "string" || !input.path.trim()) {
+        throw new Error("read.path or read.rosTopic is required when read.files is not supplied.");
+      }
+      const parsedVideo = parseVideoReadPath(input.path);
+      const readPath = workspaces.resolveReadPath(workspace, parsedVideo.path);
+      if (isVideoPath(parsedVideo.path)) {
+        if (input.offset !== undefined || input.limit !== undefined) {
+          throw new Error("Video does not use text line offsets; select frames and timestamps.");
+        }
+        if (parsedVideo.selection && (input.startSeconds !== undefined || input.endSeconds !== undefined || input.compare !== undefined)) {
+          throw new Error("Use video path suffix or explicit time selection, not both.");
+        }
+        const response = await captureObservation({ capture: () => readVideoFrames(readPath.absolutePath, {
+          frames: input.frames, startSeconds: input.startSeconds ?? parsedVideo.selection?.startSeconds,
+          endSeconds: input.endSeconds ?? parsedVideo.selection?.endSeconds,
+          compare: input.compare ?? parsedVideo.selection?.compare,
+        }) }, { kind: "file.video", locator: parsedVideo.path, workspaceId }, { previewOnly: true });
+        logToolCall(config, { tool: toolNames.read, workspaceId, path: input.path,
+          success: true, durationMs: Math.round(performance.now() - startedAt) });
+        return response;
+      }
+      if (input.frames !== undefined || input.startSeconds !== undefined
+        || input.endSeconds !== undefined || input.compare !== undefined) {
+        throw new Error("Video selection arguments require a video file.");
+      }
+      if (isImagePath(parsedVideo.path)) {
+        const preview = await readBoundedImagePreview(readPath.absolutePath);
+        const response = preview ?? await readFileTool({
+          ...input, path: readPath.absolutePath, limit: input.limit ?? 250,
+        }, { cwd: workspace.root, root: workspace.root, readRoots: readPath.readRoots });
+        if ("isError" in response && response.isError === true) {
+          logFailedToolResponse(config, { tool: toolNames.read, workspaceId, path: input.path }, response.content, startedAt);
+          return response;
+        }
+        logToolCall(config, { tool: toolNames.read, workspaceId, path: input.path,
+          success: true, durationMs: Math.round(performance.now() - startedAt) });
+        const originalStructured = "structuredContent" in response ? response.structuredContent : undefined;
+        return withObservationEvidence({
+          ...response, structuredContent: {
+            ...originalStructured, result: originalStructured?.result ?? contentText(response.content),
+          },
+        }, { kind: "file.image", locator: parsedVideo.path, workspaceId }, { previewOnly: preview !== undefined });
+      }
       const response = await readFileTool(
         { ...input, path: readPath.absolutePath, limit: input.limit ?? 250 },
         {
@@ -830,6 +929,7 @@ function registerMcpSurface(
     server: registrationTarget,
     workspaces,
     stateDir: config.stateDir,
+    memory: createOptionalProjectMemoryPort(),
   });
 
   toolSurface.register({
@@ -847,7 +947,7 @@ function registerMcpSurface(
     {
       title: "Show changes",
       description:
-        "Show the changes made in this turn for an open workspace. Call this once after the final related file change and before your final response so the user can review the combined diff. Do not call it after each individual file change.",
+        "Review the aggregate workspace diff. Call once after the final edit, before replying.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
       },
@@ -940,8 +1040,9 @@ function withTrackedToolHandlers(
   learning: LearningStore,
   workspaces: WorkspaceRegistry,
   durableTasks?: DurableTaskManager,
+  usageRecorder?: UsageTrafficRecorder,
 ): McpRegistrationTarget {
-  const diagnostics = new DiagnosticTrace(config.stateDir);
+  const diagnostics = new DiagnosticTrace(config.stateDir, DIAGNOSTIC_FILE_LIMIT, entry => usageRecorder?.record(entry));
   const mailbox = new CompletionMailbox(config.stateDir);
   return {
     registerTool: ((...args: unknown[]) => {
@@ -989,10 +1090,23 @@ function withTrackedToolHandlers(
             emitDiagnostic: parent?.emitDiagnostic ?? ((event, fields) => diagnostics.record(event, fields)),
           }, async () => {
           const operation = () => traceStage("tool_handler", () => Promise.resolve(handler(...handlerArgs)), { tool: toolName });
+          const coordinatedOperation = async () => {
+            const workspaceId = suppliedInput?.workspaceId;
+            const mode = GATED_READ_TOOLS.has(toolName) ? "read"
+              : GATED_WRITE_TOOLS.has(toolName) ? "write" : undefined;
+            if (!mode || typeof workspaceId !== "string") return operation();
+            // A forwarded peer ID may not be in the owner's local registry.
+            // Only same-root local calls share the physical gate.
+            const workspace = await workspaces.getWorkspace(workspaceId).catch(() => undefined);
+            const key = workspace?.root ?? `workspace:${workspaceId}`;
+            return workspaceOperationGate.run(key, mode, operation, (queuedMs) => {
+              traceEvent("workspace_operation_waited", { tool: toolName, workspaceId, queuedMs });
+            });
+          };
           try {
             const result = trackToolActivity
-              ? await trackToolActivity(operation)
-              : await operation();
+              ? await trackToolActivity(coordinatedOperation)
+              : await coordinatedOperation();
             await traceStage("learning", () => recordLearningToolCall(
               learning,
               workspaces,
@@ -1103,7 +1217,11 @@ async function recordLearningToolCall(
   output?: unknown,
   error?: unknown,
 ): Promise<void> {
-  if (toolName === "open_workspace" || toolName === "project") return;
+  // Polling, workflow bookkeeping and status inspection have dedicated durable
+  // stores and are not evidence of successful engineering work. Skipping them
+  // also avoids unnecessary SQLite writes on high-frequency status checks.
+  if (["open_workspace", "project", "task_get", "task_wait", "process_status",
+    "workflow_open", "workflow_status", "workflow_checkpoint"].includes(toolName)) return;
   // Polling and inspecting stored evidence are meta-operations, not new
   // learning episodes. Recording these would recursively pollute recall and
   // bury the real engineering history behind the agent's own status checks.
@@ -1112,13 +1230,6 @@ async function recordLearningToolCall(
     const command = typeof input?.cmd === "string" ? input.cmd.trim() : "";
     if (/^devspace-project(?:\s|$)|^devspace-log(?:\s|$)|^devspace-task\s+(?:get|wait|final)\s+/i.test(command)) return;
   }
-  if (
-    toolName === "task_get"
-    && output
-    && typeof output === "object"
-    && !Array.isArray(output)
-    && (output as { structuredContent?: { unchanged?: unknown } }).structuredContent?.unchanged === true
-  ) return;
   const input = handlerArgs[0];
   if (!input || typeof input !== "object" || Array.isArray(input)) return;
   const workspaceId = (input as { workspaceId?: unknown }).workspaceId;
@@ -1154,7 +1265,8 @@ export function createServer(
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
   const app = express();
-  const diagnostics = new DiagnosticTrace(config.stateDir);
+  const usageRecorder = new UsageTrafficRecorder(config.stateDir);
+  const diagnostics = new DiagnosticTrace(config.stateDir, DIAGNOSTIC_FILE_LIMIT, entry => usageRecorder.record(entry));
   app.use(requestTraceMiddleware(config, diagnostics, requestLogFields));
   app.use(createMcpExpressApp({
     host: config.host,
@@ -1229,11 +1341,11 @@ export function createServer(
   }
   const localAgentProviders = buildLocalAgentProviderStatuses(
     config.subagents,
-    getLocalAgentProviderAvailabilitySnapshot(),
+    getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
   );
   const resolveLocalAgentProviders = () => buildLocalAgentProviderStatuses(
     config.subagents,
-    getLocalAgentProviderAvailabilitySnapshot(),
+    getLocalAgentProviderAvailabilitySnapshot(process.env, config.subagents),
   );
   const modernToolSurface = getToolSurface(config.toolMode);
   const bindModernMcpSurface = compileMcpRegistrationSurface((target) => {
@@ -1248,6 +1360,7 @@ export function createServer(
       toolActivities.track,
       durableTasks,
       semantic,
+      usageRecorder,
     );
   });
   const toolInvoker = new ToolInvoker();
@@ -1277,6 +1390,7 @@ export function createServer(
       invoker: toolInvoker,
       stateDir: config.stateDir,
       maxConcurrentCalls: 4,
+      resolveWorkspaceRoot: async (workspaceId) => (await workspaces.getWorkspace(workspaceId)).root,
       onDiagnostic: (event, fields) => diagnostics.record(event, fields),
       onMetric: (event, fields) => logEvent(config.logging, "info", event, fields),
     });
@@ -1297,6 +1411,7 @@ export function createServer(
           store: controlPlaneStore,
           localNodeId: localNode.id,
           placementRules: config.cluster.placementRules,
+          projectBindings: config.cluster.projectBindings,
         })
       : adapter.registrationTarget;
     bindModernMcpSurface(target);
@@ -1459,6 +1574,7 @@ export function createServer(
         processSessions.shutdown();
         await semantic.close();
         controlPlaneStore.close();
+        usageRecorder.close();
         oauthProvider.close();
         workspaceStore.close?.();
       })();

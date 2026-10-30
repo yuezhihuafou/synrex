@@ -177,6 +177,15 @@ export class DurableTaskManager {
   private readonly runRoot: string;
   private readonly runnerPath: string;
   private readonly launchOverride?: DurableTaskManagerOptions["launchTask"];
+  // A redelivered request may arrive while its first launch is still writing
+  // the request index. Single-flight prevents two commands being spawned for
+  // the same node request within this runner process.
+  private readonly pendingRequestStarts = new Map<string, {
+    command: string;
+    cwd: string;
+    workspaceId?: string;
+    promise: Promise<ProcessSnapshot>;
+  }>();
   private readonly orphanSweepAt = new Map<string, number>();
   private readonly systemdAvailable: () => boolean;
   private readonly stopSystemdUnit: (unitName: string) => Promise<void>;
@@ -209,12 +218,41 @@ export class DurableTaskManager {
 
   async start(input: DurableStartCommandInput, waitMs: number): Promise<ProcessSnapshot> {
     if (!this.available) throw new Error("Durable task runner is unavailable in this build.");
+    if (!input.requestId) return this.startOnce(input, waitMs);
+    const key = `${path.resolve(input.workspaceRoot ?? input.cwd)}\0${input.requestId}`;
+    const pending = this.pendingRequestStarts.get(key);
+    if (pending) {
+      if (pending.command !== input.command || pending.cwd !== path.resolve(input.cwd)
+        || pending.workspaceId !== input.workspaceId) {
+        throw new Error(`Node request ${input.requestId} was reused for a different command.`);
+      }
+      return pending.promise;
+    }
+    const promise = this.startOnce(input, waitMs);
+    this.pendingRequestStarts.set(key, {
+      command: input.command,
+      cwd: path.resolve(input.cwd),
+      workspaceId: input.workspaceId,
+      promise,
+    });
+    try {
+      return await promise;
+    } finally {
+      if (this.pendingRequestStarts.get(key)?.promise === promise) this.pendingRequestStarts.delete(key);
+    }
+  }
+
+  private async startOnce(input: DurableStartCommandInput, waitMs: number): Promise<ProcessSnapshot> {
     if (input.requestId) {
       const existing = await this.findTaskByRequestId(
         input.workspaceRoot ?? input.cwd,
         input.requestId,
       );
       if (existing) {
+        if (existing.command !== input.command || path.resolve(existing.cwd) !== path.resolve(input.cwd)
+          || existing.workspaceId !== input.workspaceId) {
+          throw new Error(`Node request ${input.requestId} was reused for a different command.`);
+        }
         return this.snapshot(await this.reconcileTask(existing));
       }
     }
@@ -376,6 +414,31 @@ export class DurableTaskManager {
       await unlink(this.notificationPath(workspaceRoot, taskId)).catch(() => undefined);
     }
     return view;
+  }
+
+  /** Include a small terminal-output tail in the model's completion receipt.
+   * The full run log remains authoritative and available by runId. */
+  async outputTail(
+    workspaceRoot: string,
+    taskId: string,
+    maxBytes = 1_280,
+  ): Promise<{ text: string; truncated: boolean } | undefined> {
+    const state = await this.findTask(taskId);
+    this.assertOwned(state, workspaceRoot);
+    if (state.status !== "completed" && state.status !== "failed" && state.status !== "cancelled") {
+      return undefined;
+    }
+    const info = await stat(state.outputPath);
+    if (info.size === 0) return undefined;
+    const size = Math.min(info.size, Math.max(1, Math.min(maxBytes, 4_096)));
+    const handle = await open(state.outputPath, "r");
+    try {
+      const bytes = Buffer.alloc(size);
+      const { bytesRead } = await handle.read(bytes, 0, size, info.size - size);
+      return { text: bytes.subarray(0, bytesRead).toString("utf8"), truncated: info.size > size };
+    } finally {
+      await handle.close();
+    }
   }
 
   /** Observe an out-of-process durable runner's atomic task.json renames.
