@@ -220,25 +220,38 @@ function Warm-CoreSlot([hashtable]$candidate) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
     $stdout = Join-Path $root ('logs\group-preload-' + $stamp + '.stdout.log')
     $stderr = Join-Path $root ('logs\group-preload-' + $stamp + '.stderr.log')
-    $previousPreload = $env:SYNREX_PRELOAD_ONLY
-    try {
-        $env:SYNREX_PRELOAD_ONLY = '1'
-        $started = Get-Date
-        $process = Start-Process -FilePath $candidate.Node -ArgumentList @(('"' + $candidate.Cli + '"'), 'serve') -WorkingDirectory $candidate.Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
-        if (!$process.WaitForExit(90000)) {
-            $process.Kill()
-            $process.WaitForExit(5000) | Out-Null
-            throw 'Synrex Core preload exceeded 90 seconds.'
-        }
-        if ($process.ExitCode -ne 0) {
-            $detail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 20) -join ' ' } else { '' }
-            throw ('Synrex Core preload failed with code ' + $process.ExitCode + '. ' + $detail)
-        }
-        Write-Output ('Preloaded slot ' + $candidate.Name + ' in ' + [Math]::Round(((Get-Date) - $started).TotalMilliseconds) + ' ms before production stop.')
-    } finally {
-        if ($null -eq $previousPreload) { Remove-Item Env:SYNREX_PRELOAD_ONLY -ErrorAction SilentlyContinue }
-        else { $env:SYNREX_PRELOAD_ONLY = $previousPreload }
+    $started = Get-Date
+    $cliDirectory = Split-Path -Parent $candidate.Cli
+    $cliName = Split-Path -Leaf $candidate.Cli
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $candidate.Node
+    $startInfo.Arguments = $cliName + ' serve'
+    $startInfo.WorkingDirectory = $cliDirectory
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.EnvironmentVariables['SYNREX_PRELOAD_ONLY'] = '1'
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    if (!$process.Start()) { throw 'Synrex Core preload process could not be started.' }
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
+    if (!$process.WaitForExit(90000)) {
+        $process.Kill()
+        $process.WaitForExit(5000) | Out-Null
+        throw 'Synrex Core preload exceeded 90 seconds.'
     }
+    $stdoutText = $stdoutTask.GetAwaiter().GetResult()
+    $stderrText = $stderrTask.GetAwaiter().GetResult()
+    [IO.File]::WriteAllText($stdout, $stdoutText, $utf8)
+    [IO.File]::WriteAllText($stderr, $stderrText, $utf8)
+    $exitCode = [int]$process.ExitCode
+    if ($exitCode -ne 0) {
+        $detail = (($stderrText -split "`r?`n") | Select-Object -Last 20) -join ' '
+        throw ('Synrex Core preload failed with code ' + $exitCode + '. ' + $detail)
+    }
+    Write-Output ('Preloaded slot ' + $candidate.Name + ' in ' + [Math]::Round(((Get-Date) - $started).TotalMilliseconds) + ' ms before production stop.')
 }
 
 Assert-GroupConfig

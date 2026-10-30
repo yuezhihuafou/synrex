@@ -40,6 +40,10 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(service, /function Stop-Group\(\[switch\]\$PreserveTunnel\)/);
   assert.match(service, /function Warm-CoreSlot/);
   assert.match(service, /SYNREX_PRELOAD_ONLY/);
+  assert.match(service, /Split-Path -Leaf \$candidate\.Cli/);
+  assert.match(service, /New-Object Diagnostics\.ProcessStartInfo/);
+  assert.match(service, /ReadToEndAsync\(\)/);
+  assert.match(service, /\$process\.ExitCode/);
   assert.match(service, /Preloaded slot/);
   assert.match(service, /Stop-Group -PreserveTunnel/);
   assert.match(service, /ADOPT tunnel=/);
