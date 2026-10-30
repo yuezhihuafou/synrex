@@ -17,6 +17,8 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   const service = await readFile(resolve("deploy/windows/group-service.ps1"), "utf8");
   const manualLauncher = await readFile(resolve("deploy/windows/start-group-stack.ps1"), "utf8");
   const manualCmd = await readFile(resolve("deploy/windows/start-group-stack.cmd"), "utf8");
+  const manualVbs = await readFile(resolve("deploy/windows/start-group-stack.vbs"), "utf8");
+  const trayVbs = await readFile(resolve("deploy/windows/start-group-tray.vbs"), "utf8");
   const desktop = await readFile(resolve("deploy/windows/desktop/main.cjs"), "utf8");
   assert.match(installer, /start-synrex-console\.ps1/);
   assert.match(installer, /Synrex Console\.lnk/);
@@ -84,8 +86,12 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(service, /scheduled_task = 'stopped'/);
   const manualStartBlock = service.match(/if \(\$Action -eq 'ManualStart'\) \{([\s\S]*?)\n\}\nif \(\$Action -eq 'Restart'\)/);
   assert.ok(manualStartBlock, "ManualStart implementation must remain a distinct bounded path");
+  assert.match(manualStartBlock[1], /-ControlOnly/);
+  assert.match(manualStartBlock[1], /start-group-tray\.vbs/);
+  assert.match(manualStartBlock[1], /explorer\.exe/);
   assert.doesNotMatch(manualStartBlock[1], /Install-Task|Register-ScheduledTask|Restart-Computer|shutdown\.exe/i);
   assert.match(manualLauncher, /-Verb RunAs/);
+  assert.match(manualLauncher, /-Verb RunAs -WindowStyle Hidden/);
   assert.doesNotMatch(manualLauncher, /^\s*\$elevated = Start-Process[^\r\n]*-Wait/m);
   assert.match(manualLauncher, /\$elevated\.WaitForExit\(\)/);
   assert.match(manualLauncher, /-Action ManualStart/);
@@ -93,10 +99,24 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(manualCmd, /ExecutionPolicy Bypass/);
   assert.match(manualCmd, /start-group-stack\.ps1/);
   assert.match(manualCmd, /%~f1/);
+  assert.match(manualVbs, /shell\.Run\(command, 0, True\)/);
+  assert.match(manualVbs, /-WindowStyle Hidden/);
+  assert.match(manualVbs, /WScript\.Quit result/);
+  assert.match(trayVbs, /SYNREX_CONSOLE_START_HIDDEN/);
+  assert.match(trayVbs, /shell\.Run\(command, 0, True\)/);
+  assert.match(launcher, /\[switch\]\$ControlOnly/);
+  assert.match(launcher, /\$ControlOnly -or \$env:SYNREX_CONSOLE_START_HIDDEN -eq '1'/);
+  assert.match(launcher, /refusing to start the scheduled task/);
+  assert.match(deploy, /start-group-stack\.vbs/);
+  assert.match(deploy, /start-group-tray\.vbs/);
+  assert.match(deploy, /System32\\wscript\.exe/);
+  assert.match(deploy, /\$link\.Arguments/);
   assert.match(deploy, /Synrex Group Start\.lnk/);
   assert.match(deploy, /manual_launcher/);
   assert.doesNotMatch(service, /Copy-Item -LiteralPath \(Join-Path \$root 'state\\devspace-state'\) -Destination \$stateBackup -Recurse/);
   assert.match(desktop, /app\.setPath\("userData", profileRoot\)/);
+  assert.match(desktop, /SYNREX_CONSOLE_START_HIDDEN !== "1"/);
+  assert.match(desktop, /tray\.on\("click"/);
   assert.match(desktop, /DEVSPACE_PLATFORM_ROOT/);
 });
 
@@ -135,4 +155,22 @@ test("Windows Group startup rejects wrong credentials, endpoints and occupied po
   t.after(() => { if (listener.listening) listener.close(); });
   await assert.rejects(invoke);
   assert.match(await readFile(join(root, "logs/group-service.log"), "utf8"), /Port 17677 is occupied/);
+});
+
+test("manual Console startup never starts the scheduled task when Core is unavailable", { skip: process.platform !== "win32" }, async t => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-manual-console-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const slot = join(root, "runtime/slots/synrex-windows-test/devspace/node_modules/@waishnav/devspace");
+  for (const dir of [join(root, "desktop"), join(root, "ops"), slot]) await mkdir(dir, { recursive: true });
+  for (const file of [join(root, "desktop/SynrexConsole.exe"), join(root, "ops/start-runtime-console.ps1"), join(root, "ops/runtime-console.mjs"), join(slot, "package.json")]) await writeFile(file, "");
+  await writeFile(join(root, "runtime/active-slot.txt"), "synrex-windows-test");
+  const source = await readFile(resolve("deploy/windows/start-synrex-console.ps1"), "utf8");
+  const marker = "if ((Get-Status 'http://127.0.0.1:17677/group/healthz') -ne 200) {";
+  assert.equal(source.split(marker).length, 2);
+  const isolated = source.replace(marker, "function Get-Status([string]$url) { return 0 }\nfunction Get-ScheduledTask { throw 'scheduled task was invoked' }\n" + marker);
+  const script = join(root, "console-launcher.ps1");
+  await writeFile(script, isolated);
+  const args = ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-PlatformRoot", root];
+  await assert.rejects(exec("powershell.exe", [...args, "-ControlOnly"], { timeout: 15000 }), /refusing to start the scheduled task/);
+  await assert.rejects(exec("powershell.exe", args, { timeout: 15000, env: { ...process.env, SYNREX_CONSOLE_START_HIDDEN: "1" } }), /refusing to start the scheduled task/);
 });

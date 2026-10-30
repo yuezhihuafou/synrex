@@ -22,7 +22,7 @@ $prepare = Join-Path $PSScriptRoot 'prepare-runtime-slot.ps1'
 $service = Join-Path $PSScriptRoot 'group-service.ps1'
 $console = Join-Path $PSScriptRoot 'install-console-desktop.ps1'
 $installedDeploymentRoot = Join-Path $root 'ops\deployment'
-foreach ($required in @($prepare, $service, $console, $package)) {
+foreach ($required in @($prepare, $service, $console, $package, (Join-Path $PSScriptRoot 'start-group-stack.vbs'), (Join-Path $PSScriptRoot 'start-group-tray.vbs'), (Join-Path $PSScriptRoot 'start-group-stack.ps1'))) {
     if (!(Test-Path -LiteralPath $required -PathType Leaf)) { throw "Deployment input missing: $required" }
 }
 
@@ -75,12 +75,13 @@ if (!$sourceDeploymentRoot.Equals($targetDeploymentRoot, [StringComparison]::Ord
     }
 }
 
-$manualLauncher = Join-Path $installedDeploymentRoot 'start-group-stack.cmd'
+$manualLauncher = Join-Path $installedDeploymentRoot 'start-group-stack.vbs'
 if (!(Test-Path -LiteralPath $manualLauncher -PathType Leaf)) { throw "Manual Group launcher was not installed: $manualLauncher" }
 $manualShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Synrex Group Start.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($manualShortcut)
-$link.TargetPath = $manualLauncher
+$link.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+$link.Arguments = '"' + $manualLauncher + '" "' + $root + '"'
 $link.WorkingDirectory = $root
 $consoleExe = Join-Path $root 'desktop\SynrexConsole.exe'
 if (Test-Path -LiteralPath $consoleExe -PathType Leaf) { $link.IconLocation = $consoleExe + ',0' }

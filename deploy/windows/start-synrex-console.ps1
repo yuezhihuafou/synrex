@@ -1,5 +1,6 @@
 param(
-    [Parameter(Mandatory = $true)][string]$PlatformRoot
+    [Parameter(Mandatory = $true)][string]$PlatformRoot,
+    [switch]$ControlOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +42,9 @@ function Wait-Status([string]$url, [int]$expected, [int]$seconds) {
 }
 
 if ((Get-Status 'http://127.0.0.1:17677/group/healthz') -ne 200) {
+    if ($ControlOnly -or $env:SYNREX_CONSOLE_START_HIDDEN -eq '1') {
+        throw 'Group Core is unavailable during manual startup; refusing to start the scheduled task.'
+    }
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if ($task.Actions.Count -ne 1 -or !$task.Actions[0].Arguments.Contains('group-service.ps1')) {
         throw 'Synrex Group scheduled task is not owned by the current deployment.'
@@ -146,6 +150,7 @@ if ($controlState -ne 'ready') {
     }
 }
 
+if ($ControlOnly) { Write-Output 'Windows Control is ready.'; exit 0 }
 New-Item -ItemType Directory -Force -Path $profile | Out-Null
 $env:DEVSPACE_PLATFORM_ROOT = $root
 $env:DEVSPACE_CONTROL_URL = $controlUrl + '/'

@@ -57,7 +57,7 @@ async function createWindow(icon) {
     if (!app.isQuiting) { event.preventDefault(); win.hide(); }
   });
   await win.loadURL(consoleUrl);
-  win.show();
+  if (!icon || process.env.SYNREX_CONSOLE_START_HIDDEN !== "1") win.show();
 }
 
 function createTray(icon) {
@@ -69,7 +69,7 @@ function createTray(icon) {
     { type: "separator" },
     { label: "Quit Synrex Console", click: () => { app.isQuiting = true; app.quit(); } },
   ]));
-  tray.on("double-click", () => { win?.show(); win?.focus(); });
+  tray.on("click", () => { win?.show(); win?.focus(); });
 }
 
 if (!app.requestSingleInstanceLock()) app.quit();

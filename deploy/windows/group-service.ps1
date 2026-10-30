@@ -470,7 +470,8 @@ if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Secur
     throw 'Run Install, Activate, Restart or ManualStart from elevated PowerShell; production has not been stopped.'
 }
 if ($Action -eq 'ManualStart') {
-    foreach ($required in @($installedScript, $consoleLauncher)) {
+    $trayLauncher = Join-Path $root 'ops\deployment\start-group-tray.vbs'
+    foreach ($required in @($installedScript, $consoleLauncher, $trayLauncher)) {
         if (!(Test-Path -LiteralPath $required -PathType Leaf)) { throw "Manual launcher dependency missing: $required" }
     }
     Stop-ManualStack
@@ -482,13 +483,20 @@ if ($Action -eq 'ManualStart') {
     if ($supervisor.HasExited) { throw "Manual Group supervisor exited with code $($supervisor.ExitCode)." }
     Test-Chain
 
-    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $consoleLauncher -PlatformRoot $root
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $consoleLauncher -PlatformRoot $root -ControlOnly
     if ($LASTEXITCODE -ne 0) { throw 'Synrex Console launcher failed during manual startup.' }
     Start-Sleep -Seconds 5
     Remove-ControlManagedServiceChildren
     Wait-Endpoint 'http://127.0.0.1:17677/group/healthz' 200 30
     Wait-Endpoint 'http://127.0.0.1:20243/ready' 200 30
-    $desktop = @(Get-OwnedDesktopShells)
+    # Explorer opens the tray launcher with the interactive user's token.
+    Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"' + $trayLauncher + '"') -WindowStyle Hidden | Out-Null
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    do {
+        $desktop = @(Get-OwnedDesktopShells)
+        if ($desktop.Count -gt 0) { break }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
     $control = @(Get-OwnedControls)
     if ($desktop.Count -eq 0) { throw 'Synrex Console did not remain running after manual startup.' }
     if ($control.Count -eq 0) { throw 'Windows Control did not remain running after manual startup.' }

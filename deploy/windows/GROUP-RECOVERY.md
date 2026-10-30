@@ -72,13 +72,16 @@ its own Electron profile.
 Console session cookies are also scoped to the configured public Synrex identity,
 so Group, Personal and legacy local Console sessions do not share authentication.
 
-For an explicit clean manual recovery, use the installed one-click launcher:
+For an explicit clean manual recovery, use the `Synrex Group Start` desktop shortcut
+or the installed windowless launcher:
 
 ```text
-$groupRoot\ops\deployment\start-group-stack.cmd
+wscript.exe "$groupRoot\ops\deployment\start-group-stack.vbs" "$groupRoot"
 ```
 
-Deployment also creates `Synrex Group Start.lnk` on the owner's desktop. This
+Deployment also creates `Synrex Group Start.lnk` on the owner's desktop. Startup
+does not open a terminal; the Console starts in the tray and can be opened from
+its tray icon. Startup failures display a message. This
 manual path does **not** repair, enable or rely on boot autostart and it never
 reboots Windows. It first stops the existing owned scheduled-task instance, any
 manual Group supervisor, stale Group Core processes, the Group-owned Windows
@@ -104,7 +107,7 @@ example, from a fetched `windows` source checkout:
 deploy\windows\start-group-stack.cmd "C:\path\to\group\PlatformRoot"
 ```
 
-In that mode the launcher uses the `group-service.ps1` bundled beside it for
+In that mode the launcher requires the installed Group tray helper and uses the `group-service.ps1` bundled beside it for
 the cleanup/start decision while the long-running supervisor remains the
 existing installed `$groupRoot\ops\group-service.ps1`.
 
