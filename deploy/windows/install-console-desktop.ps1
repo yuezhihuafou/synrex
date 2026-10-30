@@ -53,15 +53,34 @@ if ($Restart) {
     # The launcher owns a named mutex while it waits for Electron. Give the
     # previous launcher a brief chance to observe Electron exit and release it.
     Start-Sleep -Milliseconds 500
-    Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $launcher + '"'),'-PlatformRoot',('"' + $root + '"')) -WindowStyle Hidden | Out-Null
-    $startDeadline = [DateTime]::UtcNow.AddSeconds(12)
+    $launcherProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',('"' + $launcher + '"'),'-PlatformRoot',('"' + $root + '"')) -WindowStyle Hidden -PassThru
+    # The launcher itself may spend up to 8s validating an existing Control and
+    # another 30s starting a fresh one. Keep the installer acceptance window
+    # longer than that complete readiness budget so a healthy delayed launch is
+    # not misreported as a failed deployment.
+    $startDeadline = [DateTime]::UtcNow.AddSeconds(45)
     do {
         Start-Sleep -Milliseconds 250
         $started = @(Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe'" -ErrorAction SilentlyContinue)
         if ($started.Count -gt 0) { break }
+        $launcherProcess.Refresh()
+        if ($launcherProcess.HasExited) {
+            Start-Sleep -Milliseconds 500
+            $started = @(Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe'" -ErrorAction SilentlyContinue)
+            if ($started.Count -gt 0) { break }
+            throw "Synrex Console launcher exited with code $($launcherProcess.ExitCode) before starting SynrexConsole.exe."
+        }
     } while ([DateTime]::UtcNow -lt $startDeadline)
     if ($started.Count -eq 0) {
-        throw 'Synrex Console launcher returned without starting SynrexConsole.exe.'
+        throw 'Synrex Console launcher did not start SynrexConsole.exe within the 45-second readiness window.'
+    }
+    # Seeing the Electron process once is not sufficient: Chromium can start
+    # and then immediately exit when its persisted profile/cache is unhealthy.
+    # Require a short survival window before declaring the desktop restart good.
+    Start-Sleep -Seconds 5
+    $stable = @(Get-CimInstance Win32_Process -Filter "Name='SynrexConsole.exe'" -ErrorAction SilentlyContinue)
+    if ($stable.Count -eq 0) {
+        throw 'Synrex Console exited during the 5-second post-launch stability window.'
     }
 }
 

@@ -19,6 +19,11 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(installer, /start-synrex-console\.ps1/);
   assert.match(installer, /Synrex Console\.lnk/);
   assert.doesNotMatch(installer, /\.Replace\(/);
+  const desktopStartDeadline = installer.match(/\$startDeadline = \[DateTime\]::UtcNow\.AddSeconds\((\d+)\)/);
+  assert.ok(desktopStartDeadline, "desktop installer must bound launcher readiness");
+  assert.ok(Number(desktopStartDeadline[1]) >= 40, "desktop installer must outwait the launcher's Control readiness budget");
+  assert.match(installer, /\$launcherProcess\.HasExited/);
+  assert.match(installer, /5-second post-launch stability window/);
   assert.match(launcher, /Synrex Group Core/);
   assert.match(launcher, /SYNREX_CONSOLE_PROFILE_DIR/);
   assert.match(launcher, /17678/);
