@@ -61,7 +61,11 @@ The installed manual Console command is:
 Installation also creates `Synrex Console.lnk` on the owner's desktop. The
 launcher starts the existing `Synrex Group Core` task only when local health is
 down, verifies that Windows Control on 17678 belongs to this PlatformRoot, and
-then opens the desktop shell. Each PlatformRoot gets its own Electron profile.
+then opens the desktop shell. A Group-owned Control still pointing at a superseded
+runtime slot is treated as stale: the launcher verifies its PID/executable/command
+identity, stops only that owned process, and restarts Control against the current
+`active-slot.txt`. Unknown 17678 owners still fail closed. Each PlatformRoot gets
+its own Electron profile.
 Console session cookies are also scoped to the configured public Synrex identity,
 so Group, Personal and legacy local Console sessions do not share authentication.
 

@@ -9,11 +9,21 @@ $desktop = Join-Path $root 'desktop\SynrexConsole.exe'
 $startControl = Join-Path $root 'ops\start-runtime-console.ps1'
 $consoleScript = Join-Path $root 'ops\runtime-console.mjs'
 $profile = Join-Path $root 'state\synrex-console-profile'
+$activePointer = Join-Path $root 'runtime\active-slot.txt'
 
-foreach ($required in @($desktop, $startControl, $consoleScript)) {
+foreach ($required in @($desktop, $startControl, $consoleScript, $activePointer)) {
     if (!(Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Synrex Console asset is missing: $required"
     }
+}
+
+$activeSlot = (Get-Content -Raw -LiteralPath $activePointer).Trim()
+if ($activeSlot -notmatch '^synrex-windows-[A-Za-z0-9._-]+$') {
+    throw "Invalid active Synrex Windows slot: $activeSlot"
+}
+$expectedControlPackage = [IO.Path]::GetFullPath((Join-Path $root ('runtime\slots\' + $activeSlot + '\devspace\node_modules\@waishnav\devspace')))
+if (!(Test-Path -LiteralPath (Join-Path $expectedControlPackage 'package.json') -PathType Leaf)) {
+    throw "Active Synrex runtime package is incomplete: $expectedControlPackage"
 }
 
 function Get-Status([string]$url) {
@@ -55,13 +65,47 @@ function Get-ControlState {
         if (!$configuredPackage.StartsWith($runtimeRoot, [StringComparison]::OrdinalIgnoreCase)) {
             return 'foreign'
         }
+        if (!$configuredPackage.Equals($expectedControlPackage, [StringComparison]::OrdinalIgnoreCase)) {
+            return 'stale'
+        }
         return 'ready'
     } catch { return 'unavailable' }
+}
+
+function Stop-StaleOwnedControl {
+    $listener = Get-NetTCPConnection -State Listen -LocalPort 17678 -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (!$listener) { return }
+    $process = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$listener.OwningProcess) -ErrorAction Stop
+    $expectedConsole = [IO.Path]::GetFullPath($consoleScript)
+    $expectedNodeRoot = ([IO.Path]::GetFullPath((Join-Path $root 'runtime\slots'))).TrimEnd('\') + '\'
+    $commandLine = [string]$process.CommandLine
+    $ownedExecutable = $process.ExecutablePath.StartsWith($expectedNodeRoot, [StringComparison]::OrdinalIgnoreCase)
+    $ownedCommand = $commandLine.Contains(('"' + $expectedConsole + '"')) -and
+        $commandLine.Contains('--instance group') -and
+        $commandLine.Contains(('--platform-root "' + $root + '"')) -and
+        $commandLine.Contains('--serve 17678')
+    if (!$ownedExecutable -or !$ownedCommand) {
+        throw 'Port 17678 is stale but is not owned by the expected Group Runtime Console; refusing to stop it.'
+    }
+    Stop-Process -Id $process.ProcessId -ErrorAction Stop
+    Wait-Process -Id $process.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        if (!(Get-NetTCPConnection -State Listen -LocalPort 17678 -ErrorAction SilentlyContinue)) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    throw 'Stale Group Runtime Console did not release port 17678.'
 }
 
 $controlState = Get-ControlState
 if ($controlState -ne 'ready') {
     $listener = Get-NetTCPConnection -State Listen -LocalPort 17678 -ErrorAction SilentlyContinue
+    if ($listener) {
+        if ($controlState -eq 'stale') {
+            Stop-StaleOwnedControl
+            $controlState = 'unavailable'
+            $listener = $null
+        }
+    }
     if ($listener) {
         # A healthy local Control can briefly stop answering while its runtime
         # view refreshes after slot activation. Do not misclassify that normal
@@ -73,8 +117,13 @@ if ($controlState -ne 'ready') {
             }
             Start-Sleep -Milliseconds 400
             $controlState = Get-ControlState
+            if ($controlState -eq 'stale') {
+                Stop-StaleOwnedControl
+                $controlState = 'unavailable'
+                break
+            }
         } while ($controlState -ne 'ready' -and [DateTime]::UtcNow -lt $deadline)
-        if ($controlState -ne 'ready') {
+        if ($controlState -ne 'ready' -and $controlState -ne 'unavailable') {
             throw 'Existing Windows Control on 17678 did not become ready for this Group PlatformRoot.'
         }
     }

@@ -23,6 +23,10 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(launcher, /SYNREX_CONSOLE_PROFILE_DIR/);
   assert.match(launcher, /17678/);
   assert.match(launcher, /body\.instance.*group/);
+  assert.match(launcher, /expectedControlPackage/);
+  assert.match(launcher, /return 'stale'/);
+  assert.match(launcher, /function Stop-StaleOwnedControl/);
+  assert.match(launcher, /not owned by the expected Group Runtime Console/);
   assert.match(launcher, /Existing Windows Control on 17678 did not become ready/);
   assert.match(deploy, /prepare-runtime-slot\.ps1/);
   assert.match(deploy, /-Action Activate/);
