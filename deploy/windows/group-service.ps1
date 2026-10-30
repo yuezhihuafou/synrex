@@ -1,5 +1,5 @@
 param(
-    [ValidateSet('Run', 'Install', 'Restart', 'Activate', 'Check')][string]$Action = 'Check',
+    [ValidateSet('Run', 'Install', 'Restart', 'Activate', 'Check', 'ManualStart')][string]$Action = 'Check',
     [Parameter(Mandatory = $true)][string]$PlatformRoot,
     [string]$SlotName = '',
     [switch]$LogonOnly
@@ -11,6 +11,7 @@ $tunnelId = 'edbf2dd7-2cc1-434c-979a-2f6b387eebe3'
 $tokenFile = Join-Path $root 'state\secrets\cloudflare-tunnel-token.txt'
 $pointer = Join-Path $root 'runtime\active-slot.txt'
 $installedScript = Join-Path $root 'ops\group-service.ps1'
+$consoleLauncher = Join-Path $root 'ops\start-synrex-console.ps1'
 $processReceipt = Join-Path $root 'state\group-service-core.json'
 $utf8 = New-Object Text.UTF8Encoding($false)
 $stateDirectoriesToBackup = @('diagnostics', 'jobs', 'observability', 'operations', 'payload-spool')
@@ -120,6 +121,94 @@ function Get-GroupTunnels {
         $_.ExecutablePath -eq (Join-Path $root 'cloudflared.exe') -and
         $_.CommandLine -match [regex]::Escape('--token-file "' + $tokenFile + '"')
     })
+}
+
+function Get-OwnedCoreProcesses {
+    $slotRoot = ([IO.Path]::GetFullPath((Join-Path $root 'runtime\slots'))).TrimEnd('\') + '\'
+    @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $executable = [string]$_.ExecutablePath
+        $command = [string]$_.CommandLine
+        $executable.StartsWith($slotRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        $command -match '(?i)\\devspace\\node_modules\\@waishnav\\devspace\\dist\\cli\.js"?\s+serve(?:\s|$)'
+    })
+}
+
+function Get-OwnedSupervisors {
+    @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $command = [string]$_.CommandLine
+        $command.IndexOf($installedScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $command -match '(?i)-Action\s+Run(?:\s|$)' -and
+        $command.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+}
+
+function Get-OwnedControls {
+    $consoleScript = Join-Path $root 'ops\runtime-console.mjs'
+    $slotRoot = ([IO.Path]::GetFullPath((Join-Path $root 'runtime\slots'))).TrimEnd('\') + '\'
+    @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $executable = [string]$_.ExecutablePath
+        $command = [string]$_.CommandLine
+        $executable.StartsWith($slotRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        $command.IndexOf($consoleScript, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        $command -match '(?i)--instance\s+group(?:\s|$)' -and
+        $command.IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+}
+
+function Get-OwnedDesktopShells {
+    $expected = @(
+        [IO.Path]::GetFullPath((Join-Path $root 'desktop\SynrexConsole.exe')),
+        [IO.Path]::GetFullPath((Join-Path $root 'desktop\DevSpaceForgeDesktop.exe'))
+    )
+    @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $executable = [string]$_.ExecutablePath
+        $owned = $false
+        foreach ($path in $expected) {
+            if (!$owned -and !$([string]::IsNullOrWhiteSpace($executable)) -and
+                $executable.Equals($path, [StringComparison]::OrdinalIgnoreCase)) {
+                $owned = $true
+            }
+        }
+        $owned
+    })
+}
+
+function Stop-ProcessList([object[]]$processes, [string]$label) {
+    foreach ($process in @($processes | Sort-Object ProcessId -Unique)) {
+        Write-Output ('Stopping owned ' + $label + ' PID ' + $process.ProcessId)
+        Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+    }
+}
+
+function Stop-ManualStack {
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($task) {
+        $args = [string]$task.Actions[0].Arguments
+        $legacy = Join-Path $root 'ops\start-synrex-background.ps1'
+        if ($task.Actions.Count -ne 1 -or (!$args.Contains($installedScript) -and !$args.Contains($legacy))) {
+            throw 'Unexpected scheduled-task owner; refusing manual cleanup.'
+        }
+        Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
+    }
+
+    Stop-ProcessList @(Get-OwnedSupervisors) 'Group supervisor'
+    Start-Sleep -Milliseconds 600
+    Stop-ProcessList @(Get-OwnedCoreProcesses) 'Group Core'
+    Stop-ProcessList @(Get-OwnedControls) 'Windows Control'
+    Stop-ProcessList @(Get-OwnedDesktopShells) 'Console shell'
+    Stop-ProcessList @(Get-GroupTunnels) 'Group Tunnel'
+    Remove-Item -LiteralPath $processReceipt -Force -ErrorAction SilentlyContinue
+
+    $deadline = [DateTime]::UtcNow.AddSeconds(12)
+    do {
+        $busy = @()
+        foreach ($port in @(17677, 17678, 20243)) {
+            if (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue) { $busy += $port }
+        }
+        if ($busy.Count -eq 0) { return }
+        Start-Sleep -Milliseconds 300
+    } while ([DateTime]::UtcNow -lt $deadline)
+    foreach ($port in @(17677, 17678, 20243)) { Assert-FreePort $port }
 }
 
 function Assert-FreePort([int]$port) {
@@ -326,7 +415,45 @@ if ($Action -eq 'Run') {
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Run Install, Activate or Restart from elevated PowerShell; production has not been stopped.'
+    throw 'Run Install, Activate, Restart or ManualStart from elevated PowerShell; production has not been stopped.'
+}
+if ($Action -eq 'ManualStart') {
+    foreach ($required in @($installedScript, $consoleLauncher)) {
+        if (!(Test-Path -LiteralPath $required -PathType Leaf)) { throw "Manual launcher dependency missing: $required" }
+    }
+    Stop-ManualStack
+    $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $installedScript + '" -Action Run -PlatformRoot "' + $root + '"'
+    $supervisor = Start-Process -FilePath 'powershell.exe' -ArgumentList $arguments -WorkingDirectory $root -WindowStyle Hidden -PassThru
+    Wait-Endpoint 'http://127.0.0.1:17677/group/healthz' 200 90
+    Wait-Endpoint 'http://127.0.0.1:20243/ready' 200 90
+    $supervisor.Refresh()
+    if ($supervisor.HasExited) { throw "Manual Group supervisor exited with code $($supervisor.ExitCode)." }
+    Test-Chain
+
+    & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $consoleLauncher -PlatformRoot $root
+    if ($LASTEXITCODE -ne 0) { throw 'Synrex Console launcher failed during manual startup.' }
+    Start-Sleep -Seconds 5
+    $desktop = @(Get-OwnedDesktopShells)
+    $control = @(Get-OwnedControls)
+    if ($desktop.Count -eq 0) { throw 'Synrex Console did not remain running after manual startup.' }
+    if ($control.Count -eq 0) { throw 'Windows Control did not remain running after manual startup.' }
+
+    $core = @(Get-OwnedCoreProcesses)
+    $tunnel = @(Get-GroupTunnels)
+    if ($core.Count -ne 1 -or $tunnel.Count -ne 1) {
+        throw ('Manual startup ended with an unexpected owned-process count: core=' + $core.Count + ' tunnel=' + $tunnel.Count)
+    }
+    [PSCustomObject]@{
+        status = 'ready'
+        mode = 'manual'
+        slot = $slot.Name
+        core_pid = [int]$core[0].ProcessId
+        tunnel_pid = [int]$tunnel[0].ProcessId
+        control_pid = [int]$control[0].ProcessId
+        console_pid = [int]$desktop[0].ProcessId
+        scheduled_task = 'stopped'
+    }
+    exit 0
 }
 if ($Action -eq 'Restart') {
     $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop

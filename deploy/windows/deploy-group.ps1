@@ -75,11 +75,25 @@ if (!$sourceDeploymentRoot.Equals($targetDeploymentRoot, [StringComparison]::Ord
     }
 }
 
+$manualLauncher = Join-Path $installedDeploymentRoot 'start-group-stack.cmd'
+if (!(Test-Path -LiteralPath $manualLauncher -PathType Leaf)) { throw "Manual Group launcher was not installed: $manualLauncher" }
+$manualShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Synrex Group Start.lnk'
+$shell = New-Object -ComObject WScript.Shell
+$link = $shell.CreateShortcut($manualShortcut)
+$link.TargetPath = $manualLauncher
+$link.WorkingDirectory = $root
+$consoleExe = Join-Path $root 'desktop\SynrexConsole.exe'
+if (Test-Path -LiteralPath $consoleExe -PathType Leaf) { $link.IconLocation = $consoleExe + ',0' }
+$link.Description = 'Cleanly restart the owned Synrex Group stack and open Console'
+$link.Save()
+
 [PSCustomObject]@{
     status = 'ready'
     slot = $active
     revision = $revision
     console = 'http://127.0.0.1:17677/console'
     launcher = (Join-Path $root 'ops\start-synrex-console.ps1')
+    manual_launcher = $manualLauncher
+    manual_shortcut = $manualShortcut
     deployment = (Join-Path $installedDeploymentRoot 'deploy-group.ps1')
 }

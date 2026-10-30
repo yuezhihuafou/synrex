@@ -72,6 +72,37 @@ its own Electron profile.
 Console session cookies are also scoped to the configured public Synrex identity,
 so Group, Personal and legacy local Console sessions do not share authentication.
 
+For an explicit clean manual recovery, use the installed one-click launcher:
+
+```text
+$groupRoot\ops\deployment\start-group-stack.cmd
+```
+
+Deployment also creates `Synrex Group Start.lnk` on the owner's desktop. This
+manual path does **not** repair, enable or rely on boot autostart and it never
+reboots Windows. It first stops the existing owned scheduled-task instance, any
+manual Group supervisor, stale Group Core processes, the Group-owned Windows
+Control and desktop shell, and every cloudflared process whose executable and
+`--token-file` both identify this Group PlatformRoot. Qwen and unrelated
+cloudflared processes are therefore outside the match. It then verifies that
+17677/17678/20243 are free, launches a fresh Group supervisor against the active
+immutable slot, waits for the full health/MCP/Tunnel chain, starts Control and
+Console, and requires exactly one owned Core and one owned Group Tunnel before
+returning success. Re-running the launcher deliberately replaces the previous
+manual stack instead of adopting stale processes.
+
+The packaged CMD also accepts an explicit PlatformRoot as its first argument,
+which is useful before the new deployment toolkit has been installed. For
+example, from a fetched `windows` source checkout:
+
+```text
+deploy\windows\start-group-stack.cmd "C:\path\to\group\PlatformRoot"
+```
+
+In that mode the launcher uses the `group-service.ps1` bundled beside it for
+the cleanup/start decision while the long-running supervisor remains the
+existing installed `$groupRoot\ops\group-service.ps1`.
+
 `Activate` requires an already prepared, authenticated-MCP-tested immutable slot.
 It backs up the task XML, active pointer, config and stopped Core state, installs
 the packaged supervisor and performs readiness gates. Failure restores the old
