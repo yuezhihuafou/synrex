@@ -2,12 +2,21 @@
 
 The packaged `deploy/windows/group-service.ps1` owns the existing `Synrex Group Core`
 scheduled task. It starts the active slot's Core, waits for localhost health,
-starts only Group Tunnel `edbf2dd7-2cc1-434c-979a-2f6b387eebe3` with HTTP/2 and
-`--token-file`, then verifies Tunnel readiness, origin/public health, local/public
+starts or safely adopts only Group Tunnel `edbf2dd7-2cc1-434c-979a-2f6b387eebe3`
+with HTTP/2 and `--token-file`, then verifies Tunnel readiness, origin/public health, local/public
 MCP 401 challenges, OAuth resource metadata and Console. Qwen is never selected by
 executable name alone. Occupied ports fail closed. A named mutex prevents duplicate
 supervisors; an exited Tunnel is restarted, and a failed Core is recovered by the
 scheduled task. No token value is passed to a command or written to logs.
+
+`Activate` and `Restart` preserve a healthy, identity-verified Group Tunnel across
+the Core handoff instead of reconnecting Cloudflare from scratch. The new supervisor
+adopts that exact process after taking the mutex. If the Tunnel is missing, unhealthy,
+ambiguous, or exits later, the existing fail-closed path starts a fresh Group Tunnel.
+Before production is stopped, the target slot is also preloaded in a short-lived Node
+process with `SYNREX_PRELOAD_ONLY=1`. This loads the CLI/server module graph without
+reading owner state or binding a port, moving Windows cold module/Defender scan cost
+outside the outage window. A failed or >90 second preload aborts before production stop.
 
 Run PowerShell as the owner, elevated for installation, activation or restart:
 

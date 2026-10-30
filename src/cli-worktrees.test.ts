@@ -171,6 +171,25 @@ test("serve does not run recovery-aware managed worktree pruning on the startup 
   assert.equal(await pathExists(staleWorktree), true);
 });
 
+test("serve preload loads runtime modules without requiring config or binding a port", async () => {
+  const missingConfigDir = join(tmpdir(), `synrex-preload-missing-${Date.now()}`);
+  const { stdout, stderr } = await execFileAsync(
+    process.execPath,
+    ["--import", "tsx", cliPath, "serve"],
+    {
+      env: {
+        ...process.env,
+        DEVSPACE_CONFIG_DIR: missingConfigDir,
+        SYNREX_PRELOAD_ONLY: "1",
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+    },
+  );
+  assert.equal(stdout.trim(), "");
+  assert.equal(stderr.trim(), "");
+});
+
 async function git(cwd: string, args: string[]): Promise<string> {
   const { stdout } = await execFileAsync("git", args, { cwd, encoding: "utf8" });
   return stdout.trim();

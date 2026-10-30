@@ -171,7 +171,7 @@ function Test-Chain {
     }
 }
 
-function Stop-Group {
+function Stop-Group([switch]$PreserveTunnel) {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($task) {
         $args = [string]$task.Actions[0].Arguments
@@ -183,13 +183,21 @@ function Stop-Group {
     }
     Stop-OwnedCore
     # Match only the Group token file; Qwen uses the same executable.
-    foreach ($process in Get-GroupTunnels) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
+    $groupTunnels = @(Get-GroupTunnels)
+    if ($groupTunnels.Count -gt 1) {
+        throw 'Multiple Group Tunnel processes are running; refusing an ambiguous handoff.'
+    }
+    if ($PreserveTunnel -and $groupTunnels.Count -eq 1 -and (Get-HttpStatus 'http://127.0.0.1:20243/ready') -eq 200) {
+        Write-Output ('Preserving Group Tunnel PID ' + $groupTunnels[0].ProcessId + ' across Core cutover.')
+    } else {
+        foreach ($process in $groupTunnels) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
+    }
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
         if (!(Get-NetTCPConnection -State Listen -LocalPort 17677 -ErrorAction SilentlyContinue)) { break }
         Start-Sleep -Milliseconds 500
     }
     Assert-FreePort 17677
-    Assert-FreePort 20243
+    if (!$PreserveTunnel -or @(Get-GroupTunnels).Count -eq 0) { Assert-FreePort 20243 }
 }
 
 function Install-Task {
@@ -208,6 +216,31 @@ function Install-Task {
     }
 }
 
+function Warm-CoreSlot([hashtable]$candidate) {
+    $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+    $stdout = Join-Path $root ('logs\group-preload-' + $stamp + '.stdout.log')
+    $stderr = Join-Path $root ('logs\group-preload-' + $stamp + '.stderr.log')
+    $previousPreload = $env:SYNREX_PRELOAD_ONLY
+    try {
+        $env:SYNREX_PRELOAD_ONLY = '1'
+        $started = Get-Date
+        $process = Start-Process -FilePath $candidate.Node -ArgumentList @(('"' + $candidate.Cli + '"'), 'serve') -WorkingDirectory $candidate.Root -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+        if (!$process.WaitForExit(90000)) {
+            $process.Kill()
+            $process.WaitForExit(5000) | Out-Null
+            throw 'Synrex Core preload exceeded 90 seconds.'
+        }
+        if ($process.ExitCode -ne 0) {
+            $detail = if (Test-Path -LiteralPath $stderr) { (Get-Content -LiteralPath $stderr -Tail 20) -join ' ' } else { '' }
+            throw ('Synrex Core preload failed with code ' + $process.ExitCode + '. ' + $detail)
+        }
+        Write-Output ('Preloaded slot ' + $candidate.Name + ' in ' + [Math]::Round(((Get-Date) - $started).TotalMilliseconds) + ' ms before production stop.')
+    } finally {
+        if ($null -eq $previousPreload) { Remove-Item Env:SYNREX_PRELOAD_ONLY -ErrorAction SilentlyContinue }
+        else { $env:SYNREX_PRELOAD_ONLY = $previousPreload }
+    }
+}
+
 Assert-GroupConfig
 $slot = Get-Slot $SlotName
 if ($Action -eq 'Check') { Test-Chain; exit 0 }
@@ -223,10 +256,21 @@ if ($Action -eq 'Run') {
         if (!$ownsMutex) { Write-Output 'Group supervisor already owns the startup chain.'; exit 0 }
         # Task Scheduler can leave Start-Process children alive after stopping the supervisor.
         Stop-OwnedCore
-        foreach ($process in Get-GroupTunnels) { Stop-Process -Id $process.ProcessId -ErrorAction Stop }
         Assert-FreePort 17677
-        Assert-FreePort 20243
-        if (@(Get-GroupTunnels).Count -gt 0) { throw 'A standalone Group Tunnel is running; use Restart to transfer ownership.' }
+        $existingTunnels = @(Get-GroupTunnels)
+        if ($existingTunnels.Count -gt 1) { throw 'Multiple Group Tunnel processes are running; refusing an ambiguous handoff.' }
+        if ($existingTunnels.Count -eq 1) {
+            if ((Get-HttpStatus 'http://127.0.0.1:20243/ready') -eq 200) {
+                $tunnel = Get-Process -Id ([int]$existingTunnels[0].ProcessId) -ErrorAction Stop
+                Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' ADOPT tunnel=' + $tunnel.Id)
+            } else {
+                Stop-Process -Id $existingTunnels[0].ProcessId -ErrorAction Stop
+                Wait-Process -Id $existingTunnels[0].ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+                Assert-FreePort 20243
+            }
+        } else {
+            Assert-FreePort 20243
+        }
         $env:DEVSPACE_CONFIG_DIR = Join-Path $root 'state\devspace-config'
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
         $core = Start-Process -FilePath $slot.Node -ArgumentList @(('"' + $slot.Cli + '"'), 'serve') -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root ('logs\group-core-' + $stamp + '.stdout.log')) -RedirectStandardError (Join-Path $root ('logs\group-core-' + $stamp + '.stderr.log')) -PassThru
@@ -234,16 +278,23 @@ if ($Action -eq 'Run') {
         @{ slot = $slot.Name; pid = $core.Id; created = $identity.CreationDate.ToUniversalTime().ToString('o') } | ConvertTo-Json | Set-Content -LiteralPath $processReceipt -Encoding UTF8
         Wait-Endpoint 'http://127.0.0.1:17677/group/healthz' 200
         if ($core.HasExited -or (Get-NetTCPConnection -State Listen -LocalPort 17677).OwningProcess -ne $core.Id) { throw 'Core listener is not owned by the launched process.' }
+        if (!$tunnel -or $tunnel.HasExited) {
+            Assert-FreePort 20243
+            $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
+            $tunnel = Start-Process -FilePath (Join-Path $root 'cloudflared.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', '--metrics', '127.0.0.1:20243', 'run', '--token-file', ('"' + $tokenFile + '"')) -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root ('logs\group-tunnel-' + $stamp + '.stdout.log')) -RedirectStandardError (Join-Path $root ('logs\group-tunnel-' + $stamp + '.stderr.log')) -PassThru
+        }
+        Test-Chain | ForEach-Object { Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' ' + $_) }
+        Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' READY slot=' + $slot.Name + ' core=' + $core.Id + ' tunnel=' + $tunnel.Id)
         do {
-            if (!$tunnel -or $tunnel.HasExited) {
+            Start-Sleep -Seconds 3
+            if ($core.HasExited) { throw 'Group Core exited; scheduled-task recovery will restart the chain.' }
+            if ($tunnel.HasExited) {
                 Assert-FreePort 20243
                 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss-fff'
                 $tunnel = Start-Process -FilePath (Join-Path $root 'cloudflared.exe') -ArgumentList @('tunnel', '--no-autoupdate', '--protocol', 'http2', '--metrics', '127.0.0.1:20243', 'run', '--token-file', ('"' + $tokenFile + '"')) -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardOutput (Join-Path $root ('logs\group-tunnel-' + $stamp + '.stdout.log')) -RedirectStandardError (Join-Path $root ('logs\group-tunnel-' + $stamp + '.stderr.log')) -PassThru
                 Test-Chain | ForEach-Object { Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' ' + $_) }
                 Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' READY slot=' + $slot.Name + ' core=' + $core.Id + ' tunnel=' + $tunnel.Id)
             }
-            Start-Sleep -Seconds 3
-            if ($core.HasExited) { throw 'Group Core exited; scheduled-task recovery will restart the chain.' }
         } while ($true)
     } catch {
         Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' FAILED ' + $_.Exception.Message)
@@ -262,7 +313,8 @@ if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Secur
 if ($Action -eq 'Restart') {
     $currentTask = Get-ScheduledTask -TaskName $taskName -ErrorAction Stop
     if (!$currentTask.Actions[0].Arguments.Contains($installedScript)) { throw 'Install the Group supervisor before restarting it.' }
-    Stop-Group
+    Warm-CoreSlot $slot
+    Stop-Group -PreserveTunnel
     Start-ScheduledTask -TaskName $taskName -ErrorAction Stop
     Test-Chain
     exit 0
@@ -284,7 +336,8 @@ Copy-Item -LiteralPath $pointer -Destination (Join-Path $backup 'active-slot.txt
 if (Test-Path -LiteralPath $installedScript) { Copy-Item -LiteralPath $installedScript -Destination (Join-Path $backup 'group-service.ps1') }
 $taskChanged = $false
 try {
-    Stop-Group
+    Warm-CoreSlot $slot
+    Stop-Group -PreserveTunnel
     $stateBackup = Join-Path $backup 'state'
     New-Item -ItemType Directory -Path $stateBackup | Out-Null
     Backup-GroupState $stateBackup $backupCapacity

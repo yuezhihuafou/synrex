@@ -37,6 +37,14 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(prepare, /Insufficient disk space to prepare a new Synrex Windows runtime slot/);
   assert.match(prepare, /Prune superseded slots or other disposable files before retrying/);
   assert.match(service, /Assert-StateBackupCapacity/);
+  assert.match(service, /function Stop-Group\(\[switch\]\$PreserveTunnel\)/);
+  assert.match(service, /function Warm-CoreSlot/);
+  assert.match(service, /SYNREX_PRELOAD_ONLY/);
+  assert.match(service, /Preloaded slot/);
+  assert.match(service, /Stop-Group -PreserveTunnel/);
+  assert.match(service, /ADOPT tunnel=/);
+  assert.match(service, /Multiple Group Tunnel processes are running; refusing an ambiguous handoff/);
+  assert.match(service, /Get-HttpStatus 'http:\/\/127\.0\.0\.1:20243\/ready'/);
   assert.match(service, /backupFreeSpaceReserveBytes = 256MB/);
   assert.match(service, /stateDirectoriesExcludedFromBackup = @\('compact-runs'\)/);
   assert.match(service, /Unknown Group state directories require an explicit backup policy/);

@@ -98,6 +98,10 @@ async function main(argv: string[]): Promise<void> {
 
   switch (command) {
     case "serve":
+      if (process.env.SYNREX_PRELOAD_ONLY === "1") {
+        await import("./server.js");
+        return;
+      }
       await ensureConfigured();
       await serve();
       return;
