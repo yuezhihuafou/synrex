@@ -13,6 +13,9 @@ scheduled task. No token value is passed to a command or written to logs.
 the Core handoff instead of reconnecting Cloudflare from scratch. The new supervisor
 adopts that exact process after taking the mutex. If the Tunnel is missing, unhealthy,
 ambiguous, or exits later, the existing fail-closed path starts a fresh Group Tunnel.
+The Tunnel is node-level transport state rather than slot-level Core state, so the
+supervisor does not kill a healthy Tunnel from its `finally` block. Explicit
+non-preserving `Stop-Group` paths remain the authority for deliberate Tunnel shutdown.
 Before production is stopped, the target slot is also preloaded in a short-lived Node
 process with `SYNREX_PRELOAD_ONLY=1`. This loads the CLI/server module graph without
 reading owner state or binding a port, moving Windows cold module/Defender scan cost

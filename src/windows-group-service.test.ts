@@ -53,6 +53,9 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(service, /ADOPT tunnel=/);
   assert.match(service, /Multiple Group Tunnel processes are running; refusing an ambiguous handoff/);
   assert.match(service, /Get-HttpStatus 'http:\/\/127\.0\.0\.1:20243\/ready'/);
+  assert.match(service, /The Group Tunnel is node-level transport state, not slot-level Core state/);
+  assert.match(service, /if \(\$core -and !\$core\.HasExited\) \{ \$core\.Kill\(\)/);
+  assert.doesNotMatch(service, /foreach \(\$child in @\(\$tunnel, \$core\)\)/);
   assert.match(service, /backupFreeSpaceReserveBytes = 256MB/);
   assert.match(service, /stateDirectoriesExcludedFromBackup = @\('compact-runs'\)/);
   assert.match(service, /Unknown Group state directories require an explicit backup policy/);

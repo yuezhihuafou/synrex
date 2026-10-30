@@ -313,7 +313,12 @@ if ($Action -eq 'Run') {
         Add-Content -LiteralPath $log -Value ((Get-Date -Format o) + ' FAILED ' + $_.Exception.Message)
         exit 1
     } finally {
-        foreach ($child in @($tunnel, $core)) { if ($child -and !$child.HasExited) { $child.Kill(); $child.WaitForExit(5000) | Out-Null } }
+        # The Group Tunnel is node-level transport state, not slot-level Core state.
+        # Keep it alive when the supervisor exits so Activate/Restart can hand it
+        # across Core cutovers without forcing a new Cloudflare connector handshake.
+        # Explicit Stop-Group without -PreserveTunnel remains the authority for
+        # deliberately stopping the Group Tunnel.
+        if ($core -and !$core.HasExited) { $core.Kill(); $core.WaitForExit(5000) | Out-Null }
         if ($ownsMutex) { $mutex.ReleaseMutex() }
         $mutex.Dispose()
     }
