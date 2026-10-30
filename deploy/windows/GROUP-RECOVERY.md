@@ -88,8 +88,13 @@ cloudflared processes are therefore outside the match. It then verifies that
 17677/17678/20243 are free, launches a fresh Group supervisor against the active
 immutable slot, waits for the full health/MCP/Tunnel chain, starts Control and
 Console, and requires exactly one owned Core and one owned Group Tunnel before
-returning success. Re-running the launcher deliberately replaces the previous
-manual stack instead of adopting stale processes.
+returning success. The legacy Windows Control currently restores managed Core
+and Tunnel children when it starts; the manual launcher keeps Control itself
+for its management API but identifies those children strictly by Control parent
+PID plus this PlatformRoot and terminates only those process trees. The Group
+supervisor therefore remains the sole Core/Tunnel owner. Re-running the launcher
+deliberately replaces the previous manual stack instead of adopting stale
+processes.
 
 The packaged CMD also accepts an explicit PlatformRoot as its first argument,
 which is useful before the new deployment toolkit has been installed. For

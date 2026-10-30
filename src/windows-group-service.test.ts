@@ -72,6 +72,13 @@ test("Windows deployment uses source-owned launchers and per-node Console identi
   assert.match(service, /function Get-OwnedCoreProcesses/);
   assert.match(service, /function Get-OwnedSupervisors/);
   assert.match(service, /function Get-OwnedControls/);
+  assert.match(service, /function Get-ControlManagedServiceChildren/);
+  assert.match(service, /function Remove-ControlManagedServiceChildren/);
+  assert.match(service, /managed-cloudflared\.mjs/);
+  assert.match(service, /taskkill\.exe/);
+  assert.match(service, /Wait-Process -Id \$processId -Timeout 5/);
+  assert.doesNotMatch(service, /\$pid\s*=/i);
+  assert.match(service, /control_managed_children = 0/);
   assert.match(service, /function Get-OwnedDesktopShells/);
   assert.match(service, /Stop-ProcessList @\(Get-GroupTunnels\) 'Group Tunnel'/);
   assert.match(service, /scheduled_task = 'stopped'/);

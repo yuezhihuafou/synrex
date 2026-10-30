@@ -155,6 +155,24 @@ function Get-OwnedControls {
     })
 }
 
+function Get-ControlManagedServiceChildren {
+    $controls = @(Get-OwnedControls)
+    if ($controls.Count -eq 0) { return @() }
+    $controlIds = @($controls | ForEach-Object { [int]$_.ProcessId })
+    $slotRoot = ([IO.Path]::GetFullPath((Join-Path $root 'runtime\slots'))).TrimEnd('\') + '\'
+    $managedTunnel = [IO.Path]::GetFullPath((Join-Path $root 'ops\managed-cloudflared.mjs'))
+    @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $command = [string]$_.CommandLine
+        $executable = [string]$_.ExecutablePath
+        $controlIds -contains [int]$_.ParentProcessId -and
+        $executable.StartsWith($slotRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        (
+            $command.IndexOf($managedTunnel, [StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+            $command -match '(?i)\\devspace\\node_modules\\@waishnav\\devspace\\dist\\cli\.js"?\s+serve(?:\s|$)'
+        )
+    })
+}
+
 function Get-OwnedDesktopShells {
     $expected = @(
         [IO.Path]::GetFullPath((Join-Path $root 'desktop\SynrexConsole.exe')),
@@ -177,6 +195,40 @@ function Stop-ProcessList([object[]]$processes, [string]$label) {
     foreach ($process in @($processes | Sort-Object ProcessId -Unique)) {
         Write-Output ('Stopping owned ' + $label + ' PID ' + $process.ProcessId)
         Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+    }
+}
+
+function Stop-ProcessTreeList([object[]]$processes, [string]$label) {
+    foreach ($process in @($processes | Sort-Object ProcessId -Unique)) {
+        $processId = [int]$process.ProcessId
+        Write-Output ('Stopping owned ' + $label + ' tree PID ' + $processId)
+        & (Join-Path $env:SystemRoot 'System32\taskkill.exe') /PID $processId /T /F 2>&1 | Out-Null
+        Wait-Process -Id $processId -Timeout 5 -ErrorAction SilentlyContinue
+        if (Get-Process -Id $processId -ErrorAction SilentlyContinue) {
+            throw ('Owned ' + $label + ' process tree did not exit: PID ' + $processId)
+        }
+    }
+}
+
+function Remove-ControlManagedServiceChildren {
+    # The legacy Windows Control restores its own Core/Tunnel children when it
+    # starts. ManualStart keeps Control for its management API but makes the
+    # Group supervisor the only runtime owner by reconciling those children.
+    $stablePasses = 0
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $children = @(Get-ControlManagedServiceChildren)
+        if ($children.Count -gt 0) {
+            Stop-ProcessTreeList $children 'Control-managed service'
+            $stablePasses = 0
+        } else {
+            $stablePasses++
+            if ($stablePasses -ge 4) { return }
+        }
+        Start-Sleep -Milliseconds 500
+    }
+    $remaining = @(Get-ControlManagedServiceChildren)
+    if ($remaining.Count -gt 0) {
+        throw ('Windows Control kept spawning managed service children: ' + (($remaining | ForEach-Object ProcessId) -join ','))
     }
 }
 
@@ -433,6 +485,9 @@ if ($Action -eq 'ManualStart') {
     & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $consoleLauncher -PlatformRoot $root
     if ($LASTEXITCODE -ne 0) { throw 'Synrex Console launcher failed during manual startup.' }
     Start-Sleep -Seconds 5
+    Remove-ControlManagedServiceChildren
+    Wait-Endpoint 'http://127.0.0.1:17677/group/healthz' 200 30
+    Wait-Endpoint 'http://127.0.0.1:20243/ready' 200 30
     $desktop = @(Get-OwnedDesktopShells)
     $control = @(Get-OwnedControls)
     if ($desktop.Count -eq 0) { throw 'Synrex Console did not remain running after manual startup.' }
@@ -451,6 +506,7 @@ if ($Action -eq 'ManualStart') {
         tunnel_pid = [int]$tunnel[0].ProcessId
         control_pid = [int]$control[0].ProcessId
         console_pid = [int]$desktop[0].ProcessId
+        control_managed_children = 0
         scheduled_task = 'stopped'
     }
     exit 0
