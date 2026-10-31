@@ -232,6 +232,16 @@ function Remove-ControlManagedServiceChildren {
     }
 }
 
+function Get-OwnedSnapshotCollectors {
+    $script = [IO.Path]::GetFullPath((Join-Path $root 'ops\deployment\group-console-snapshot.mjs'))
+    $slotRoot = ([IO.Path]::GetFullPath((Join-Path $root 'runtime\slots'))).TrimEnd('\') + '\'
+    @(Get-CimInstance Win32_Process -Filter "Name='node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        ([string]$_.ExecutablePath).StartsWith($slotRoot, [StringComparison]::OrdinalIgnoreCase) -and
+        ([string]$_.CommandLine).IndexOf($script, [StringComparison]::OrdinalIgnoreCase) -ge 0 -and
+        ([string]$_.CommandLine).IndexOf($root, [StringComparison]::OrdinalIgnoreCase) -ge 0
+    })
+}
+
 function Stop-ManualStack {
     $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     if ($task) {
@@ -243,6 +253,7 @@ function Stop-ManualStack {
         Stop-ScheduledTask -TaskName $taskName -ErrorAction Stop
     }
 
+    Stop-ProcessList @(Get-OwnedSnapshotCollectors) 'Console snapshot collector'
     Stop-ProcessList @(Get-OwnedSupervisors) 'Group supervisor'
     Start-Sleep -Milliseconds 600
     Stop-ProcessList @(Get-OwnedCoreProcesses) 'Group Core'
@@ -471,7 +482,8 @@ if (!(New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole([Secur
 }
 if ($Action -eq 'ManualStart') {
     $trayLauncher = Join-Path $root 'ops\deployment\start-group-tray.vbs'
-    foreach ($required in @($installedScript, $consoleLauncher, $trayLauncher)) {
+    $snapshotCollector = Join-Path $root 'ops\deployment\group-console-snapshot.mjs'
+    foreach ($required in @($installedScript, $consoleLauncher, $trayLauncher, $snapshotCollector)) {
         if (!(Test-Path -LiteralPath $required -PathType Leaf)) { throw "Manual launcher dependency missing: $required" }
     }
     Stop-ManualStack
@@ -489,6 +501,7 @@ if ($Action -eq 'ManualStart') {
     Remove-ControlManagedServiceChildren
     Wait-Endpoint 'http://127.0.0.1:17677/group/healthz' 200 30
     Wait-Endpoint 'http://127.0.0.1:20243/ready' 200 30
+    $collector = Start-Process -FilePath $slot.Node -ArgumentList @(('"' + $snapshotCollector + '"'), ('"' + $root + '"'), ('"' + $slot.Name + '"')) -WorkingDirectory $root -WindowStyle Hidden -RedirectStandardError (Join-Path $root 'logs\group-console-snapshot.stderr.log') -PassThru
     # Explorer opens the tray launcher with the interactive user's token.
     Start-Process -FilePath (Join-Path $env:SystemRoot 'explorer.exe') -ArgumentList ('"' + $trayLauncher + '"') -WindowStyle Hidden | Out-Null
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
@@ -500,6 +513,8 @@ if ($Action -eq 'ManualStart') {
     $control = @(Get-OwnedControls)
     if ($desktop.Count -eq 0) { throw 'Synrex Console did not remain running after manual startup.' }
     if ($control.Count -eq 0) { throw 'Windows Control did not remain running after manual startup.' }
+    $collector.Refresh()
+    if ($collector.HasExited) { throw 'Console snapshot collector exited during manual startup.' }
 
     $core = @(Get-OwnedCoreProcesses)
     $tunnel = @(Get-GroupTunnels)

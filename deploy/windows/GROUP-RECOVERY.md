@@ -79,6 +79,11 @@ or the installed windowless launcher:
 wscript.exe "$groupRoot\ops\deployment\start-group-stack.vbs" "$groupRoot"
 ```
 
+Manual startup also runs the independent Console snapshot collector for the active
+slot. It refreshes the snapshot every 15 seconds while Group Core is healthy;
+collector failures are recorded in `logs\group-console-snapshot.stderr.log` and
+the previous snapshot remains subject to the Console's freshness checks.
+
 Deployment also creates `Synrex Group Start.lnk` on the owner's desktop. Startup
 does not open a terminal; the Console starts in the tray and can be opened from
 its tray icon. Startup failures display a message. This

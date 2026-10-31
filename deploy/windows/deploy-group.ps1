@@ -22,7 +22,7 @@ $prepare = Join-Path $PSScriptRoot 'prepare-runtime-slot.ps1'
 $service = Join-Path $PSScriptRoot 'group-service.ps1'
 $console = Join-Path $PSScriptRoot 'install-console-desktop.ps1'
 $installedDeploymentRoot = Join-Path $root 'ops\deployment'
-foreach ($required in @($prepare, $service, $console, $package, (Join-Path $PSScriptRoot 'start-group-stack.vbs'), (Join-Path $PSScriptRoot 'start-group-tray.vbs'), (Join-Path $PSScriptRoot 'start-group-stack.ps1'))) {
+foreach ($required in @($prepare, $service, $console, $package, (Join-Path $PSScriptRoot 'start-group-stack.vbs'), (Join-Path $PSScriptRoot 'start-group-tray.vbs'), (Join-Path $PSScriptRoot 'start-group-stack.ps1'), (Join-Path $PSScriptRoot 'group-console-snapshot.mjs'))) {
     if (!(Test-Path -LiteralPath $required -PathType Leaf)) { throw "Deployment input missing: $required" }
 }
 
