@@ -12,7 +12,7 @@ import { measureToolTokens } from "./console-token-async.js";
 /** Mount BEFORE the SDK JSON parser and host checks, so body upload/parse and
  * rejected requests are included. HTTP finish means local flush, not host receipt. */
 export function requestTraceMiddleware(config: ServerConfig, diagnostics: DiagnosticTrace,
-  requestFields: (req: Request, config: ServerConfig) => Record<string, unknown>): RequestHandler {
+  requestFields: (req: Request, config: ServerConfig) => Record<string, unknown>, mcpRoute = "/mcp"): RequestHandler {
   return (req, res, next) => {
     const requestId = randomUUID();
     const otel = newOtelContext(req.header("traceparent"));
@@ -20,7 +20,7 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
     const wallStart = Date.now();
     const path = requestPath(req);
     const oauthPhase = oauthPhaseForPath(path);
-    const isMcp = path === "/mcp";
+    const isMcp = path === mcpRoute;
     let stage = "body";
     const context = { requestId, traceId: requestId, ...otel, path, oauthPhase, startedAt: started,
       emitDiagnostic: (event: import("./diagnostic-trace.js").DiagnosticEvent, fields: Record<string, unknown>) => {
@@ -29,6 +29,7 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
       },
     };
     res.locals.requestId = requestId;
+    res.locals.synrexMcpRequest = isMcp;
     res.setHeader("x-synrex-request-id", requestId);
     const base = { requestId, traceId: requestId, ...otel, method: req.method };
     const elapsed = () => Math.round(performance.now() - started);
@@ -108,7 +109,7 @@ export function requestTraceMiddleware(config: ServerConfig, diagnostics: Diagno
 }
 
 export const bodyReadyTrace: RequestHandler = (req, res, next) => {
-  if (requestPath(req) === "/mcp") {
+  if (res.locals.synrexMcpRequest) {
     const body = req.body;
     const method = Array.isArray(body) ? "batch" : typeof body?.method === "string" ? body.method : "unknown";
     // Hash arbitrary JSON-RPC IDs; never persist prompts or arbitrary client labels.

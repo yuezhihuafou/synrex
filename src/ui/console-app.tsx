@@ -158,7 +158,8 @@ function RexPerformance({d}:{d:Snapshot}) {
   const effective=history?.effective;
   const [range,setRange]=useState<"24h"|"30d"|"365d">("24h");
   const [curve,setCurve]=useState<"volume"|"active">("volume");
-  const total=history?history.totals.inputTokens+history.totals.outputTokens:t&&(t.inputTotal!==null||t.outputTotal!==null)
+  const total=history?(history.totals.measuredInputs+history.totals.measuredOutputs>0
+    ?history.totals.inputTokens+history.totals.outputTokens:null):t&&(t.inputTotal!==null||t.outputTotal!==null)
     ?(t.inputTotal??0)+(t.outputTotal??0):null;
   const trend=history?(range==="24h"?history.minute:range==="30d"?history.hour:history.day):[];
   const hasTrend=trend.some(b=>curve==="volume"?b.measuredOutputs>0:(b.runtimeSamples??0)>0);

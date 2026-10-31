@@ -27,3 +27,19 @@ test("publishes fresh snapshot only for the active, healthy Core", async (t) => 
   await assert.rejects(collectSnapshot(root, slot, () => ({})), /slot changed/);
   assert.equal(JSON.parse(await readFile(target)).generatedAt, "second");
 });
+
+test("includes the existing history summary in the published snapshot", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "synrex-group-history-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = previousFetch; });
+  const slot = "synrex-windows-test";
+  await mkdir(path.join(root, "runtime"));
+  await writeFile(path.join(root, "runtime", "active-slot.txt"), slot);
+  globalThis.fetch = async () => ({ ok: true });
+  const target = path.join(root, "state", "devspace-state", "observability", "console-snapshot.json");
+  await collectSnapshot(root, slot,
+    () => ({ diagnostics: { observability: { tokens: {} } } }),
+    () => ({ totals: { measuredOutputs: 1 } }));
+  assert.equal(JSON.parse(await readFile(target)).diagnostics.observability.tokens.history.totals.measuredOutputs, 1);
+});

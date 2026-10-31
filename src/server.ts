@@ -1265,9 +1265,11 @@ export function createServer(
     ? undefined
     : Array.from(new Set([config.host, ...config.allowedHosts]));
   const app = express();
+  const publicBasePath = normalizedPublicBasePath(config.publicBaseUrl);
+  const mcpRoute = `${publicBasePath}/mcp` || "/mcp";
   const usageRecorder = new UsageTrafficRecorder(config.stateDir);
   const diagnostics = new DiagnosticTrace(config.stateDir, DIAGNOSTIC_FILE_LIMIT, entry => usageRecorder.record(entry));
-  app.use(requestTraceMiddleware(config, diagnostics, requestLogFields));
+  app.use(requestTraceMiddleware(config, diagnostics, requestLogFields, mcpRoute));
   app.use(createMcpExpressApp({
     host: config.host,
     ...(allowedHosts ? { allowedHosts } : {}),
@@ -1275,8 +1277,6 @@ export function createServer(
   app.use(bodyReadyTrace);
   diagnostics.record("runtime_started");
   registerOAuthRecovery(app, config);
-  const publicBasePath = normalizedPublicBasePath(config.publicBaseUrl);
-  const mcpRoute = `${publicBasePath}/mcp` || "/mcp";
   const assetRoute = `${publicBasePath}/mcp-app-assets` || "/mcp-app-assets";
   const healthRoute = `${publicBasePath}/healthz` || "/healthz";
   const mcpUrl = publicEndpointUrl(config.publicBaseUrl, "/mcp");

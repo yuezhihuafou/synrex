@@ -12,6 +12,36 @@ import { requestTraceMiddleware, bodyReadyTrace } from "./http-trace.js";
 import { countToolInputTokens, countToolOutputTokens } from "./console-token-meter.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 
+test("the configured Group MCP route records complete tool events without tracing other paths", async t => {
+  const root = await mkdtemp(path.join(tmpdir(), "synrex-group-http-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const diagnostics = new DiagnosticTrace(root);
+  const app = express();
+  app.use(requestTraceMiddleware({ logging: { requests: false } } as ServerConfig, diagnostics, () => ({}), "/group/mcp"));
+  app.use(express.json());
+  app.use(bodyReadyTrace);
+  app.post("/group/mcp", (_req, res) => res.json({ jsonrpc: "2.0", id: 1, result: { content: [{ type: "text", text: "ok" }] } }));
+  app.post("/mcp", (_req, res) => res.sendStatus(204));
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => { server.closeAllConnections(); return new Promise<void>(resolve => server.close(() => resolve())); });
+  const port = (server.address() as AddressInfo).port;
+  const request = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "read", arguments: {} } };
+  const url = "http://127.0.0.1:" + port;
+  assert.equal((await fetch(url + "/group/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(request) })).status, 200);
+  assert.equal((await fetch(url + "/mcp", { method: "POST" })).status, 204);
+  let events = diagnostics.read();
+  for (let i = 0; i < 50 && events.filter(e => e.event === "tool_tokens_measured").length < 2; i++) {
+    await new Promise(resolve => setTimeout(resolve, 20));
+    events = diagnostics.read();
+  }
+  assert.equal(events.filter(e => e.event === "mcp_received").length, 1);
+  assert.equal(events.filter(e => e.event === "mcp_body_ready" && e.rpcMethod === "tools/call").length, 1);
+  assert.equal(events.filter(e => e.event === "mcp_finished").length, 1);
+  assert.ok(events.some(e => e.event === "tool_tokens_measured" && e.inputTokens !== undefined));
+  assert.ok(events.some(e => e.event === "tool_tokens_measured" && e.outputTokens !== undefined));
+});
+
 test("MCP HTTP tracing counts streamed body bytes and retains valid W3C parent context", async t => {
   const root = await mkdtemp(path.join(tmpdir(), "synrex-http-observe-"));
   t.after(() => rm(root, { recursive: true, force: true }));
