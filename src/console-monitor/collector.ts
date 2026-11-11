@@ -6,6 +6,7 @@ import { ResourceSampler, PROCESS_LIMIT } from "./resources.js";
 import { StatisticsStore, HISTORY_LIMIT, RETENTION_DAYS } from "./statistics.js";
 import { PeerSampler } from "./peers.js";
 import type { MonitorSnapshot } from "./types.js";
+import { readTunnelRecovery } from "./tunnel-recovery.js";
 
 export interface CollectorOptions {
   stateDir: string;
@@ -70,6 +71,8 @@ export class MonitorCollector extends EventEmitter {
       } catch { warnings.push("运行记录采集失败，保留上次结果"); }
       try { this.snapshot.resources = await this.resources.sample(this.snapshot.executions); }
       catch { warnings.push("本机资源暂不可用"); }
+      try { this.snapshot.tunnelRecovery = readTunnelRecovery(); }
+      catch { warnings.push('隧道恢复记录暂不可读'); }
       // Do not block the local Console snapshot on a slow or offline peer.
       void this.peers.poll().catch(() => undefined);
       this.snapshot.remote = { ...this.peers.readings };

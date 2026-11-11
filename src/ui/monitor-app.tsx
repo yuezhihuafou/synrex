@@ -25,6 +25,27 @@ function Panel({title,hint,children,extra}:{title:string;hint?:string;children:R
 function Metric({label,value,sub}:{label:string;value:ReactNode;sub?:string}) {return <article className="metric"><span>{label}</span><strong>{value}</strong><small>{sub}</small></article>;}
 function Empty({children}:{children:ReactNode}) {return <div className="empty">{children}</div>;}
 
+function TunnelRecovery({data}:{data:MonitorSnapshot}) {
+  const report = data.tunnelRecovery;
+  if (!report?.available) return <Panel title="Cloudflare Tunnel · 自动恢复" hint="监控源缺失或尚无事件"><Empty>尚未读取到 Tunnel 守护日志；不代表没有发生故障。</Empty></Panel>;
+  const names:Record<string,string> = {tunnel_guard_failure:'连接检测失败',tunnel_guard_degraded:'网络或指标不可用',
+    tunnel_guard_recovered:'连接恢复',tunnel_guard_restart:'自动重启 Tunnel',
+    tunnel_guard_restart_failed:'重启执行失败',tunnel_guard_suppressed:'冷却期阻止重启'};
+  return <Panel title="Cloudflare Tunnel · 故障与恢复" hint={`最近 24 小时统计 · 最多 7 天事件 · 最近事件 ${clock(report.sampledAt??undefined)}`}>
+    <p className="muted">最近连接采样：{report.activeConnections==null?'未知':`${report.activeConnections} 条`} · {clock(report.healthySampleAt??undefined)}。采样超过 3 分钟不代表当前仍然在线。</p>
+    <div className="metrics inset">
+      <Metric label="异常检测次数" value={report.failures} sub="失败与降级事件，不等于独立故障数"/>
+      <Metric label="自动重启 / 失败" value={`${report.restarts} / ${report.restartFailures}`} sub="成功调用 / 执行失败"/>
+      <Metric label="恢复事件" value={report.recoveries} sub="有明确恢复记录才计入"/>
+      <Metric label="已确认故障持续时间" value={`${(report.totalDowntimeMs/60000).toFixed(1)} 分钟`} sub="仅包含有结束事件的故障，非完整可用率"/>
+    </div>
+    {report.ongoingSince&&<p className="notice">{clock(report.ongoingSince)} 后存在未匹配恢复记录；不能据此认定当前仍离线。</p>}
+    {report.incidents.length>0&&<><h3>故障区间（由守护事件推定）</h3><div className="scroll"><table><thead><tr><th>检测开始</th><th>恢复记录</th><th>可观测持续时间</th><th>重启操作</th></tr></thead><tbody>{report.incidents.slice(0,12).map((i,index)=><tr key={`${i.startedAt}-${index}`}><td>{clock(i.startedAt)}</td><td>{clock(i.endedAt??undefined)}</td><td>{i.durationMs==null?'未知':`${(i.durationMs/60000).toFixed(1)} 分钟`}</td><td>{i.restarts}</td></tr>)}</tbody></table></div></>}
+    <h3>自动恢复事件时间线</h3>
+    <div className="scroll"><table><thead><tr><th>时间</th><th>事件</th><th>详情</th></tr></thead><tbody>{report.events.slice(0,30).map((e,i)=><tr key={`${e.ts}-${e.event}-${i}`}><td>{clock(e.ts)}</td><td>{names[e.event]??e.event}</td><td>{e.reason??(e.failures!=null?`连续失败 ${e.failures} 次`:e.connections!=null?`连接 ${e.connections} 条`:'—')}</td></tr>)}</tbody></table></div>
+  </Panel>;
+}
+
 function Login({onLogin}:{onLogin:()=>void}) {
   const [password,setPassword]=useState(""),[error,setError]=useState(""),[busy,setBusy]=useState(false);
   async function submit(e:FormEvent) {e.preventDefault();setBusy(true);setError("");try{await api("login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({password})});setPassword("");onLogin();}catch(e){setError((e as Error).message);}finally{setBusy(false);}}
@@ -105,7 +126,7 @@ function App() {
     {view==="overview"&&<div className="stack"><div className="metrics"><Metric label="正在执行" value={activeRows.length} sub={`本机可见记录 · ${executions.filter(r=>r.status==="unconfirmed").length} 个状态未确认`}/><Metric label="CPU 使用率" value={resource?.cpuPercent==null?"—":`${resource.cpuPercent.toFixed(1)}%`} sub={`${resource?.cores??"—"} 核 · load ${resource?.load[0]?.toFixed(2)??"—"}`}/><Metric label="内存使用" value={resource?bytes(resource.usedMemory):"—"} sub={resource?`共 ${bytes(resource.totalMemory)}`:"未采集"}/><Metric label="GPU 使用率" value={resource?.gpu?.length?`${resource.gpu[0].utilization}%`:"—"} sub={resource?.gpu?.[0]?`${resource.gpu[0].name} · ${resource.gpu[0].usedMiB}/${resource.gpu[0].totalMiB} MiB`:"未采集或不可用"}/></div><Panel title="活动执行" hint="真实任务状态；点击查看日志与关联进程" extra={<button onClick={()=>setView("executions")}>查看全部 →</button>}><ExecutionTable rows={activeRows.slice(0,8)} select={setSelected}/></Panel><div className="two-columns"><Panel title="节点状态" hint={`目录快照 · ${clock(data?.base?.generatedAt)}`}>{data?.base?.nodes.map(n=><div className="list-row" key={n.id}><strong>{n.alias}</strong><span>{n.os}</span><Badge value={displayedNodeHealth(n,data?.sampledAt,data?.base?.generatedAt,now)}/></div>)}</Panel><Panel title="资源占用最高的进程" hint="当前用户进程；CPU 百分比按单核计算">{resource?.processes.slice(0,6).map(p=><div className="list-row" key={p.pid}><strong>{p.name}<small>PID {p.pid}</small></strong><span>{p.cpuPercent?.toFixed(1)??"—"}%</span><span>{bytes(p.rssBytes)}</span></div>)}</Panel></div></div>}
     {view==="executions"&&<Panel title="执行列表" hint="轻量列表最多 120 条，活动优先；命令全文在详情中加载，历史交互会话仅在完成后有记录"><div className="toolbar"><div className="segments">{[["active","活动"],["finished","已结束"],["all","全部"]].map(([key,label])=><button key={key} className={state===key?"chosen":""} onClick={()=>setState(key)}>{label}</button>)}</div><input placeholder="搜索命令、项目或任务 ID" value={query} onChange={e=>setQuery(e.target.value)}/></div><ExecutionTable rows={filtered} select={setSelected}/></Panel>}
     {view==="processes"&&<Panel title="本机进程" hint={`仅本机当前用户；PID / PPID 展示父子关系${resource?.processLimitReached?" · 已达到采样上限":""}`}><div className="toolbar"><select value={processScope} onChange={e=>setProcessScope(e.target.value)}><option value="managed">关联任务进程</option><option value="all">当前用户全部进程</option></select><input placeholder="搜索 PID、名称或 Run ID" value={query} onChange={e=>setQuery(e.target.value)}/></div><div className="scroll"><table><thead><tr><th>PID / PPID</th><th>进程</th><th>状态</th><th>CPU / 单核</th><th>内存</th><th>关联执行</th></tr></thead><tbody>{processes.map(p=><tr key={p.pid}><td>{p.pid} / {p.ppid}</td><td>{p.name}</td><td>{p.state}</td><td>{p.cpuPercent?.toFixed(1)??"—"}%</td><td>{bytes(p.rssBytes)}</td><td><button className="text-button" onClick={()=>{const r=executions.find(r=>r.runId===p.runId);if(r)setSelected(r);}}>{p.runId??"未关联"}</button></td></tr>)}</tbody></table></div>{!processes.length&&<Empty>当前范围没有已确认的进程</Empty>}</Panel>}
-    {view==="diagnostics"&&<div className="stack"><TraceExplorer request={traceRequest}/><Diagnostics tick={paused?"paused":data?.sampledAt??""} request={traceRequest} setRequest={setTraceRequest}/></div>}
+    {view==="diagnostics"&&<div className="stack">{data&&<TunnelRecovery data={data}/>}<TraceExplorer request={traceRequest}/><Diagnostics tick={paused?"paused":data?.sampledAt??""} request={traceRequest} setRequest={setTraceRequest}/></div>}
     {view==="statistics"&&<div className="stack"><StatisticsView tick={paused?"paused":data?.sampledAt??""}/><StatisticsBreakdown tick={paused?"paused":data?.sampledAt??""}/></div>}
     {view==="processes"&&data&&<div style={{marginTop:16}}><RemoteNodes data={data} processes/></div>}
     {view==="overview"&&data&&<div style={{marginTop:16}}><RemoteNodes data={data}/></div>}

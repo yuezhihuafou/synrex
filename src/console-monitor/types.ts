@@ -1,5 +1,6 @@
 import type { ConsoleSnapshot } from "../console-snapshot.js";
 import type { PeerReadings } from "./peers.js";
+import type { TunnelRecoverySummary } from "./tunnel-recovery.js";
 
 export interface Execution {
   runId: string;
@@ -79,6 +80,7 @@ export interface MonitorSnapshot {
   sampleMs: number;
   source: { node: string; release: string; scope: string; management: string };
   resources: Resources | null;
+  tunnelRecovery?: TunnelRecoverySummary;
   remote: PeerReadings;
   executions: Execution[];
   base: ConsoleSnapshot | null;
