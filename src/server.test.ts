@@ -816,7 +816,19 @@ test("codex durable task compatibility tools expose an MCP-like lifecycle", asyn
     command: `${JSON.stringify(process.execPath)} -e "setTimeout(() => console.log('async-task-ok'), 120)"`,
   }, 5);
   assert.ok(asyncSnapshot.taskId);
-  await new Promise((resolve) => setTimeout(resolve, 250));
+  // A wall-clock sleep is not evidence the detached process finished:
+  // busy CI hosts can take longer than its nominal 120 ms timer. Wait for
+  // the recorded terminal state without acknowledging its completion mail.
+  let terminalStatus: string | undefined;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const snapshot = await context.durableTasks.get(context.project, asyncSnapshot.taskId, {
+      acknowledge: false,
+    });
+    terminalStatus = snapshot.status;
+    if (terminalStatus !== "working" && terminalStatus !== "input_required") break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal(terminalStatus, "completed", "durable task must reach a terminal state before completion-mail assertions");
 
   const reopened = structuredContent(await callOpen(context.client, context.project, "task-lifecycle-b"));
   const resumedWorkspaceId = reopened.workspaceId;
