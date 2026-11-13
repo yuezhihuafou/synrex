@@ -3,13 +3,13 @@
 ## Installed result
 
 - Additive source branch: `console-monitor-p012`; runtime source commit `9335c1a`.
-- Pinned monitor release: `/home/swy/services/synrex-console/releases/20261022-p012-9335c1a`.
+- Pinned monitor release: `<OWNER_HOME>/services/synrex-console/releases/20261022-p012-9335c1a`.
 - Independent user unit: `synrex-console.service`, enabled; port 4318.
-- Verified LAN browser entry: `http://192.168.5.148:4318/console/`.
+- Verified LAN browser entry: `http://<LAN_HOST>:4318/console/` (address redacted).
 - Existing Owner login; own signed HTTP-only browser session.
 - Production state/runs observed; monitor SQLite is separate under
-  `/home/swy/.local/share/synrex-console-monitor/`.
-- Explicit cancellable roots: `/home/swy/DevSpace` and the isolated console
+  `<OWNER_HOME>/.local/share/synrex-console-monitor/`.
+- Explicit cancellable roots: `<OWNER_HOME>/DevSpace` and the isolated console
   worktree. No production task was cancelled during acceptance.
 - Old experimental monitor/QA units and temporary tunnel stopped. The quick
   tunnel returned an external 403 and is not a delivered or verified public URL.

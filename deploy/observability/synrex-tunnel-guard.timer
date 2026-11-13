@@ -1,0 +1,11 @@
+[Unit]
+Description=Check Synrex Cloudflare tunnel connectivity periodically
+
+[Timer]
+OnBootSec=90s
+OnUnitInactiveSec=60s
+AccuracySec=5s
+Unit=synrex-tunnel-guard.service
+
+[Install]
+WantedBy=timers.target

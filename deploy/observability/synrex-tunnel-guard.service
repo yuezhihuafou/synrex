@@ -1,0 +1,12 @@
+[Unit]
+Description=Synrex Cloudflare tunnel connectivity guard (bounded)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.nvm/versions/node/v22.22.2/bin/node %h/.local/share/synrex-observability/tunnel-guard.mjs
+NoNewPrivileges=yes
+UMask=0077
+MemoryMax=96M
+CPUQuota=15%
+TimeoutStartSec=30s

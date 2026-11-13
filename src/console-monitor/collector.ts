@@ -80,7 +80,12 @@ export class MonitorCollector extends EventEmitter {
         try {
           const base = readConsoleSnapshot(this.options.stateDir, this.options.release ?? "independent-monitor");
           // Detailed events have their own on-demand endpoint; do not duplicate them in every live update.
-          this.snapshot.base = { ...base, diagnostics: { count: base.diagnostics.count, requests: [], events: [] } };
+          this.snapshot.base = { ...base, diagnostics: {
+            count: base.diagnostics.count,
+            observability: base.diagnostics.observability,
+            requests: [],
+            events: [],
+          } };
           this.baseAt = Date.now();
         }
         catch { warnings.push("节点/工作流数据暂不可用"); }

@@ -1,5 +1,7 @@
 node_modules/
 dist/
+dist-console/
+dist-console-server/
 releases/
 .devspace-dev/
 .env

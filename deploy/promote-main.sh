@@ -102,6 +102,10 @@ if test -d "$target"; then
       exit 75
     }
   echo "PROMOTION_REUSING_VERIFIED_RELEASE=$target"
+  if test -f "$source_repo/vite.console.config.ts"; then
+    test -f "$target/dist-console/monitor-app.html"
+    test -f "$target/dist-console-server/console-monitor.js"
+  fi
   if test "$mode" = --deploy; then dispatch; else echo "PROMOTION_READY_NOT_ACTIVATED source=$source_sha"; fi
   exit 0
 fi
@@ -118,6 +122,8 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
   "$node" -e 'const p=require("node-pty");if(typeof p.spawn!=="function")process.exit(1)'
   pnpm typecheck
   pnpm build
+  test -f dist-console/monitor-app.html
+  test -f dist-console-server/console-monitor.js
   pnpm release:source-check
   pnpm architecture:check
   echo '--- regression ---'
@@ -133,6 +139,7 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
   python3 -m unittest discover -s tests -p 'test_activate_owner_release.py'
   python3 -m unittest discover -s tests -p 'test_migrate_stable_ingress.py'
   "$node" --test scripts/ingress-gate.test.mjs
+  "$node" --test scripts/probe-standalone-console.test.mjs
 } >"$log" 2>&1 || {
   echo "PROMOTION_BLOCKED QA failed; see $log" >&2
   exit 75
@@ -140,6 +147,8 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
 echo 'PROMOTION_QA_PASSED'
 git archive --format=tar HEAD | tar -xf - -C "$stage"
 cp -a dist "$stage/dist"
+cp -a dist-console "$stage/dist-console"
+cp -a dist-console-server "$stage/dist-console-server"
 cp -a node_modules "$stage/node_modules"
 git archive --format=tar.gz -o "$stage/source-tree.tar.gz" HEAD
 python3 - "$stage" "$release_id" "$backup" "$active_release" <<'PY'

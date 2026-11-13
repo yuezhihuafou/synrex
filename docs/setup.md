@@ -2,6 +2,11 @@
 
 This guide covers ChatGPT and Coding Agents using Synrex with local projects.
 
+For a version-pinned, non-destructive installation or upgrade across Linux,
+macOS and Windows, start with the
+[portable deployment guide](PORTABLE_DEPLOYMENT.md). The source-build steps
+below remain useful for development but are not a production-upgrade shortcut.
+
 ## Requirements
 
 - Node `>=22.19 <27`

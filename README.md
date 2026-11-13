@@ -73,9 +73,11 @@ repository into a speculative knowledge-graph project.
 ## Status
 
 Synrex is usable, but it is still an early independent release line. The
-`v0.2.0` milestone is a **self-hosted public preview**, not a promise of
-unattended autonomy or a fully managed service. Versioning is intentionally
-separate from upstream DevSpace's release numbering.
+`v0.2.0` milestone was a self-hosted public preview; the `v0.3.0`
+source line consolidates the independently deployed Console, optional
+Tunnel observer and cross-platform portable deployment. Check the actual
+GitHub release and live manifest before assuming a source change is shipped.
+Versioning is separate from upstream DevSpace's release numbering.
 
 For a reproducible demonstration, use the deliberately failing test fixture in
 [`examples/public-demo`](examples/public-demo) and follow the
@@ -91,16 +93,36 @@ gate.
 ## Requirements
 
 - Node.js `>=22.19 <27`
-- pnpm `11.25.0`
+- pnpm `11.25.0` (building from source; not required for the packaged installer)
 - Git
 - a Bash-compatible shell for the existing cross-platform workflow
 - `ffmpeg` for optional image/ROS2 image previews (required if using those tools)
 
-For the supported release path, use Linux. macOS is continuously smoke-tested.
-Windows should currently be treated as best-effort compatibility rather than a
-fully supported production target.
+For the fully supported production path, use Linux. macOS and Windows can
+use the portable Node/npm install flow; do not assume those hosts have passed
+all Linux-only subprocess and sandbox tests. See
+[`PORTABLE_DEPLOYMENT.md`](docs/PORTABLE_DEPLOYMENT.md) for verified
+capabilities, limits, side-by-side upgrades and rollback.
 
-## Install from source
+## Install an immutable release (recommended)
+
+For Linux, macOS and Windows, the portable installer stages a fixed published
+release under the current user's data directory and leaves existing services
+untouched. After obtaining the repository's deployment scripts:
+
+```bash
+node deploy/portable-install.mjs --plan --version 0.3.0
+node deploy/portable-install.mjs --stage --version 0.3.0
+node deploy/portable-install.mjs --activate --version 0.3.0
+```
+
+These commands require that `v0.3.0` has actually appeared in
+[GitHub Releases](https://github.com/yuezhihuafou/synrex/releases).
+For earlier releases, substitute the published version. See
+[`PORTABLE_DEPLOYMENT.md`](docs/PORTABLE_DEPLOYMENT.md) for user-local
+launchers, offline archives, OS autostart, multi-node setup and rollback.
+
+## Install from source (development)
 
 ```bash
 git clone https://github.com/yuezhihuafou/synrex.git
@@ -132,7 +154,8 @@ This installer is **first-install only**: it refuses to overwrite an existing
 immutable release, owner-state backup, validation and rollback procedure in
 [`SINGLE_OWNER_SELF_HOSTED.md`](docs/platform/SINGLE_OWNER_SELF_HOSTED.md).
 
-For a first demonstration, see [Setup Guide](docs/setup.md) and
+For a first demonstration, see [Setup Guide](docs/setup.md),
+[Portable Deployment](docs/PORTABLE_DEPLOYMENT.md) and
 [Public Demo Guide](docs/launch/PUBLIC_DEMO.md). Do not demonstrate against
 private repositories, real tokens, or a publicly accessible unauthenticated
 shell.

@@ -1,4 +1,17 @@
-# Synrex observability sidecar (isolated candidate)
+# Synrex observability sidecars
+
+The optional bounded Cloudflare Tunnel guard is in
+`tunnel-guard.mjs` and the Linux user-service/timer examples next to it.
+It observes the local Cloudflare metrics endpoint and ingress liveness,
+and can restart **only** the configured Cloudflare Tunnel unit after
+consecutive zero-connection samples and an outbound-network probe.
+It never restarts Synrex Core, ingress, or OAuth. The watchdog is optional
+and Linux-specific; do not enable it blindly on peers or existing machines.
+See [Tunnel guard operations](../../docs/platform/TUNNEL_WATCHDOG.md).
+
+The independent Console is built using `pnpm build:console` into
+`dist-console` and `dist-console-server`. Those assets are bundled with
+the core release for common provenance but run as a separate process.
 
 The Console remains the independent browser-based React/Vite `/console` page.
 The production MCP ingress must never depend on this collector or its storage.

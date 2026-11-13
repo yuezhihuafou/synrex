@@ -4,7 +4,7 @@
 
 - Implemented in isolated branch `synrex/console-s123-20261022`.
 - Shipped source commit `044b72b6a8dca493ea10586c6a23aba3072cbf29`.
-- Immutable artifact `/home/swy/services/synrex-console/releases/20261022-s123-044b72b`.
+- Immutable artifact `<OWNER_HOME>/services/synrex-console/releases/20261022-s123-044b72b`.
 - Live user systemd unit: `synrex-console.service` at port `4318`, Owner auth unchanged.
 - Console unit now uses an additive drop-in:
   `~/.config/systemd/user/synrex-console.service.d/30-s123.conf`.
@@ -47,7 +47,7 @@
   production SQLite backup. The independent instance reached HTTP 200 and
   produced 1496 minute requests from 1496 retained rows, without mismatch.
 - Preserved consistent original backup:
-  `/home/swy/.local/share/synrex-console-monitor/backups/s123-20261022-1749/`.
+  `<OWNER_HOME>/.local/share/synrex-console-monitor/backups/s123-20261022-1749/`.
   No QA database replaced the production monitor database.
 
 ## Observable limitations, not silently inferred capabilities

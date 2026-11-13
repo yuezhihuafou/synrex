@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,16 @@ function testPackedPackageLaunchers(): void {
       stdio: "pipe",
       shell: process.platform === "win32",
     });
+
+    // The independently deployed Console and portable setup instructions
+    // must be in the actual published tarball, not only the source checkout.
+    const packaged = join(installRoot, "node_modules", "synrex");
+    for (const asset of [
+      "dist-console/monitor-app.html",
+      "dist-console-server/console-monitor.js",
+      "deploy/portable-install.mjs",
+      "deploy/portable-service.mjs",
+    ]) assert.ok(existsSync(join(packaged, asset)), "Release archive missing " + asset);
 
     const configRoot = join(root, "config");
     const env = writeTestDevspaceConfig(configRoot, {
