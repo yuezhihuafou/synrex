@@ -1,9 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# This helper is for the first installation only. Existing installations may
+# have an immutable, OAuth-stateful production release; replacing its unit from
+# a mutable checkout would bypass backup, provenance checks and rollback.
+if [[ "${1:-}" == "--help" ]]; then
+  echo "Usage: bash deploy/install-user-service.sh (first installation only)"
+  echo "For upgrades, use the immutable, verified release procedure."
+  exit 0
+fi
+if [[ $# -ne 0 ]]; then
+  echo "Unknown arguments; see --help." >&2
+  exit 2
+fi
+
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 home_dir=${HOME:?HOME must be set}
 node_bin=${NODE_BIN:-$(command -v node || true)}
+service_dir="${XDG_CONFIG_HOME:-$home_dir/.config}/systemd/user"
+unit_path="$service_dir/devspace.service"
+
+# Check before dependency installation, compilation, or any systemd mutation.
+# Refuse even a stopped pre-existing unit: it may own production credentials.
+if [[ -e "$unit_path" || -L "$unit_path" ]] || \
+    { command -v systemctl >/dev/null 2>&1 && systemctl --user is-active --quiet devspace.service; }; then
+  echo "INSTALL_BLOCKED: an existing devspace.service was detected." >&2
+  echo "This first-install helper will not replace it or restart production." >&2
+  echo "Use docs/platform/SINGLE_OWNER_SELF_HOSTED.md and the reviewed pinned-release upgrade procedure." >&2
+  exit 75
+fi
 
 # Non-login invocations may not export the user systemd bus variables.
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
@@ -30,11 +55,9 @@ fi
 "${pnpm_cmd[@]}" --dir "$repo_root" install --frozen-lockfile
 "${pnpm_cmd[@]}" --dir "$repo_root" build
 
-service_dir="${XDG_CONFIG_HOME:-$home_dir/.config}/systemd/user"
 mkdir -p "$service_dir"
 node_dir=$(dirname "$(readlink -f "$node_bin")")
 template="$repo_root/deploy/systemd/devspace.service.in"
-unit_path="$service_dir/devspace.service"
 backup_path="$service_dir/devspace.service.pre-personal-fork"
 tmp_path=$(mktemp "$service_dir/devspace.service.XXXXXX")
 trap 'rm -f "$tmp_path"' EXIT

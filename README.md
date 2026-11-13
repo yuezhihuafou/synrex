@@ -72,9 +72,15 @@ repository into a speculative knowledge-graph project.
 
 ## Status
 
-Synrex is usable, but it is still an early independent release line. The first
-independent release started at `0.1.0`; this version number is intentionally separate
-from upstream DevSpace's release numbering.
+Synrex is usable, but it is still an early independent release line. The
+`v0.2.0` milestone is a **self-hosted public preview**, not a promise of
+unattended autonomy or a fully managed service. Versioning is intentionally
+separate from upstream DevSpace's release numbering.
+
+For a reproducible demonstration, use the deliberately failing test fixture in
+[`examples/public-demo`](examples/public-demo) and follow the
+[recording checklist](docs/launch/PUBLIC_DEMO.md). This shows an actual
+inspect → edit → test → verify loop rather than a prepared success screen.
 
 Linux is the primary production and release-gated environment. macOS is part of
 the blocking pull-request smoke matrix. Windows remains a compatibility signal:
@@ -88,6 +94,7 @@ gate.
 - pnpm `11.25.0`
 - Git
 - a Bash-compatible shell for the existing cross-platform workflow
+- `ffmpeg` for optional image/ROS2 image previews (required if using those tools)
 
 For the supported release path, use Linux. macOS is continuously smoke-tested.
 Windows should currently be treated as best-effort compatibility rather than a
@@ -119,6 +126,16 @@ For a persistent Linux user service, see `docs/compact-runtime.md` and:
 ```bash
 bash deploy/install-user-service.sh
 ```
+
+This installer is **first-install only**: it refuses to overwrite an existing
+`devspace.service`. Upgrade an existing self-hosted installation using the
+immutable release, owner-state backup, validation and rollback procedure in
+[`SINGLE_OWNER_SELF_HOSTED.md`](docs/platform/SINGLE_OWNER_SELF_HOSTED.md).
+
+For a first demonstration, see [Setup Guide](docs/setup.md) and
+[Public Demo Guide](docs/launch/PUBLIC_DEMO.md). Do not demonstrate against
+private repositories, real tokens, or a publicly accessible unauthenticated
+shell.
 
 ## Development
 

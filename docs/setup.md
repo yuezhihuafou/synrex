@@ -8,6 +8,7 @@ This guide covers ChatGPT and Coding Agents using Synrex with local projects.
 - pnpm `11.25.0`
 - Git
 - Bash, including Git Bash or WSL on Windows
+- `ffmpeg` when using screenshot/image previews or the optional ROS2 image reader
 - a public HTTPS URL that forwards to the local Synrex server, only when
   ChatGPT will connect
 
@@ -127,14 +128,14 @@ A Coding Agents-only setup skips this section.
 Run:
 
 ```bash
-devspace serve
+synrex serve
 ```
 
 If your tunnel URL changes, update the persisted value before starting:
 
 ```bash
-devspace config set publicBaseUrl https://devspace.example.com
-devspace serve
+synrex config set publicBaseUrl https://your-tunnel-host.example.com
+synrex serve
 ```
 
 ## Approve The Client
@@ -156,8 +157,15 @@ Keep `auth.json` private.
 Run:
 
 ```bash
-devspace doctor
+synrex doctor
 ```
+
+For a fresh persistent Linux install, `deploy/install-user-service.sh`
+installs a user service. It now **refuses** to overwrite an existing
+`devspace.service`. For an existing self-hosted installation, follow the
+versioned-release, backup, validation and rollback procedures in
+[`SINGLE_OWNER_SELF_HOSTED.md`](platform/SINGLE_OWNER_SELF_HOSTED.md);
+never reinstall from a mutable checkout over the live Owner service.
 
 The doctor command reports the resolved config, Node version, Node ABI, platform,
 Git, Bash, public URL, allowed hosts, and SQLite native dependency status.

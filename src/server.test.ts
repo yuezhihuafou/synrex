@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, copyFile, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -165,6 +165,10 @@ test("parallel MCP conversations preserve independent edits to the same checkout
 });
 
 test("MCP read delivers bounded visual evidence and preserves image blocks across batch reads", async t => {
+  if (spawnSync("ffmpeg", ["-version"]).status !== 0) {
+    t.skip("image preview requires the optional ffmpeg binary");
+    return;
+  }
   const context = await fixture(t);
   await copyFile(fileURLToPath(new URL("../docs/assets/v11-review-ui-before.png", import.meta.url)),
     join(context.project, "screenshot.png"));

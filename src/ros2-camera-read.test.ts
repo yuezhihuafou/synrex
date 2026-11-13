@@ -29,7 +29,11 @@ test("ROS2 adapter reports missing rclpy rather than inventing an image", async 
   }), /rclpy\/sensor_msgs/);
 });
 
-test("ROS2 helper can convert raw rgb bytes without requiring rclpy", () => {
+test("ROS2 helper can convert raw rgb bytes without requiring rclpy", (t) => {
+  if (spawnSync("ffmpeg", ["-version"]).status !== 0) {
+    t.skip("ffmpeg is an optional dependency not installed on this host");
+    return;
+  }
   const script = `import runpy\nm=runpy.run_path('scripts/ros2-image-snapshot.py',run_name='not_main')\n` +
     `jpg=m['jpeg_from_raw'](bytes([255,0,0,0,255,0,0,0,255,255,255,255]),2,2,6,'rgb8')\n` +
     `assert jpg[:2]==bytes([255,216])\nprint(len(jpg))`;

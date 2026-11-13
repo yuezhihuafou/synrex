@@ -103,15 +103,18 @@ limit may temporarily exceed the limit; older runs are removed first.
 
 ## Persistent user service
 
-From this checkout:
+For a **first installation only**, with no existing `devspace.service`:
 
 ```bash
 bash deploy/install-user-service.sh
 ```
 
-The installer installs dependencies, builds `dist/`, writes a concrete
-`~/.config/systemd/user/devspace.service`, stops the old transient compact
-service, and enables/restarts the persistent service.
+The installer refuses to run when an existing user service is present or
+active. For a fresh installation, it installs dependencies, builds `dist/`,
+writes a concrete `~/.config/systemd/user/devspace.service`, stops the old
+transient compact service, and enables/starts the persistent service. It is
+**not an upgrade tool** for an existing single-owner installation; use a
+verified pinned release with state backup and automatic rollback instead.
 
 **Historical workflow, no longer valid for the pinned single-owner service:**
 an earlier setup reloaded every source change with the following command:
