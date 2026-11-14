@@ -1,0 +1,63 @@
+name: Native portable release acceptance
+
+# An opt-in release qualification on real macOS and Windows runners.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  published-package:
+    name: Synrex v0.4.0 native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      GH_TOKEN: ${{ github.token }}
+      DEVSPACE_OAUTH_OWNER_TOKEN: qa-owner-token-for-isolated-testing-only
+
+    steps:
+      - name: Checkout exact published release source
+        uses: actions/checkout@v4
+        with:
+          ref: v0.4.0
+          persist-credentials: false
+
+      - name: Setup pnpm and native Node
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          runtime: node@24
+          cache: false
+          install: false
+
+      - name: Install source dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck and native portable contract tests
+        run: |
+          pnpm typecheck
+          node --test deploy/portable-install.test.mjs deploy/portable-service.test.mjs
+
+      - name: Fetch published archive and verify its exact digest
+        shell: bash
+        run: |
+          gh release download v0.4.0 --repo yuezhihuafou/synrex --pattern synrex-0.4.0.tgz --clobber
+          node -e 'const fs=require("node:fs"); const crypto=require("node:crypto"); const digest=crypto.createHash("sha256").update(fs.readFileSync("synrex-0.4.0.tgz")).digest("hex"); if(digest!=="3339bb19db7d09731a0d51b0f80a375de1b29120e3ece38e701aab7f36c0f2b5")throw Error("Official artifact digest mismatch"); console.log("Verified official SHA256:", digest)'
+
+      - name: Stage and activate official archive in isolated user prefix
+        shell: bash
+        run: |
+          prefix="$RUNNER_TEMP/synrex-v04-native-qa"
+          node deploy/portable-install.mjs --plan --version 0.4.0 --prefix "$prefix"
+          node deploy/portable-install.mjs --stage --version 0.4.0 --prefix "$prefix" --source ./synrex-0.4.0.tgz --sha256 3339bb19db7d09731a0d51b0f80a375de1b29120e3ece38e701aab7f36c0f2b5
+          node deploy/portable-install.mjs --activate --version 0.4.0 --prefix "$prefix"
+          node "$prefix/bin/synrex.mjs" --version
+          node deploy/portable-install.mjs --status --prefix "$prefix"
+          node deploy/portable-service.mjs --plan --prefix "$prefix"
+
+      - name: Verify packaged install / application entrypoints
+        run: pnpm test:package-install
