@@ -115,12 +115,15 @@ test("durable task manager returns promptly and run logs become queryable", asyn
 
 test("nonzero command is a completed task with an error tool result", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-durable-nonzero-"));
+  let runner: Promise<number> | undefined;
   try {
     const manager = new DurableTaskManager({
       runRoot: root,
       runnerPath: "test-runner",
       launchTask: async ({ requestPath }) => {
-        void runDurableTask(requestPath);
+        // A terminal task.json may be visible before the runner finishes
+        // closing its output files. Await the actual runner at teardown.
+        runner = runDurableTask(requestPath);
       },
     });
     const snapshot = await manager.start({
@@ -135,6 +138,7 @@ test("nonzero command is a completed task with an error tool result", async () =
     assert.equal(task.result?.isError, true);
     assert.equal(task.result?.exitCode, 7);
   } finally {
+    await runner?.catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -172,12 +176,13 @@ test("task ownership is enforced", async () => {
 
 test("terminal tasks persist a completion notification until task_get acknowledges it", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-durable-notify-"));
+  let runner: Promise<number> | undefined;
   try {
     const manager = new DurableTaskManager({
       runRoot: root,
       runnerPath: "test-runner",
       launchTask: async ({ requestPath }) => {
-        void runDurableTask(requestPath);
+        runner = runDurableTask(requestPath);
       },
     });
     const snapshot = await manager.start({
@@ -197,6 +202,7 @@ test("terminal tasks persist a completion notification until task_get acknowledg
     assert.equal(task.status, "completed");
     assert.deepEqual(await manager.pendingNotifications(process.cwd()), []);
   } finally {
+    await runner?.catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });
