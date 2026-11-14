@@ -22,6 +22,8 @@ export interface CodingWorkflowCheckpoint {
 export interface CodingWorkflow {
   workflowId: string;
   workspaceRoot: string;
+  /** Stable session identity for cross-conversation recovery; optional for legacy records. */
+  workspaceId?: string;
   title: string;
   goal: string;
   acceptanceCriteria: string[];
@@ -43,6 +45,7 @@ export interface WorkflowEvent {
 type DbRow = {
   workflow_id: string;
   workspace_root: string;
+  workspace_session_id: string | null;
   title: string;
   goal: string;
   acceptance_json: string;
@@ -68,6 +71,7 @@ function fromRow(row: DbRow): CodingWorkflow {
   return {
     workflowId: row.workflow_id,
     workspaceRoot: row.workspace_root,
+    ...(row.workspace_session_id ? { workspaceId: row.workspace_session_id } : {}),
     title: row.title,
     goal: row.goal,
     acceptanceCriteria: JSON.parse(row.acceptance_json) as string[],
@@ -122,8 +126,17 @@ export class CodingWorkflowStore {
     if (!columns.some((column) => column.name === "create_key")) {
       this.db.exec("alter table coding_workflows add column create_key text");
     }
+    if (!columns.some((column) => column.name === "workspace_session_id")) {
+      this.db.exec("alter table coding_workflows add column workspace_session_id text");
+    }
     this.db.exec(`create unique index if not exists coding_workflows_create_key_idx
       on coding_workflows(workspace_root, create_key) where create_key is not null`);
+    this.db.exec(`create table if not exists coding_workspace_leases (
+      lease_id text primary key, workspace_id text not null,
+      expires_at text not null, created_at text not null
+    );
+    create index if not exists coding_workspace_leases_scope_idx
+      on coding_workspace_leases(workspace_id, expires_at)`);
   }
 
   close(): void {
@@ -137,6 +150,7 @@ export class CodingWorkflowStore {
     constraints: string[];
     /** Stable caller-provided request ID to deduplicate a retried creation. */
     requestKey?: string;
+    workspaceId?: string;
   }): CodingWorkflow {
     const workspaceRoot = resolve(root);
     if (input.requestKey && !/^[A-Za-z0-9._:-]{1,128}$/.test(input.requestKey)) {
@@ -153,16 +167,19 @@ export class CodingWorkflowStore {
             || JSON.stringify(record.constraints) !== JSON.stringify(input.constraints)) {
             throw new Error("Workflow requestKey reused for a different goal or constraints");
           }
+          if (input.workspaceId && record.workspaceId && input.workspaceId !== record.workspaceId) {
+            throw new Error("Workflow requestKey already belongs to another workspace session");
+          }
           return record;
         }
       }
       const workflowId = `wf_${randomBytes(12).toString("hex")}`;
       const now = new Date().toISOString();
       this.db.prepare(`insert into coding_workflows
-        (workflow_id, workspace_root, create_key, title, goal, acceptance_json, constraints_json,
+        (workflow_id, workspace_root, workspace_session_id, create_key, title, goal, acceptance_json, constraints_json,
          status, revision, checkpoint_json, created_at, updated_at)
-        values (?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)`)
-        .run(workflowId, workspaceRoot, input.requestKey ?? null, input.title, input.goal,
+        values (?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?)`)
+        .run(workflowId, workspaceRoot, input.workspaceId ?? null, input.requestKey ?? null, input.title, input.goal,
           JSON.stringify(input.acceptanceCriteria), JSON.stringify(input.constraints),
           JSON.stringify(EMPTY_CHECKPOINT), now, now);
       return this.getRequired(workflowId, workspaceRoot);
@@ -174,6 +191,54 @@ export class CodingWorkflowStore {
       where workflow_id = ? and workspace_root = ?`)
       .get(workflowId, resolve(root)) as DbRow | undefined;
     return row ? fromRow(row) : undefined;
+  }
+
+  /** Lookup is by unguessable workflow ID; callers must validate the returned workspace session. */
+  getById(workflowId: string): CodingWorkflow | undefined {
+    if (!/^wf_[a-f0-9]{24}$/.test(workflowId)) throw new Error("Invalid workflow ID");
+    const row = this.db.prepare("select * from coding_workflows where workflow_id = ?")
+      .get(workflowId) as DbRow | undefined;
+    return row ? fromRow(row) : undefined;
+  }
+
+  /** Used by the worktree GC to exclude unfinished workflows from reclamation. */
+  statusesForRoot(root: string): CodingWorkflowStatus[] {
+    return (this.db.prepare("select status from coding_workflows where workspace_root = ?")
+      .all(resolve(root)) as Array<{ status: CodingWorkflowStatus }>).map(row => row.status);
+  }
+
+  /** Fenced, expiring ownership for multi-conversation work; no implicit indefinite locks. */
+  lease(workspaceId: string, leaseId?: string, ttlMs = 30 * 60_000): { leaseId: string; expiresAt: string } {
+    if (!/^ws_[a-zA-Z0-9_-]{5,100}$/.test(workspaceId)) throw new Error("Invalid workspaceId");
+    if (!Number.isFinite(ttlMs) || ttlMs < 60_000 || ttlMs > 60 * 60_000) {
+      throw new Error("Workspace lease must last between 1 and 60 minutes");
+    }
+    const id = leaseId ?? `wl_${randomBytes(16).toString("hex")}`;
+    if (!/^wl_[a-f0-9]{32}$/.test(id)) throw new Error("Invalid lease ID");
+    const expiresAt = new Date(Date.now() + ttlMs).toISOString();
+    const now = new Date().toISOString();
+    if (leaseId) {
+      const updated = this.db.prepare(`update coding_workspace_leases set expires_at = ?
+        where lease_id = ? and workspace_id = ? and expires_at > ?`)
+        .run(expiresAt, id, workspaceId, now);
+      if (!updated.changes) throw new Error("Workspace lease expired or does not belong to this session");
+    } else {
+      this.db.prepare(`insert into coding_workspace_leases
+        (lease_id, workspace_id, expires_at, created_at) values (?, ?, ?, ?)`)
+        .run(id, workspaceId, expiresAt, now);
+    }
+    return { leaseId: id, expiresAt };
+  }
+
+  releaseLease(workspaceId: string, leaseId: string): boolean {
+    if (!/^wl_[a-f0-9]{32}$/.test(leaseId)) throw new Error("Invalid lease ID");
+    return this.db.prepare(`delete from coding_workspace_leases where workspace_id = ? and lease_id = ?`)
+      .run(workspaceId, leaseId).changes > 0;
+  }
+
+  activeLeaseCount(workspaceId: string, now = new Date()): number {
+    return (this.db.prepare(`select count(*) as n from coding_workspace_leases
+      where workspace_id = ? and expires_at > ?`).get(workspaceId, now.toISOString()) as { n: number }).n;
   }
 
   getRequired(workflowId: string, root: string): CodingWorkflow {

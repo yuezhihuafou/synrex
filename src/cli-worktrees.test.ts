@@ -9,6 +9,7 @@ import { promisify } from "node:util";
 import { openDatabase } from "./db/client.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
+import { CodingWorkflowStore } from "./coding-workflows.js";
 
 const execFileAsync = promisify(execFile);
 const cliPath = fileURLToPath(new URL("./cli.ts", import.meta.url));
@@ -59,6 +60,19 @@ test("worktrees prune removes only managed worktrees unused for three days", asy
     .prepare("update workspace_sessions set last_used_at = ? where id = 'ws_old'")
     .run(new Date(Date.now() - 4 * 24 * 60 * 60 * 1000).toISOString());
   database.close();
+  // Historical worktrees without workflow ownership are protected, even
+  // if their Git contents happen to be clean and old.
+  const workflows = new CodingWorkflowStore(stateDir);
+  const completed = workflows.create(oldWorktree, {
+    title: "Verified old worktree", goal: "Finish isolated fixture",
+    acceptanceCriteria: ["check"], constraints: [], workspaceId: "ws_old",
+  });
+  workflows.checkpoint(oldWorktree, {
+    workflowId: completed.workflowId, expectedRevision: 0, status: "completed",
+    checkpoint: { summary: "Verified", phase: "finished", completedSteps: ["check"],
+      nextSteps: [], blockers: [], checks: ["fixture check"], taskIds: [] },
+  });
+  workflows.close();
 
   const env = writeTestDevspaceConfig(configDir, {
     workspaces: { allowedRoots: [sourceRoot], worktreeRoot },
@@ -82,7 +96,7 @@ test("worktrees prune removes only managed worktrees unused for three days", asy
 
   const { stdout } = await execFileAsync(
     process.execPath,
-    ["--import", "tsx", cliPath, "worktrees", "prune", "--safe"],
+    ["--import", "tsx", cliPath, "worktrees", "prune", "--execute"],
     { env: { ...process.env, ...env }, encoding: "utf8" },
   );
 

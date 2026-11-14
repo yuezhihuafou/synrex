@@ -11,7 +11,7 @@ import { MonitorCollector } from "./collector.js";
 import { createMonitorApp } from "./server.js";
 import { DurableTaskManager } from "../durable-tasks.js";
 import type { DiagnosticEntry } from "../diagnostic-trace.js";
-import { parseProcStat } from "./resources.js";
+import { classifyDiskPressure, parseProcStat } from "./resources.js";
 import { normalizeEvent } from "./events.js";
 import { buildTrace } from "./trace-view.js";
 import { PeerSampler, validatePeerConfig } from "./peers.js";
@@ -99,6 +99,15 @@ test("real detached task is visible, output follows, cancel reaches terminal rec
 test("Linux stat parser handles spaces and parentheses in process name",()=>{
   const fields=Array(50).fill("0");fields[0]="S";fields[1]="42";fields[11]="200";fields[12]="50";fields[19]="1234";fields[21]="10";
   const parsed=parseProcStat(`123 (worker (job)) ${fields.join(" ")}`);assert.equal(parsed.row.name,"worker (job)");assert.equal(parsed.row.ppid,42);assert.equal(parsed.ticks,250);assert.equal(parsed.row.rssBytes,40960);
+});
+
+test("disk pressure is bounded and missing capacity is not misreported as zero", () => {
+  const gib = 1024 ** 3;
+  assert.equal(classifyDiskPressure(200 * gib, 1000 * gib), "ok");
+  assert.equal(classifyDiskPressure(8 * gib, 1000 * gib), "critical");
+  assert.equal(classifyDiskPressure(8 * gib, 60 * gib), "warning");
+  assert.equal(classifyDiskPressure(1 * gib, 100 * gib), "critical");
+  assert.throws(() => classifyDiskPressure(0, 0), /Invalid disk/);
 });
 
 test("full-chain trace adapter retains stage/node/task identity and excludes unapproved payloads",async t=>{

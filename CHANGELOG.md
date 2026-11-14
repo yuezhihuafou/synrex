@@ -4,6 +4,28 @@ Synrex's version numbers are independent of the upstream DevSpace project.
 Only verified release artifacts, tags and running manifests identify deployed
 versions; a changelog entry alone does not prove that a release was published.
 
+## 0.4.0 — historical-feature consolidation candidate (2026-11-14)
+
+- Incorporated the previously isolated workspace lifecycle P1–P4 into the
+  current Core: cross-conversation workflow-to-worktree recovery, bounded
+  leases, read-only worktree state/detail and conservative Git-safe retention.
+- Replaced experimental startup/periodic GC with read-only startup inspection.
+  Browser GC is **preview-only**; actual pruning requires an explicit local
+  `synrex worktrees prune --execute` and proven completed workflow ownership.
+  Legacy unknown/dirty/active worktrees remain protected, never mass-reset.
+- Detects a stale Console snapshot which claims an older immutable Core
+  release, independently of snapshot freshness timestamps.
+- Ensures separately activated Console instances display the newly verified
+  release identity rather than retaining an obsolete label.
+- Adds read-only local disk-capacity warning/critical status in independent
+  Console; never infers remote disk state or deletes files.
+- Adds Git history/worktree read-only audit, a feature decision ledger and
+  mocked multiline Antigravity compatibility regression.
+
+This is **not** a claim that all optional host environments are identical or
+that an offline gateway/macOS host has passed live acceptance. The pinned
+production receipt and published tag are the source of truth for deployment.
+
 ## 0.3.0 — consolidated portable-release candidate (2026-11-13)
 
 - Replayed the independently deployed Console's eight verified monitoring,

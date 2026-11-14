@@ -171,13 +171,16 @@ worktrees are not deleted by metadata retention; `devspace worktrees prune`
 keeps its separate recovery-aware lifecycle.
 
 For conservative cleanup across concurrent ChatGPT sessions, first run
-`synrex worktrees prune --dry-run` and inspect preserved/recovery statuses.
-`synrex worktrees prune --safe` only considers stale, clean worktrees whose
-HEAD is reachable from local `origin/main`; it protects unmerged commits,
-untracked files, unexpected ignored state and directly active Linux process
-working directories. A process that has moved its working directory elsewhere
-is not automatically discoverable, so review running tasks before pruning.
-The original `prune` command remains recovery-aware for deliberate cleanup.
+`synrex worktrees prune` (or `--dry-run`) and inspect preserved/recovery
+statuses. Since the historical consolidation, this command **previews by
+default** and requires an explicitly completed/cancelled owning workflow,
+expired retention and no active lease. Actual cleanup requires
+`synrex worktrees prune --execute` on the owning peer, plus conservative
+Git safety checks (unmerged commits, tracked/untracked/ignored files,
+active cwd processes and safe recovery refs). The old `--safe` flag is
+accepted but never silently enables deletion. A process that has moved its
+cwd elsewhere cannot always be discovered, so review active tasks before
+executing a cleanup. Console browser sessions cannot delete worktrees.
 
 ## MCP Workspace Path Rejected
 

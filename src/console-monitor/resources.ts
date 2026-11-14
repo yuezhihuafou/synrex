@@ -1,5 +1,6 @@
 import os from "node:os";
 import { readFile, stat } from "node:fs/promises";
+import { statfsSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { entries } from "./files.js";
@@ -7,6 +8,15 @@ import type { Execution, ProcessRow, Resources } from "./types.js";
 
 const exec = promisify(execFile);
 export const PROCESS_LIMIT = 1024;
+export function classifyDiskPressure(availableBytes: number, totalBytes: number): "ok" | "warning" | "critical" {
+  if (!Number.isSafeInteger(availableBytes) || !Number.isSafeInteger(totalBytes) ||
+      availableBytes < 0 || totalBytes <= 0 || availableBytes > totalBytes) {
+    throw new Error("Invalid disk capacity sample");
+  }
+  if (availableBytes < 2 * 1024 ** 3 || availableBytes / totalBytes < 0.05) return "critical";
+  if (availableBytes < 10 * 1024 ** 3 || availableBytes / totalBytes < 0.1) return "warning";
+  return "ok";
+}
 interface Counters { total: number; idle: number }
 function counters(): Counters {
   return os.cpus().reduce((a, cpu) => ({ total: a.total + Object.values(cpu.times).reduce((x, y) => x + y, 0), idle: a.idle + cpu.times.idle }), { total: 0, idle: 0 });
@@ -29,6 +39,8 @@ export class ResourceSampler {
   private gpu: Resources["gpu"] = null;
   private gpuAt: string | null = null;
   private gpuError: string | null = null;
+  private disk: Resources["disk"] = null;
+  private diskAt = 0;
 
   async sample(executions: Execution[]): Promise<Resources> {
     const now = Date.now(), current = counters();
@@ -76,8 +88,19 @@ export class ResourceSampler {
         this.gpuError = null;
       } catch { this.gpu = null; this.gpuError = "GPU metrics unavailable"; }
     }
+    if (!this.diskAt || now - this.diskAt >= 30_000) {
+      this.diskAt = now;
+      try {
+        const fs = statfsSync(os.homedir());
+        const totalBytes = Number(fs.blocks) * Number(fs.bsize);
+        const availableBytes = Number(fs.bavail) * Number(fs.bsize);
+        const pressure = classifyDiskPressure(availableBytes, totalBytes);
+        this.disk = { availableBytes, totalBytes, usedBytes: totalBytes - availableBytes, pressure };
+      } catch { this.disk = null; }
+    }
     return { hostname: os.hostname(), sampledAt: new Date(now).toISOString(), cpuPercent, cores: os.cpus().length,
       totalMemory: os.totalmem(), usedMemory: os.totalmem() - os.freemem(), load: os.loadavg(),
+      disk: this.disk,
       processes: processes.sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0)),
       processLimitReached: names.length >= PROCESS_LIMIT, gpu: this.gpu, gpuSampledAt: this.gpuAt, gpuError: this.gpuError };
   }

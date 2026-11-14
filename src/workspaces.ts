@@ -172,12 +172,36 @@ export class WorkspaceRegistry {
     const projectKey = await this.conversationProjectKey(workspaceInput);
     const mode = workspaceInput.mode ?? "checkout";
     if (mode === "worktree") {
-      const context = await this.openWorktreeWorkspace(workspaceInput.path, workspaceInput.baseRef);
-      return {
-        ...context,
-        // A new worktree always has its own workspace-specific context.
-        includeBootstrapContext: true,
-      };
+      const targetKey = JSON.stringify(["worktree", projectKey, workspaceInput.baseRef ?? "HEAD"]);
+      const operationKey = JSON.stringify([conversationScopeId, targetKey]);
+      const pending = this.pendingCheckoutOpens.get(operationKey);
+      if (pending) return { ...await pending, workspaceReused: true, includeBootstrapContext: false };
+      const open = (async () => {
+        const binding = this.store!.getConversationBinding(conversationScopeId, targetKey);
+        if (binding) {
+          const session = this.store!.getSession(binding.workspaceSessionId);
+          if (session?.status === "active" && session.mode === "worktree" && session.managed
+            && session.sourceRoot && await canonicalPath(session.sourceRoot) === projectKey
+            && (session.baseRef ?? "HEAD") === (workspaceInput.baseRef ?? "HEAD")) {
+            const reused = await this.getWorkspace(session.id);
+            if (reused.mode === "worktree" && reused.root === session.root) {
+              this.store!.touchConversationBinding(conversationScopeId, targetKey);
+              return this.reusedWorkspaceContext(reused);
+            }
+          }
+          this.store!.deleteConversationBinding(conversationScopeId, targetKey);
+        }
+        const context = await this.openWorktreeWorkspace(workspaceInput.path, workspaceInput.baseRef);
+        this.store!.setConversationBinding({
+          conversationScopeId, targetKey, workspaceSessionId: context.workspace.id,
+        });
+        return context;
+      })();
+      this.pendingCheckoutOpens.set(operationKey, open);
+      try { return await open; }
+      finally {
+        if (this.pendingCheckoutOpens.get(operationKey) === open) this.pendingCheckoutOpens.delete(operationKey);
+      }
     }
 
     const targetKey = this.conversationCheckoutTargetKey(projectKey);

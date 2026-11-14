@@ -41,6 +41,9 @@ export interface Resources {
   cores: number;
   totalMemory: number;
   usedMemory: number;
+  /** Observed local filesystem only; no inferred peer disk status. */
+  disk?: { availableBytes: number; totalBytes: number; usedBytes: number;
+    pressure: "ok" | "warning" | "critical" } | null;
   load: number[];
   processes: ProcessRow[];
   processLimitReached: boolean;

@@ -44,6 +44,7 @@ test("real workflow tools compose a scoped handoff, historical agent evidence an
     const workflow = workflows.create(project, {
       title: "Handoff integration", goal: "Recover an agent task",
       acceptanceCriteria: ["test passes"], constraints: ["do not touch production"],
+      workspaceId: "ws_integration",
     });
     const checkpoint = workflows.checkpoint(project, {
       workflowId: workflow.workflowId, expectedRevision: 0, status: "active",
@@ -75,6 +76,23 @@ test("real workflow tools compose a scoped handoff, historical agent evidence an
       },
     };
     registerCodingWorkflowTools({ server, workspaces, stateDir, memory });
+    const resumed = await handlers.get("workflow_open")!({ workflowId: workflow.workflowId });
+    assert.equal(resumed.structuredContent.workspaceId, "ws_integration");
+    assert.equal(resumed.structuredContent.handoff.checkpointGitMatchesCurrent, true);
+    const reopenedStore = new CodingWorkflowStore(stateDir);
+    assert.equal(reopenedStore.getById(workflow.workflowId)?.workspaceId, "ws_integration");
+    reopenedStore.close();
+    // A new ChatGPT connection can discover the original workspace without
+    // opening a second tree or trusting a stale model summary.
+    const nextConnection = new Map<string, Handler>();
+    registerCodingWorkflowTools({
+      server: { registerTool: (name: string, _meta: unknown, handler: Handler) => {
+        nextConnection.set(name, handler);
+      } } as unknown as McpRegistrationTarget,
+      workspaces, stateDir, memory,
+    });
+    const resumedFromNextChat = await nextConnection.get("workflow_open")!({ workflowId: workflow.workflowId });
+    assert.equal(resumedFromNextChat.structuredContent.workspaceId, "ws_integration");
     const status = handlers.get("workflow_status")!;
     const base = await status({ workspaceId: "ws_integration", workflowId: workflow.workflowId });
     const handoff = base.structuredContent.handoff;

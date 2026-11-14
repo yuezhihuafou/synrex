@@ -12,6 +12,7 @@ import { DisabledProjectMemoryPort } from "./project-memory-port.js";
 import { textBlock } from "./tool-surfaces/shared.js";
 import { workspaceIdDescription } from "./tool-surfaces/types.js";
 import { workflowHandoffText } from "./workflow-handoff.js";
+import { withWorkspaceLifecycleLock } from "./workspace-lifecycle-lock.js";
 
 const workflowId = z.string().regex(/^wf_[a-f0-9]{24}$/);
 const shortText = z.string().trim().min(1).max(4000);
@@ -32,7 +33,7 @@ function gitSnapshot(root: string): Pick<CodingWorkflowCheckpoint, "gitHead" | "
 }
 
 const openInput = {
-  workspaceId: z.string().describe(workspaceIdDescription),
+  workspaceId: z.string().optional().describe("Required to create; omit when resuming by workflowId."),
   requestKey: z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/).optional()
     .describe("Idempotency key for workflow creation retries."),
   workflowId: workflowId.optional().describe("Resume an existing workflow."),
@@ -40,6 +41,8 @@ const openInput = {
   goal: shortText.optional().describe("Goal for a new workflow."),
   acceptanceCriteria: items.optional().describe("Observable completion criteria."),
   constraints: items.optional().describe("Constraints and non-goals."),
+  leaseAction: z.enum(["acquire", "renew", "release"]).optional(),
+  leaseId: z.string().regex(/^wl_[a-f0-9]{32}$/).optional(),
 };
 
 export function registerCodingWorkflowTools(input: {
@@ -53,26 +56,69 @@ export function registerCodingWorkflowTools(input: {
 
   server.registerTool("workflow_open", {
     title: "Open coding workflow",
-    description: "Create or resume a durable GPT-led workflow by ID. Completion requires original acceptance criteria. Does not invoke a model.",
+    description: "Create or resume a workflow. Resume by workflowId alone across chats; optional leaseAction protects active worktrees.",
     inputSchema: openInput,
     annotations: { readOnlyHint: false, openWorldHint: false },
-  }, async ({ workspaceId, workflowId: requestedId, requestKey, title, goal, acceptanceCriteria, constraints }) => {
-    const workspace = await workspaces.getWorkspace(workspaceId);
-    const result = withCodingWorkflowStore(stateDir, (store) => {
-      if (requestedId) {
-        if (goal || title || acceptanceCriteria || constraints || requestKey) throw new Error("Resume with workflowId only; use workflow_checkpoint to update progress.");
-        return store.getRequired(requestedId, workspace.root);
+  }, async ({ workspaceId, workflowId: requestedId, requestKey, title, goal, acceptanceCriteria, constraints, leaseAction, leaseId }) => {
+    if (leaseAction) {
+      if (!workspaceId || requestedId || goal || title || acceptanceCriteria || constraints || requestKey) {
+        throw new Error("Lease operation requires workspaceId and leaseAction only (plus leaseId for renew/release)");
       }
-      if (!goal || !acceptanceCriteria?.length) {
-        throw new Error("New workflow requires goal and at least one acceptance criterion. Provide workflowId to resume.");
-      }
-      return store.create(workspace.root, {
-        title: title ?? goal.slice(0, 100), goal, acceptanceCriteria, constraints: constraints ?? [], requestKey,
+      const result = await withWorkspaceLifecycleLock(stateDir, async () => {
+        await workspaces.getWorkspace(workspaceId);
+        return withCodingWorkflowStore(stateDir, store => {
+          if (leaseAction === "acquire") {
+            if (leaseId) throw new Error("Omit leaseId when acquiring");
+            return { action: leaseAction, ...store.lease(workspaceId) };
+          }
+          if (!leaseId) throw new Error("Renew/release requires leaseId");
+          if (leaseAction === "renew") return { action: leaseAction, ...store.lease(workspaceId, leaseId) };
+          return { action: leaseAction, released: store.releaseLease(workspaceId, leaseId) };
+        });
       });
+      return { content: [textBlock(JSON.stringify(result))], structuredContent: result };
+    }
+    const result = await withWorkspaceLifecycleLock(stateDir, async () => {
+      let id = workspaceId;
+      if (requestedId) {
+        const existing = withCodingWorkflowStore(stateDir, store => store.getById(requestedId));
+        if (!existing) throw new Error("Unknown workflow ID");
+        if (existing.workspaceId) {
+          if (id && id !== existing.workspaceId) {
+            const requested = await workspaces.getWorkspace(id);
+            const owner = await workspaces.getWorkspace(existing.workspaceId);
+            if ((requested.sourceRoot ?? requested.root) !== (owner.sourceRoot ?? owner.root)) {
+              throw new Error("Workflow belongs to a different project");
+            }
+          }
+          id = existing.workspaceId;
+        } else if (!id) {
+          throw new Error("Legacy workflow has no workspace session. Reopen its original workspace.");
+        }
+      }
+      if (!id) throw new Error("Creating a workflow requires workspaceId");
+      const workspace = await workspaces.getWorkspace(id);
+      const record = withCodingWorkflowStore(stateDir, store => {
+        if (requestedId) {
+          if (goal || title || acceptanceCriteria || constraints || requestKey) throw new Error("Resume with workflowId only");
+          return store.getRequired(requestedId, workspace.root);
+        }
+        if (!goal || !acceptanceCriteria?.length) throw new Error("New workflow requires goal and acceptanceCriteria");
+        return store.create(workspace.root, {
+          title: title ?? goal.slice(0, 100), goal, acceptanceCriteria, constraints: constraints ?? [],
+          requestKey, workspaceId: id,
+        });
+      });
+      if (record.workspaceId && record.workspaceId !== id) throw new Error("Workflow workspace session mismatch");
+      return { record, id, root: workspace.root };
     });
+    const handoff = requestedId ? buildCodingWorkflowHandoff({
+      workflow: result.record, workspaceId: result.id, workspaceRoot: result.root,
+      liveGit: gitSnapshot(result.root), agentEvidence: [],
+    }) : undefined;
     return {
-      content: [textBlock(workflowHandoffText(result, null))],
-      structuredContent: { ...result },
+      content: [textBlock(workflowHandoffText(result.record, handoff?.checkpointGitMatchesCurrent ?? null))],
+      structuredContent: { ...result.record, workspaceId: result.id, ...(handoff ? { handoff } : {}) },
     };
   });
 
@@ -183,9 +229,10 @@ export function registerCodingWorkflowTools(input: {
       ...((agentIds ?? previousAgentIds) ? { agentIds: agentIds ?? previousAgentIds } : {}),
       ...gitSnapshot(workspace.root),
     };
-    const result = withCodingWorkflowStore(stateDir, (store) => store.checkpoint(workspace.root, {
-      workflowId: id, expectedRevision, status, checkpoint,
-    }));
+    const result = await withWorkspaceLifecycleLock(stateDir, async () =>
+      withCodingWorkflowStore(stateDir, (store) => store.checkpoint(workspace.root, {
+        workflowId: id, expectedRevision, status, checkpoint,
+      })));
     // Learning is best-effort and observational. A checkpoint is self-reported
     // context, not an independent test receipt or a verified Skill.
     try {

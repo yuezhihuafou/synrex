@@ -1,0 +1,23 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { AntigravityLocalAgentDriver } from "./local-agent-antigravity.js";
+
+test("Antigravity mock accepts pretty-printed multi-line CLI JSON after diagnostics", async t => {
+  if (process.platform === "win32") return t.skip("POSIX fixture executable");
+  const dir = mkdtempSync(join(tmpdir(), "synrex-antigravity-multiline-"));
+  try {
+    const binary = join(dir, "agy-mock");
+    writeFileSync(binary, '#!/bin/sh\nprintf \'diagnostic\\n{\\n  "status": "SUCCESS",\\n  "response": "PRETTY_OK"\\n}\\n\'\n');
+    chmodSync(binary, 0o755);
+    const runtime = await new AntigravityLocalAgentDriver({ ...process.env, ANTIGRAVITY_COMMAND: binary }).createRuntime();
+    assert.equal(runtime.status, "ok");
+    if (runtime.status !== "ok") return;
+    const result = await runtime.value.run({ prompt: "test", workspaceRoot: dir });
+    assert.equal(result.status, "ok");
+    if (result.status === "ok") assert.equal(result.value.finalResponse, "PRETTY_OK");
+    await runtime.value.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});

@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 import express, { type Express, type Request, type Response } from "express";
 import type { ServerConfig } from "./config.js";
+import { inspectWorktreeLifecycle, listWorktreeLifecycle, pruneCompletedWorktrees } from "./workspace-lifecycle.js";
+import { expectedPinnedConsoleRelease, consoleSnapshotReleaseMismatch } from "./console-release-consistency.js";
 import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { readOtelFileTail } from "./otel-file-reader.js";
 import { readArchivedTrace, readGatewayArchivedTrace, searchArchive, searchGatewayArchive, historyStats } from "./observability-history.js";
@@ -140,6 +142,41 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
   app.get("/console/api/clock", auth, (_req, res) => {
     res.json({ serverTimeMs: Date.now() });
   });
+  app.get("/console/api/workspaces", auth, (_req, res) => {
+    try { res.json({ workspaces: listWorktreeLifecycle(config.stateDir) }); }
+    catch { res.status(503).json({ error: "Workspace lifecycle data unavailable" }); }
+  });
+  app.get("/console/api/workspaces/:id", auth, async (req, res) => {
+    const id = String(req.params.id ?? "");
+    if (!/^ws_[a-zA-Z0-9_-]{5,100}$/.test(id)) { res.status(400).json({ error: "Invalid workspace ID" }); return; }
+    try {
+      const detail = await inspectWorktreeLifecycle(config.stateDir, id);
+      if (!detail) { res.status(404).json({ error: "Unknown managed worktree" }); return; }
+      res.json(detail);
+    } catch { res.status(503).json({ error: "Workspace details unavailable" }); }
+  });
+  app.post("/console/api/workspaces/gc", auth, express.json({ limit: "2kb" }), async (req, res) => {
+    if (!sameOrigin(req)) { res.status(403).json({ error: "Origin rejected" }); return; }
+    if (req.body?.execute !== true && req.body?.execute !== false) {
+      res.status(400).json({ error: "Provide execute boolean" }); return;
+    }
+    // A browser login and Origin header are not authority for mass file deletion.
+    // Keep this interface preview-only; an operator must run the explicit
+    // conservative CLI command in the intended execution peer.
+    if (req.body.execute) {
+      res.status(403).json({ error: "Browser worktree deletion disabled; use explicit owner CLI --execute" });
+      return;
+    }
+    try {
+      const result = await pruneCompletedWorktrees(config, new Date(), true);
+      if (result.isErr()) { res.status(503).json({ error: result.error.message }); return; }
+      const data = result.value;
+      res.json({ executed: req.body.execute,
+        removed: data.removed.map(item => item.workspaceId),
+        eligible: data.wouldRemove, skipped: data.skipped,
+        failed: data.failed.map(item => ({ workspaceId: item.workspaceId, error: item.error.message })) });
+    } catch { res.status(503).json({ error: "Conservative GC unavailable" }); }
+  });
   app.get("/console/api/run-log/:runId", auth, (req, res) => {
     const runId=typeof req.params.runId==="string"?req.params.runId:"";
     if (!/^run_\d{14}_[a-zA-Z0-9]{4,32}$/.test(runId)) {
@@ -170,15 +207,19 @@ export function registerSynrexConsole(app: Express, config: ServerConfig): void 
     res.clearCookie(COOKIE_NAME, sessionCookieOptions);
     res.json({ authenticated: false });
   });
+  const currentPinnedRelease = expectedPinnedConsoleRelease(import.meta.url);
   app.get("/console/api/snapshot", auth, (_req, res) => {
     try {
       const file=path.join(config.stateDir,"observability","console-snapshot.json");
       if(existsSync(file)){
-        const snap=JSON.parse(readFileSync(file,"utf8")) as {generatedAt?:string;sourceHealth?:{available:boolean}};
+        const snap=JSON.parse(readFileSync(file,"utf8")) as {generatedAt?:string;service?:{release?:string};sourceHealth?:{available:boolean}};
         const age=Date.now()-Date.parse(snap.generatedAt??"");
         if(Number.isFinite(age)){
+          const releaseMismatch=consoleSnapshotReleaseMismatch(snap.service?.release,currentPinnedRelease);
           res.setHeader("X-Synrex-Snapshot-Age-Ms",String(Math.max(0,Math.round(age))));
-          res.json({...snap,snapshotAgeMs:age,snapshotStale:age>45000||snap.sourceHealth?.available===false});
+          res.json({...snap,snapshotAgeMs:age,
+            snapshotStale:age>45000||snap.sourceHealth?.available===false||releaseMismatch,
+            ...(releaseMismatch?{snapshotMode:"release_mismatch",currentPinnedRelease}:{})});
           return;
         }
       }

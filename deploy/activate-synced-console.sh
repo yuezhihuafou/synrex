@@ -69,6 +69,17 @@ args[matches[0]]=target
 assert "--auth-file" in args and "--monitor-dir" in args, "Console authority/state flags absent"
 monitor=args[args.index("--monitor-dir")+1]
 assert pathlib.Path(monitor).is_dir(), "Monitor state directory missing"
+# The original standalone service may carry a stale --release flag even after
+# its executable was switched. Keep *all* owner/peer/auth/origin arguments but
+# bind the visible version label to the verified immutable release directory.
+release=pathlib.Path(target).parent.parent.name
+assert re.fullmatch(r"synrex-main-[a-f0-9]{12}",release), "Invalid pinned Console release identity"
+if "--release" in args:
+ at=args.index("--release")
+ assert at+1 < len(args), "Missing legacy Console release argument"
+ args[at+1]=release
+else:
+ args.extend(["--release",release])
 def systemd_quote(s):
  return '"'+s.replace("\\","\\\\").replace('"','\\"').replace("%","%%")+'"'
 entry="[Service]\nExecStart=\nExecStart="+" ".join(systemd_quote(x) for x in args)+"\n"

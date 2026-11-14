@@ -74,6 +74,9 @@ export interface WorkspaceStore {
   markSessionPruned(id: string, recoveryKind?: WorkspaceRecoveryKind): BetterResult<void, WorkspaceStoreError>;
   reactivateSession(id: string): BetterResult<boolean, WorkspaceStoreError>;
   touchSession(id: string): BetterResult<boolean, WorkspaceStoreError>;
+  /** Claim a stale managed worktree for GC only if no newer access occurred. */
+  claimStaleForGc(id: string, observedLastUsedAt: string): BetterResult<boolean, WorkspaceStoreError>;
+  releaseGcClaim(id: string): BetterResult<boolean, WorkspaceStoreError>;
   deleteSession(id: string): BetterResult<void, WorkspaceStoreError>;
   getConversationBinding(
     conversationScopeId: string,
@@ -220,6 +223,28 @@ export class SqliteWorkspaceStore implements WorkspaceStore {
         )
         .run();
       return result.changes > 0;
+    }, id);
+  }
+
+  claimStaleForGc(id: string, observedLastUsedAt: string): BetterResult<boolean, WorkspaceStoreError> {
+    return workspaceStoreResult("claim_stale_for_gc", () => {
+      const changed = this.database.db.update(workspaceSessions)
+        .set({ status: "inactive" })
+        .where(and(eq(workspaceSessions.id, id), eq(workspaceSessions.status, "active"),
+          eq(workspaceSessions.mode, "worktree"), eq(workspaceSessions.managed, "true"),
+          eq(workspaceSessions.lastUsedAt, observedLastUsedAt)))
+        .run();
+      return changed.changes === 1;
+    }, id);
+  }
+
+  releaseGcClaim(id: string): BetterResult<boolean, WorkspaceStoreError> {
+    return workspaceStoreResult("release_gc_claim", () => {
+      const changed = this.database.db.update(workspaceSessions)
+        .set({ status: "active", lastUsedAt: new Date().toISOString() })
+        .where(and(eq(workspaceSessions.id, id), eq(workspaceSessions.status, "inactive"),
+          eq(workspaceSessions.managed, "true"))).run();
+      return changed.changes === 1;
     }, id);
   }
 

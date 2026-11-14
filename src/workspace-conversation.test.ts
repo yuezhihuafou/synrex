@@ -121,7 +121,7 @@ test("a checkout without a conversation scope does not use conversation reuse", 
   assert.notEqual(second.workspace.id, first.workspace.id);
 });
 
-test("worktree requests remain fresh without replacing the reusable checkout", async (t) => {
+test("same-conversation worktree requests reuse a registered tree without replacing checkout", async (t) => {
   const { project, registry } = await fixture(t, { git: true });
   const worktreeInput = { path: project, mode: "worktree" as const };
 
@@ -134,8 +134,8 @@ test("worktree requests remain fresh without replacing the reusable checkout", a
   });
   const checkoutAgain = await registry.openWorkspace(project, { conversationScopeId: "chat-1" });
 
-  assert.notEqual(firstWorktree.workspace.id, secondWorktree.workspace.id);
-  assert.notEqual(firstWorktree.workspace.root, secondWorktree.workspace.root);
+  assert.equal(firstWorktree.workspace.id, secondWorktree.workspace.id);
+  assert.equal(firstWorktree.workspace.root, secondWorktree.workspace.root);
   assert.equal(checkoutAgain.workspace.id, checkout.workspace.id);
 });
 
@@ -154,7 +154,7 @@ test("a worktree-first conversation creates and then reuses its checkout", async
   assert.equal(checkoutAgain.workspace.id, checkout.workspace.id);
 });
 
-test("concurrent worktree opens remain fresh and return complete context", async (t) => {
+test("concurrent same-conversation worktree opens are deduplicated", async (t) => {
   const { project, registry } = await fixture(t, { git: true });
   const worktreeInput = { path: project, mode: "worktree" as const };
 
@@ -163,8 +163,8 @@ test("concurrent worktree opens remain fresh and return complete context", async
     registry.openWorkspace(worktreeInput, { conversationScopeId: "chat-1" }),
   ]);
 
-  assert.notEqual(first.workspace.id, second.workspace.id);
-  assert.notEqual(first.workspace.root, second.workspace.root);
+  assert.equal(first.workspace.id, second.workspace.id);
+  assert.equal(first.workspace.root, second.workspace.root);
   assert.deepEqual(
     first.agentsFiles.map((file) => file.content),
     second.agentsFiles.map((file) => file.content),
@@ -173,6 +173,17 @@ test("concurrent worktree opens remain fresh and return complete context", async
     first.availableAgentsFiles.map((file) => file.path.replace(first.workspace.root, "<root>")),
     second.availableAgentsFiles.map((file) => file.path.replace(second.workspace.root, "<root>")),
   );
+});
+
+test("independent conversations still obtain isolated worktrees", async (t) => {
+  const { project, registry } = await fixture(t, { git: true });
+  const input = { path: project, mode: "worktree" as const };
+  const [first, second] = await Promise.all([
+    registry.openWorkspace(input, { conversationScopeId: "chat-one" }),
+    registry.openWorkspace(input, { conversationScopeId: "chat-two" }),
+  ]);
+  assert.notEqual(first.workspace.id, second.workspace.id);
+  assert.notEqual(first.workspace.root, second.workspace.root);
 });
 
 test("checkout reuse survives a registry restart", async (t) => {

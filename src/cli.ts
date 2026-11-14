@@ -62,7 +62,7 @@ import { DiagnosticTrace, summarizeDiagnosticTrace } from "./diagnostic-trace.js
 import { diagnosticTimings, readRunTrace, systemDiagnosticEvents } from "./diagnostic-report.js";
 import { inspectOAuthState } from "./oauth-diagnostics.js";
 import { getOAuthEnrollmentStatus, lockOAuthEnrollment, openOAuthEnrollmentWindow, usePasswordOnlyEnrollment } from "./oauth-enrollment.js";
-import { pruneStaleManagedWorktrees } from "./worktree-prune.js";
+import { pruneCompletedWorktrees } from "./workspace-lifecycle.js";
 import { pruneStaleWorkspaceMetadata } from "./workspace-retention.js";
 import { generateNodeJoinToken } from "./multinode/auth.js";
 import { NodeHealthMonitor } from "./multinode/health.js";
@@ -400,6 +400,8 @@ async function serve(): Promise<void> {
   // subprocesses and durable shell tasks must not inherit it and silently
   // redirect unrelated Synrex instances or test services to the owner port.
   delete process.env.SYNREX_CORE_LISTEN_PORT;
+  // Never delete historical worktrees merely because the Owner was restarted.
+  // The startup check is a read-only preview; explicit CLI action is required.
   await runStartupWorktreeCleanup(config);
   await runStartupMetadataCleanup(config);
   const { createServer } = await import("./server.js");
@@ -438,7 +440,7 @@ async function serve(): Promise<void> {
 
 async function runStartupWorktreeCleanup(config: ServerConfig): Promise<void> {
   try {
-    const cleanup = await pruneStaleManagedWorktrees(config);
+    const cleanup = await pruneCompletedWorktrees(config, new Date(), true);
     if (cleanup.isErr()) {
       logEvent(config.logging, "warn", "managed_worktree_cleanup_failed", {
         error: cleanup.error.message,
@@ -448,13 +450,10 @@ async function runStartupWorktreeCleanup(config: ServerConfig): Promise<void> {
     }
 
     const result = cleanup.value;
-    const preserved = result.removed.filter((entry) => entry.recoveryRef).length;
-    if (result.removed.length > 0 || result.missing.length > 0 || result.skipped.length > 0) {
-      logEvent(config.logging, "info", "managed_worktree_cleanup", {
-        removed: result.removed.length,
-        recoveryRefs: preserved,
-        missingSessions: result.missing.length,
-        skippedUntracked: result.skipped.length,
+    if (result.wouldRemove.length > 0 || result.skipped.length > 0) {
+      logEvent(config.logging, "info", "managed_worktree_cleanup_preview", {
+        eligible: result.wouldRemove.length,
+        protected: result.skipped.length,
       });
     }
     for (const failure of result.failed) {
@@ -610,16 +609,15 @@ function runConfigCommand(args: string[]): void {
 
 async function runWorktreesCommand(args: string[]): Promise<void> {
   const [subcommand, ...extra] = args;
-  if (subcommand !== "prune" || extra.some((arg) => !["--safe", "--dry-run"].includes(arg))
+  if (subcommand !== "prune" || extra.some((arg) => !["--safe", "--dry-run", "--execute"].includes(arg))
     || new Set(extra).size !== extra.length) {
-    throw new Error("Usage: synrex worktrees prune [--safe] [--dry-run]");
+    throw new Error("Usage: synrex worktrees prune [--dry-run | --execute] (safe preview by default)");
   }
-
-  const dryRun = extra.includes("--dry-run");
-  const cleanup = await pruneStaleManagedWorktrees(loadConfig(), new Date(), {
-    safeOnly: extra.includes("--safe") || dryRun,
-    dryRun,
-  });
+  if (extra.includes("--dry-run") && extra.includes("--execute")) {
+    throw new Error("Choose --dry-run or --execute, not both");
+  }
+  const dryRun = !extra.includes("--execute");
+  const cleanup = await pruneCompletedWorktrees(loadConfig(), new Date(), dryRun);
   if (cleanup.isErr()) {
     console.warn(`Failed to prune managed worktrees: ${cleanup.error.message}`);
     process.exitCode = 1;
@@ -664,7 +662,7 @@ function printHelp(): void {
       "  synrex oauth status    Show current OAuth enrollment policy",
       "  synrex config get      Print persisted config",
       "  synrex config set publicBaseUrl <url|null>",
-      "  synrex worktrees prune [--safe] [--dry-run]  Review or clean managed worktrees unused for 3 days",
+      "  synrex worktrees prune [--dry-run | --execute]  Preview by default; execute only workflow-complete, Git-safe cleanup",
       "  synrex show-changes <review-ref> [--json]",
       "  synrex workflow list [--workspace <path>]  List resumable GPT coding workflows",
       "  synrex workflow show <workflow-id> [--workspace <path>]",

@@ -723,7 +723,7 @@ test("read defaults to bounded pagination without losing access to later lines",
   assert.match(secondText, /line-700/);
 });
 
-test("open_workspace deduplicates only unchanged instructions within one conversation", async (t) => {
+test("open_workspace reuses one task worktree while an explicit new base refreshes instructions", async (t) => {
   const context = await fixture(t, { toolMode: "codex", git: true });
   const conversationScopeId = "instruction-dedupe-scope";
   const initial = structuredContent(await callOpen(context.client, context.project, conversationScopeId));
@@ -751,7 +751,17 @@ test("open_workspace deduplicates only unchanged instructions within one convers
   } as Parameters<Client["callTool"]>[0]);
   const changed = structuredContent(changedWorktree);
   const changedFiles = changed.agentsFiles as Array<{ path: string; content: string }> | undefined;
-  assert.ok(changedFiles?.some((file) => file.path === "AGENTS.md" && file.content === "changed project instructions\n"));
+  assert.equal(changed.workspaceId, unchanged.workspaceId);
+  assert.equal(Boolean(changedFiles?.some((file) => file.path === "AGENTS.md" && file.content === "changed project instructions\n")), false);
+  const { stdout: updatedBase } = await execFileAsync("git", ["-C", context.project, "rev-parse", "HEAD"]);
+  const fresh = structuredContent(await context.client.callTool({
+    name: "open_workspace",
+    arguments: { path: context.project, mode: "worktree", baseRef: updatedBase.trim() },
+    _meta: { "openai/session": conversationScopeId },
+  } as Parameters<Client["callTool"]>[0]));
+  assert.notEqual(fresh.workspaceId, unchanged.workspaceId);
+  assert.ok((fresh.agentsFiles as Array<{ path: string; content: string }> | undefined)
+    ?.some(file => file.path === "AGENTS.md" && file.content === "changed project instructions\n"));
 });
 
 test("codex devspace-log responses satisfy the process output schema", async (t) => {

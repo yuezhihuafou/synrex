@@ -1,6 +1,6 @@
 {
   "name": "synrex",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Synrex: self-hosted, GPT-first coding and execution with durable tasks, compact context, multi-host workspaces, and architecture governance.",
   "repository": {
@@ -51,7 +51,7 @@
     "prepack": "pnpm build",
     "schema:config": "tsx scripts/generate-config-schema.ts",
     "start": "node dist/cli.js serve",
-    "test": "tsx --test --test-concurrency=1 \"src/**/*.test.ts\" && node --test scripts/active-console-snapshot.test.mjs scripts/probe-standalone-console.test.mjs deploy/portable-install.test.mjs deploy/portable-service.test.mjs deploy/observability/tunnel-guard.test.mjs",
+    "test": "tsx --test --test-concurrency=1 \"src/**/*.test.ts\" && node --test scripts/history-audit.test.mjs scripts/active-console-snapshot.test.mjs scripts/probe-standalone-console.test.mjs deploy/portable-install.test.mjs deploy/portable-service.test.mjs deploy/observability/tunnel-guard.test.mjs",
     "verify:focused": "tsx scripts/verify-efficient.ts focused",
     "verify:final": "tsx scripts/verify-efficient.ts final",
     "test:package-install": "tsx --test --test-concurrency=1 \"test/package-install-smoke.test.ts\"",

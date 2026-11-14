@@ -73,9 +73,10 @@ repository into a speculative knowledge-graph project.
 ## Status
 
 Synrex is usable, but it is still an early independent release line. The
-`v0.2.0` milestone was a self-hosted public preview; the `v0.3.0`
-source line consolidates the independently deployed Console, optional
-Tunnel observer and cross-platform portable deployment. Check the actual
+`v0.2.0` milestone was a self-hosted public preview; `v0.3.0`
+consolidated the independently deployed Console and portable deployment.
+The `v0.4.0` source line closes verified historical feature gaps with
+workspace lifecycle, safe retention and release-aware observability. Check the actual
 GitHub release and live manifest before assuming a source change is shipped.
 Versioning is separate from upstream DevSpace's release numbering.
 
@@ -111,12 +112,12 @@ release under the current user's data directory and leaves existing services
 untouched. After obtaining the repository's deployment scripts:
 
 ```bash
-node deploy/portable-install.mjs --plan --version 0.3.0
-node deploy/portable-install.mjs --stage --version 0.3.0
-node deploy/portable-install.mjs --activate --version 0.3.0
+node deploy/portable-install.mjs --plan --version 0.4.0
+node deploy/portable-install.mjs --stage --version 0.4.0
+node deploy/portable-install.mjs --activate --version 0.4.0
 ```
 
-These commands require that `v0.3.0` has actually appeared in
+These commands require that `v0.4.0` has actually appeared in
 [GitHub Releases](https://github.com/yuezhihuafou/synrex/releases).
 For earlier releases, substitute the published version. See
 [`PORTABLE_DEPLOYMENT.md`](docs/PORTABLE_DEPLOYMENT.md) for user-local

@@ -4,7 +4,7 @@ import { analyzeBrowserTransport } from "../browser-transport-analysis.js";
 import { LegacyDiagnostics } from "./console-legacy-diagnostics.js";
 import "./console-app.css";
 
-type View = "overview" | "usage" | "workflows" | "tasks" | "nodes" | "diagnostics" | "correlation" | "resources" | "memory";
+type View = "overview" | "usage" | "workflows" | "workspaces" | "tasks" | "nodes" | "diagnostics" | "correlation" | "resources" | "memory";
 type Usage = {generatedAt?:string;status?:string;requests?:number;completed?:number;failed?:number;toolCalls?:number;
   mcpWire?:{inputBytes:number;outputBytes:number;observedInputRequests:number;observedOutputRequests:number};
   duration?:{observedRequests:number;meanMs:number|null};
@@ -112,6 +112,7 @@ const menus: Array<{ id: View; title: string; symbol: string; caption: string }>
   { id: "overview", title: "总览", symbol: "▦", caption: "系统状态" },
   { id: "usage", title: "用量与产出", symbol: "▤", caption: "MCP 用量与 Git 产出" },
   { id: "workflows", title: "工作流", symbol: "☷", caption: "任务与检查点" },
+  { id: "workspaces", title: "工作树", symbol: "▣", caption: "占用、保护与回收" },
   { id: "tasks", title: "执行索引", symbol: ">_", caption: "持久任务位置" },
   { id: "nodes", title: "主机节点", symbol: "⌘", caption: "版本与契约" },
   { id: "diagnostics", title: "诊断中心", symbol: "⌁", caption: "MCP 时间线" },
@@ -443,6 +444,74 @@ const current=d.workflows.find(x=>x.id===id)??d.workflows[0];
       </div>:<Blank>选择一个工作流查看</Blank>}
     </Panel>
    </div>;
+}
+type WorktreeRow = {workspaceId:string;path:string;sourceRoot:string|null;
+  status:string;reason:string;lastUsedAt:string;workflows:number;leases:number;
+  ageDays:number;diskBytes:number|null};
+type WorktreeDetails = WorktreeRow & {processes:Array<{pid:number;name:string}>;processScan:string};
+type WorktreeGc = {executed:boolean;removed:string[];eligible:string[];
+  skipped:Array<{workspaceId:string;reason:string}>;failed:Array<{workspaceId:string;error:string}>};
+const worktreeReasons:Record<string,string> = {
+  active_lease:"活动租约保护",unfinished_workflow:"任务未完成",unknown_workflow_owner:"尚未建立任务归属",
+  workspace_pruned_recoverable:"已归档，可恢复",workspace_inactive:"未启用",
+  retention_period:"尚在保留期",awaiting_git_safety_check:"待 Git 安全核验",
+  unrecognized_workflow_state:"未知任务状态",
+};
+function Workspaces() {
+  const [rows,setRows]=useState<WorktreeRow[]>([]);
+  const [selected,setSelected]=useState<string|null>(null);
+  const [details,setDetails]=useState<WorktreeDetails|null>(null);
+  const [preview,setPreview]=useState<WorktreeGc|null>(null);
+  const [error,setError]=useState("");
+  const [busy,setBusy]=useState(false);
+  const refresh=useCallback(async()=>{
+    try {const x=await getJson<{workspaces:WorktreeRow[]}>("/console/api/workspaces");
+      setRows(x.workspaces);setError("");}catch{setError("工作树登记信息暂不可用");}
+  },[]);
+  useEffect(()=>{void refresh();const timer=setInterval(()=>void refresh(),30000);return()=>clearInterval(timer);},[refresh]);
+  useEffect(()=>{if(!selected)return;let live=true;
+    void getJson<WorktreeDetails>(`/console/api/workspaces/${encodeURIComponent(selected)}`)
+      .then(d=>{if(live)setDetails(d);}).catch(()=>{if(live)setDetails(null);});
+    return()=>{live=false;};},[selected]);
+  async function gc(execute:boolean) {
+    if(execute&&!window.confirm("只回收已完成、无活动租约且通过 Git 安全检查的工作树。确认执行？"))return;
+    setBusy(true);
+    try {const result=await getJson<WorktreeGc>("/console/api/workspaces/gc",{
+      method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({execute}),
+    });setPreview(result);setError("");await refresh();}
+    catch{setError("安全回收检查失败；没有确认任何工作树被移除");}
+    finally{setBusy(false);}
+  }
+  const count=(state:string)=>rows.filter(row=>row.status===state).length;
+  const size=(v:number|null)=>v===null?"按需读取":`${(v/1024/1024).toFixed(1)} MiB`;
+  return <div className="stack">
+    <div className="metric-grid"><Metric symbol="▣" label="登记工作树" value={rows.length} info="最多展示最近 300 条"/>
+      <Metric symbol="⌁" label="活动中" value={count("active")} info="任务或租约保护"/>
+      <Metric symbol="◇" label="受保护" value={count("protected")} info="未知归属也不自动清理"/>
+      <Metric symbol="✓" label="候选回收" value={count("reclaimable")} info="不是 Git 检查通过数"/></div>
+    {error&&<div className="error-banner">{error}</div>}
+    <Panel title="工作树生命周期" hint="30 秒按需刷新；磁盘与进程只在选中某项时读取，不加入 10 秒 Core 快照"
+      extra={<button disabled={busy} onClick={()=>void gc(false)}>{busy?"检查中…":"预览安全回收"}</button>}>
+      <div className="table-scroll"><table><thead><tr><th>工作树</th><th>状态</th><th>原因</th><th>任务/租约</th><th>最后使用</th><th>详情</th></tr></thead><tbody>
+        {rows.map(row=><tr key={row.workspaceId}><td title={row.path}><code>{row.path.split("/").pop()}</code></td>
+          <td><Badge value={row.status}/></td><td>{worktreeReasons[row.reason]??row.reason}</td>
+          <td>{row.workflows} / {row.leases}</td><td>{time(row.lastUsedAt)}</td>
+          <td><button onClick={()=>{setSelected(row.workspaceId);setDetails(null);}}>查看</button></td></tr>)}
+      </tbody></table></div>
+      {!rows.length&&<Blank>暂无已登记的托管工作树</Blank>}
+    </Panel>
+    {details&&<Panel title="工作树占用详情" hint="只读磁盘统计与本机进程快照，可能无法覆盖权限受限进程">
+      <p><code>{details.path}</code></p><p>磁盘：{size(details.diskBytes)} · 进程扫描：{details.processScan}</p>
+      <p>进程：{details.processes.length?details.processes.map(p=>`${p.name} (${p.pid})`).join("，"):"未观察到进程（不等于无占用）"}</p>
+      <p className="footnote">工作树 {details.workspaceId}；{worktreeReasons[details.reason]??details.reason}。仅状态为候选并不代表允许删除。</p>
+    </Panel>}
+    {preview&&<Panel title="回收检查结果" hint={preview.executed?"已执行安全回收":"只读预览；未清理任何目录"}>
+      <p>符合 Git 安全检查：{preview.executed?preview.removed.length:preview.eligible.length} 项；保护跳过：{preview.skipped.length} 项；失败：{preview.failed.length} 项。</p>
+      {preview.skipped.slice(0,15).map(x=><p key={x.workspaceId}><code>{x.workspaceId}</code>：{x.reason}</p>)}
+      {preview.failed.map(x=><p key={x.workspaceId}>{x.workspaceId}：{x.error}</p>)}
+      {!preview.executed&&preview.eligible.length>0&&<p className="footnote">仅供审核：需要在目标主机明确执行 synrex worktrees prune --execute，浏览器不允许删除目录。</p>}
+    </Panel>}
+  </div>;
 }
 function Tasks({d}:{d:Snapshot}) {
   const names=new Map(d.nodes.map(x=>[x.id,x.alias]));
@@ -974,6 +1043,7 @@ try{
     {data?<>{view==="overview"&&<Overview d={data} go={setView}/>}
       {view==="usage"&&<Usage d={data}/>}
       {view==="workflows"&&<Workflows d={data}/>}
+      {view==="workspaces"&&<Workspaces/>}
       {view==="tasks"&&<Tasks d={data}/>}
       {view==="nodes"&&<Nodes d={data}/>}
       {view==="diagnostics"&&<Diagnostics d={data}/>}

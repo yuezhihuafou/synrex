@@ -25,6 +25,40 @@ test("owner console session is signed, expiring and isolated from another secret
   assert.ok(!token.includes("owner-secret"));
 });
 
+test("worktree lifecycle Console endpoints require owner session and same-origin write intent", async t => {
+  const stateDir = await mkdtemp(path.join(tmpdir(), "synrex-console-workspaces-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const database = openDatabase(stateDir); database.close();
+  const app = express();
+  const ownerToken = "workspace-owner-test";
+  registerSynrexConsole(app, { stateDir, publicBaseUrl: "https://console.example.test",
+    oauth: { ownerToken }, worktreeRoot: path.join(stateDir, "trees"), allowedRoots: [stateDir] } as ServerConfig);
+  const server = await new Promise<Server>(resolve => {
+    const instance = app.listen(0, "127.0.0.1", () => resolve(instance));
+  });
+  t.after(() => new Promise<void>((resolve, reject) => server.close(e => e ? reject(e) : resolve())));
+  const root = `http://127.0.0.1:${(server.address() as { port: number }).port}/console/api`;
+  const cookie = "rev_console=" + createConsoleSession(ownerToken);
+  assert.equal((await fetch(root + "/workspaces")).status, 401);
+  const inspected = await fetch(root + "/workspaces", { headers: { cookie } });
+  assert.equal(inspected.status, 200);
+  assert.deepEqual((await inspected.json() as { workspaces: unknown[] }).workspaces, []);
+  assert.equal((await fetch(root + "/workspaces/../bad", { headers: { cookie } })).status, 404);
+  const send = (origin: string) => fetch(root + "/workspaces/gc", {
+    method: "POST", headers: { cookie, origin, "content-type": "application/json" },
+    body: JSON.stringify({ execute: false }),
+  });
+  assert.equal((await send("https://untrusted.example.test")).status, 403);
+  const preview = await send("https://console.example.test");
+  assert.equal(preview.status, 200);
+  assert.deepEqual((await preview.json() as { removed: string[] }).removed, []);
+  const blocked = await fetch(root + "/workspaces/gc", {
+    method: "POST", headers: { cookie, origin: "https://console.example.test", "content-type": "application/json" },
+    body: JSON.stringify({ execute: true }),
+  });
+  assert.equal(blocked.status, 403, "A browser session must not grant directory-deletion authority");
+});
+
 test("browser trace query stays owner-authenticated, bounded and read-only", async t => {
   const dir = await mkdtemp(path.join(tmpdir(), "synrex-console-trace-"));
   t.after(() => rm(dir, { recursive: true, force: true }));

@@ -1,3 +1,11 @@
+# Historical policy note (2026-11-14)
+
+This document records the **2026-10-27** behavior of `worktrees prune`.
+Current releases use a stricter, explicit `--execute` workflow-complete GC
+contract and preview by default; see `docs/gotchas.md` and
+`docs/platform/WORKFLOW_LIFECYCLE_P1_P4_20261028.md`. Do not use the old
+`--safe` description below as current operational instructions.
+
 # Synrex 系统回归与 Worktree 回收台账（2026-10-27）
 
 本文件记录本轮源码与生产状态核验后的 **工作树实际归属**。未提交文件不自动发布，旧 commit 不因工作树清理而丢弃。
