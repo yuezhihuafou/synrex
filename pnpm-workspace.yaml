@@ -4,3 +4,23 @@ allowBuilds:
   esbuild: true
   node-pty: true
   protobufjs: false
+overrides:
+  protobufjs: 7.6.5
+  proxy-addr: 2.0.8
+  fast-uri: 3.1.9
+  ip-address: 10.7.6
+  brace-expansion: 5.0.13
+  undici: 8.12.4
+  node-forge: 1.4.3
+  body-parser: 2.4.0
+  hono: 4.13.16
+  '@hono/node-server': 2.1.6
+  qs: 6.16.1
+  fast-xml-parser: 5.12.0
+  glob: 14.0.2
+  minimatch: 11.0.1
+  zod: 4.6.7
+  '@modelcontextprotocol/sdk': 1.32.2
+  '@modelcontextprotocol/node': 2.1.2
+  '@modelcontextprotocol/server': 2.4.0
+  ws: 8.21.0

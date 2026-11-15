@@ -11,11 +11,14 @@ secrets to a peer, or start a second public coordinator.
 | Platform | Installation and runtime | Release acceptance |
 | --- | --- | --- |
 | Linux | Primary supported platform; optional user-level systemd | Full supported CI and isolated authenticated MCP tests |
-| macOS | Same portable Node/npm installer; optional LaunchAgent | Install, smoke and service rendering must be tested per release before claiming production support |
-| Windows 10/11 | Native Node/npm, Git Bash, optional user Scheduled Task | Native staging/activation/rollback tests; some shell/TTY features remain best-effort |
+| macOS | Locked pnpm portable installer bootstrapped via npm/npx; optional LaunchAgent | Native OS install, smoke and service rendering are release gates |
+| Windows 10/11 | Native Node/npm, npx, Git Bash/tar and curl, optional user Scheduled Task | Native installation/activation tests are release gates; shell/TTY features remain limited |
 
-Use Node.js >=22.19 and <27, npm, Git and a Bash-compatible shell (Git Bash
-on Windows). `ffmpeg` is an optional dependency for image previews. To
+Use Node.js >=22.19 and <27, npm/npx, tar, curl, Git and a Bash-compatible shell
+(Git Bash on Windows). The installer bootstraps **exactly pnpm 11.25.0** with npx
+and installs from the published `pnpm-lock.yaml` and `pnpm-workspace.yaml` using
+`--frozen-lockfile`; this prevents unreviewed dependency re-resolution.
+`ffmpeg` is an optional dependency for image previews. To
 connect ordinary ChatGPT remotely, configure your **own** HTTPS tunnel and
 OAuth origin. The portable installer does not create DNS, OAuth credentials
 or a cloud account.
@@ -26,14 +29,15 @@ Obtain this repository's `deploy/` scripts (for example with `git clone`).
 After the desired version is published, run from the repository root:
 
 ```sh
-node deploy/portable-install.mjs --plan --version 0.4.0
-node deploy/portable-install.mjs --stage --version 0.4.0
-node deploy/portable-install.mjs --activate --version 0.4.0
+node deploy/portable-install.mjs --plan --version 0.4.1
+node deploy/portable-install.mjs --stage --version 0.4.1
+node deploy/portable-install.mjs --activate --version 0.4.1
 node deploy/portable-install.mjs --status
 ```
 
-The first command is read-only. `--stage` installs the GitHub Release
-tarball and its npm dependencies into a **new, versioned user directory**
+The first command is read-only. `--stage` verifies the GitHub Release
+tarball against the published `SHA256SUMS`, then installs its **locked pnpm dependencies**
+into a **new, versioned user directory**
 without changing any service, configuration or active version pointer.
 `--activate` moves only the portable launcher's version pointer after
 verifying the staged package. It does not restart a service. A previous
@@ -64,14 +68,14 @@ multinode mode configure the single Owner and peer roles intentionally,
 not from guessed network locations.
 
 If your host cannot reach GitHub directly, download the official
-`synrex-0.4.0.tgz` on a connected machine and transfer it to that host.
+`synrex-0.4.1.tgz` on a connected machine and transfer it to that host.
 Then use:
 
 ```sh
-node deploy/portable-install.mjs --stage --version 0.4.0 --source ./synrex-0.4.0.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
+node deploy/portable-install.mjs --stage --version 0.4.1 --source ./synrex-0.4.1.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
 ```
 
-Dependencies still need npm registry access or an already populated cache.
+Dependencies and the exact pnpm bootstrap still need registry access or an already populated cache.
 Offline archives are not falsely described as self-contained native bundles.
 
 ## Optional automatic startup

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,7 +47,16 @@ function testPackedPackageLaunchers(): void {
       "dist-console-server/console-monitor.js",
       "deploy/portable-install.mjs",
       "deploy/portable-service.mjs",
+      "deploy/release-lock.yaml",
+      "pnpm-workspace.yaml",
+      "CHANGELOG.md",
+      "SECURITY.md",
     ]) assert.ok(existsSync(join(packaged, asset)), "Release archive missing " + asset);
+    assert.equal(
+      readFileSync(join(packaged, "deploy", "release-lock.yaml"), "utf8"),
+      readFileSync(join(projectRoot, "pnpm-lock.yaml"), "utf8"),
+      "Release dependency lock must match the exact CI-validated source lock",
+    );
 
     const configRoot = join(root, "config");
     const env = writeTestDevspaceConfig(configRoot, {

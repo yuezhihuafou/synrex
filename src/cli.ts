@@ -89,7 +89,7 @@ type Command =
   | "help"
   | "version";
 const require = createRequire(import.meta.url);
-const SUPPORTED_NODE_RANGE = ">=20.12 <27";
+const SUPPORTED_NODE_RANGE = ">=22.19 <27";
 
 async function main(argv: string[]): Promise<void> {
   assertSupportedNode();

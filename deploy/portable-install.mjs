@@ -10,8 +10,8 @@
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync } from "node:fs";
-import { homedir, platform, tmpdir } from "node:os";
+import { existsSync, mkdirSync, openSync, closeSync, readFileSync, renameSync, rmSync, writeFileSync, chmodSync, copyFileSync } from "node:fs";
+import { homedir, platform } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -106,16 +106,59 @@ function checkRuntime() {
     throw new Error("Synrex requires Node.js >=22.19 and <27.");
 }
 
-function installWithNpm(dir, source) {
-  const options = { encoding: "utf8", timeout: 240_000, maxBuffer: 128 * 1024, windowsHide: true };
-  const args = ["install", "--prefix", dir, "--no-audit", "--no-fund", source];
-  const executable = process.platform === "win32" ? "cmd.exe" : "npm";
-  const commandArgs = process.platform === "win32" ? ["/d", "/s", "/c", "npm", ...args] : args;
+function runNative(command, args, cwd, timeout = 240_000) {
+  const options = { cwd, encoding: "utf8", timeout, maxBuffer: 128 * 1024, windowsHide: true };
+  const cmdShim = process.platform === "win32" && command === "npx";
+  const executable = cmdShim ? "cmd.exe" : command;
+  const commandArgs = cmdShim ? ["/d", "/s", "/c", command, ...args] : args;
   const result = spawnSync(executable, commandArgs, options);
   if (result.error || result.status !== 0) {
-    throw new Error("npm staging failed (existing release untouched): " +
+    throw new Error(command + " staging failed (existing release untouched): " +
       (result.error?.message ?? result.stderr?.slice(-600) ?? "unknown"));
   }
+  return result.stdout;
+}
+
+function installLockedArchive(dir, source, version, sha256) {
+  const archive = source.startsWith("https://") ? join(dir, "official-release.tgz") : source;
+  if (source.startsWith("https://")) {
+    runNative("curl", ["--fail", "--location", "--silent", "--show-error",
+      "--max-time", "120", "--output", archive, source], dir, 135_000);
+  }
+  let expected = sha256;
+  if (source.startsWith("https://")) {
+    const manifest = join(dir, "SHA256SUMS");
+    runNative("curl", ["--fail", "--location", "--silent", "--show-error",
+      "--max-time", "120", "--output", manifest,
+      source.slice(0, source.lastIndexOf("/") + 1) + "SHA256SUMS"], dir, 135_000);
+    const line = readFileSync(manifest, "utf8").split(/\r?\n/)
+      .find((entry) => entry.endsWith("  synrex-" + version + ".tgz"));
+    if (!line || !/^[a-f0-9]{64}  /i.test(line)) throw new Error("Official archive digest is unavailable.");
+    const published = line.slice(0, 64);
+    if (expected && expected.toLowerCase() !== published.toLowerCase())
+      throw new Error("Supplied SHA-256 does not match the official release.");
+    expected = published;
+  }
+  archiveDigest(archive, expected);
+  const entries = runNative("tar", ["-tzf", archive], dir, 30_000)
+    .split(/\r?\n/).filter(Boolean);
+  assertLockedArchiveEntries(entries);
+  const detail = runNative("tar", ["-tvzf", archive], dir, 30_000);
+  if (detail.split(/\r?\n/).some((line) => /^[lh]/.test(line)))
+    throw new Error("Symlink and hardlink release members are not accepted.");
+  const root = join(dir, "node_modules", "synrex");
+  mkdirSync(root, { recursive: true });
+  runNative("tar", ["-xzf", archive, "--strip-components=1", "-C", root], dir, 60_000);
+  // npm pack intentionally excludes pnpm-lock.yaml even when listed under
+  // package.json files. The release carries a checked, byte-identical copy.
+  copyFileSync(join(root, "deploy", "release-lock.yaml"), join(root, "pnpm-lock.yaml"));
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  if (pkg.name !== "synrex" || pkg.version !== version) throw new Error("Archive identity/version mismatch.");
+  if (pkg.packageManager !== "pnpm@11.25.0") throw new Error("Unrecognized locked package manager.");
+  // The published pnpm-lock.yaml and pnpm-workspace.yaml pin every dependency,
+  // including overrides. npm install on a library tarball does NOT honor the
+  // library's overrides and can silently resurrect vulnerable transitive versions.
+  runNative("npx", ["--yes", "pnpm@11.25.0", "install", "--prod", "--frozen-lockfile"], root, 360_000);
 }
 
 function writeLaunchers(prefix) {
@@ -150,6 +193,18 @@ function archiveDigest(source, expected) {
   return actual;
 }
 
+export function assertLockedArchiveEntries(entries) {
+  if (!entries.length || entries.some((entry) => {
+    if (entry === "package/" || entry === "package") return false;
+    if (!entry.startsWith("package/")) return true;
+    return entry.split("/").some((part) => part === "." || part === "..");
+  })) throw new Error("Unsafe or empty Synrex release archive.");
+  for (const name of ["package/package.json", "package/deploy/release-lock.yaml",
+      "package/pnpm-workspace.yaml", "package/dist/cli.js"]) {
+    if (!entries.includes(name)) throw new Error("Release archive missing locked asset: " + name);
+  }
+}
+
 export function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
   if (args.action === "help") {
@@ -179,11 +234,10 @@ export function main(argv = process.argv.slice(2)) {
     const dest = releasePath(args.prefix, args.version);
     if (!existsSync(dest)) {
       if (!source.startsWith("https://") && !existsSync(source)) throw new Error("Local release archive not found.");
-      archiveDigest(source, args.sha256);
       const stage = join(args.prefix, ".stage-" + process.pid + "-" + Date.now());
       mkdirSync(stage, { mode: 0o700 });
       try {
-        installWithNpm(stage, source);
+        installLockedArchive(stage, source, args.version, args.sha256);
         const cli = verifyRelease(stage, args.version);
         const smoke = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8", timeout: 15_000 });
         if (smoke.status !== 0) throw new Error("Installed CLI --version smoke check failed.");

@@ -4,9 +4,18 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  activateRelease, defaultPrefix, parseArgs, readCurrent, releasePath,
+  activateRelease, assertLockedArchiveEntries, defaultPrefix, parseArgs, readCurrent, releasePath,
   rollbackRelease, verifyRelease,
 } from "./portable-install.mjs";
+
+test("portable archives must contain locked, safe, non-traversing paths", () => {
+  const valid = ["package/package.json", "package/deploy/release-lock.yaml",
+    "package/pnpm-workspace.yaml", "package/dist/cli.js"];
+  assert.doesNotThrow(() => assertLockedArchiveEntries(valid));
+  assert.throws(() => assertLockedArchiveEntries(valid.filter((x) => x !== "package/deploy/release-lock.yaml")), /missing locked asset/);
+  assert.throws(() => assertLockedArchiveEntries([...valid, "package/../../secrets"]), /Unsafe or empty/);
+  assert.throws(() => assertLockedArchiveEntries([...valid, "/tmp/outside"]), /Unsafe or empty/);
+});
 
 function fixture(t) {
   const prefix = mkdtempSync(join(tmpdir(), "synrex-portable-test-"));

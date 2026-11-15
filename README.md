@@ -10,6 +10,8 @@ Synrex connects conversational AI to real repositories and long-running engineer
 
 **[Get started](#install-from-source)** · **[Architecture and scope](docs/PRODUCT_CHARTER.md)** · **[Deployment](docs/platform/SINGLE_OWNER_SELF_HOSTED.md)** · **[Releases](https://github.com/yuezhihuafou/synrex/releases)** · **[Contributing](CONTRIBUTING.md)**
 
+**[Security reporting](SECURITY.md)** · **[Platform support matrix](docs/platform/SUPPORTED_PLATFORMS.md)** · **[Portable upgrade and rollback](docs/PORTABLE_DEPLOYMENT.md)**
+
 > **Early release:** self-hosted, single-owner deployment. Linux is the primary supported platform. Synrex is not a hosted service; end-to-end performance superiority over upstream DevSpace has not yet been established.
 
 **Synrex** is a self-hosted, GPT-first coding and execution harness. ChatGPT
@@ -79,6 +81,8 @@ The `v0.4.0` source line closes verified historical feature gaps with
 workspace lifecycle, safe retention and release-aware observability. Check the actual
 GitHub release and live manifest before assuming a source change is shipped.
 Versioning is separate from upstream DevSpace's release numbering.
+The `v0.4.1` patch updates locked dependency security and release integrity;
+its release archive and availability must be verified from GitHub Releases.
 
 For a reproducible demonstration, use the deliberately failing test fixture in
 [`examples/public-demo`](examples/public-demo) and follow the
@@ -112,12 +116,12 @@ release under the current user's data directory and leaves existing services
 untouched. After obtaining the repository's deployment scripts:
 
 ```bash
-node deploy/portable-install.mjs --plan --version 0.4.0
-node deploy/portable-install.mjs --stage --version 0.4.0
-node deploy/portable-install.mjs --activate --version 0.4.0
+node deploy/portable-install.mjs --plan --version 0.4.1
+node deploy/portable-install.mjs --stage --version 0.4.1
+node deploy/portable-install.mjs --activate --version 0.4.1
 ```
 
-These commands require that `v0.4.0` has actually appeared in
+These commands require that `v0.4.1` has actually appeared in
 [GitHub Releases](https://github.com/yuezhihuafou/synrex/releases).
 For earlier releases, substitute the published version. See
 [`PORTABLE_DEPLOYMENT.md`](docs/PORTABLE_DEPLOYMENT.md) for user-local

@@ -4,6 +4,24 @@ Synrex's version numbers are independent of the upstream DevSpace project.
 Only verified release artifacts, tags and running manifests identify deployed
 versions; a changelog entry alone does not prove that a release was published.
 
+## 0.4.1 — dependency security and reproducible release candidate (2026-11-15)
+
+- Refreshed the direct and transitive package dependency graph, updating the
+  MCP SDK, HTTP parsing, IP/proxy validation, sandbox and transport dependencies
+  with a pnpm 11 workspace-level override policy.
+- Changed portable release installation to use the **published exact pnpm lock**
+  rather than unsafe npm transitive re-resolution. Archive content and digest
+  are checked before extraction or installation.
+- Added blocking release security and native macOS/Windows packaging gates,
+  CycloneDX SBOM, SHA-256 release checksums and provenance attestation.
+- Added vulnerability reporting policy, release notes and platform/upgrade
+  support limits. Existing OAuth/SQLite, CLI aliases and production service
+  identity are intentionally preserved.
+
+The changes are not a claim that the optional legacy Windows peer or offline
+gateway was upgraded, or that a terminated ChatGPT UI conversation resumes
+model inference automatically.
+
 ## 0.4.0 — historical-feature consolidation candidate (2026-11-14)
 
 - Incorporated the previously isolated workspace lifecycle P1–P4 into the
