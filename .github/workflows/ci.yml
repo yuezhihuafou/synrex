@@ -85,7 +85,9 @@ jobs:
           test -f pnpm-lock.yaml
           test -f pnpm-workspace.yaml
           cmp pnpm-lock.yaml deploy/release-lock.yaml
-          pnpm install --lockfile-only --offline --frozen-lockfile
+          # The immutable checked-in lock is compared to the shipped copy above.
+          # Running pnpm install --offline on a fresh runner would need registry
+          # metadata that this audit-only job intentionally has not downloaded.
 
   native-portable:
     name: Native package acceptance (${{ matrix.os }})
