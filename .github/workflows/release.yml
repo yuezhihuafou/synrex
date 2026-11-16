@@ -67,6 +67,12 @@ jobs:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           git fetch --tags
+          if ! git show-ref --verify --quiet "refs/tags/$TAG"; then
+            echo "Missing annotated $TAG. An authorized maintainer must create it with GitHub workflow write permission before running this release." >&2
+            exit 1
+          fi
+          test "$(git cat-file -t "$TAG")" = tag
+          test "$(git rev-parse "$TAG^{}")" = "$SOURCE_SHA"
           if ! [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
             echo "Provide an exact forty-character main commit SHA." >&2
             exit 1
@@ -76,10 +82,6 @@ jobs:
             echo "Release commit is not on canonical main lineage" >&2
             exit 1
           }
-          if git show-ref --verify --quiet "refs/tags/$TAG"; then
-            test "$(git cat-file -t "$TAG")" = tag
-            test "$(git rev-parse "$TAG^{}")" = "$SOURCE_SHA"
-          fi
           echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Checkout exact verified release source
@@ -152,20 +154,6 @@ jobs:
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ steps.pack.outputs.tarball }}
-
-      - name: Create immutable annotated tag after verification
-        env:
-          TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          if git show-ref --tags --verify --quiet "refs/tags/$TAG"; then
-            test "$(git cat-file -t "$TAG")" = tag
-            test "$(git rev-parse "$TAG^{}")" = "$SOURCE_SHA"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$TAG" "$SOURCE_SHA" -m "Verified Synrex release $TAG"
-            git push origin "refs/tags/$TAG:refs/tags/$TAG"
-          fi
 
       - name: Create GitHub release
         env:
