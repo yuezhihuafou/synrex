@@ -1,3 +1,18 @@
+.workflow-card{padding:16px;display:grid;gap:12px}
+.workflow-heading{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.workflow-heading strong{font-size:14px}
+.workflow-state{font-size:11px;border:1px solid var(--border-color,#d9dfe8);border-radius:6px;padding:3px 8px}
+.workflow-card p{font-size:12px;margin:0;line-height:1.5}
+.workflow-next{font-weight:600}
+.workflow-blocker{color:#ab503f}
+.workflow-actions{display:flex;flex-wrap:wrap;gap:8px}
+.workflow-actions button,.workflow-details button{cursor:pointer;border:1px solid #a4b6d8;border-radius:7px;padding:7px 12px;background:transparent;color:inherit;font:inherit;font-size:12px}
+.workflow-actions button:first-child{background:#315cb7;color:white;border-color:#315cb7}
+.workflow-actions button:disabled{opacity:.5}
+.workflow-feedback{font-size:11px;line-height:1.5}
+.workflow-details{display:grid;gap:8px;overflow-wrap:anywhere}
+.workflow-details[hidden]{display:none}
+.workflow-details textarea{width:100%;min-height:60px;padding:8px;border-radius:6px;font-size:11px;background:transparent;color:inherit}
 :root {
   color-scheme: light dark;
   font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);

@@ -28,6 +28,25 @@ test("workspace cards can be rebuilt from structured content without result meta
   assert.equal(decoded.card.summary?.agentsFiles, 1);
 });
 
+test("workflow tool results render continuation card from source-only data", () => {
+  const decoded = decodeToolResult({
+    content: [],
+    structuredContent: {
+      workflow: {
+        workflowId: "wf_" + "a".repeat(24), workspaceId: "ws_scope",
+        title: "Fix test", status: "active",
+        checkpoint: { summary: "build passed", nextSteps: ["run integration"], blockers: [] },
+      },
+      continuity: { status: "in_progress", remaining: ["integration check"] },
+    },
+  });
+  assert.equal(decoded.kind, "card");
+  if (decoded.kind !== "card") return;
+  assert.equal(decoded.card.tool, "workflow");
+  assert.equal(decoded.card.workflowNextSteps?.[0], "run integration");
+  assert.equal(decoded.card.workflowRemaining?.[0], "integration check");
+});
+
 test("review results use rich metadata when the host provides it", () => {
   const decoded = decodeToolResult({
     content: [],

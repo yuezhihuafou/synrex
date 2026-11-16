@@ -74,11 +74,25 @@ test("coding workflow survives store re-open, records evidence and rejects stale
     checkpoint: { ...resumed.checkpoint, checks: ["pnpm typecheck: exit 0"] },
   }), /pending steps, blockers, or unresolved task IDs/);
   assert.equal(store.getRequired(created.workflowId, project).revision, 1);
+  assert.throws(() => store.checkpoint(project, {
+    workflowId: created.workflowId, expectedRevision: 1, status: "completed",
+    checkpoint: { ...resumed.checkpoint, summary: "Claimed passed", nextSteps: [], blockers: [], taskIds: [] },
+  }), /Goal Finish Gate/);
+  const verification = store.observe(project, created.workflowId, {
+    eventKey: "run:test-001", kind: "verification", status: "completed",
+    runId: "run_test001", exitCode: 0,
+  });
+  assert.equal(store.observe(project, created.workflowId, {
+    eventKey: "run:test-001", kind: "verification", status: "working", runId: "run_test001",
+  }).eventId, verification.eventId, "retried observations cannot erase terminal status");
   const done = store.checkpoint(project, {
     workflowId: created.workflowId,
     expectedRevision: 1,
     status: "completed",
-    checkpoint: { ...resumed.checkpoint, summary: "Verified", nextSteps: [], blockers: [], taskIds: [] },
+    checkpoint: {
+      ...resumed.checkpoint, summary: "Verified", nextSteps: [], blockers: [], taskIds: [],
+      criterionEvidence: [{ criterion: 0, eventId: verification.eventId }],
+    },
   });
   assert.equal(done.revision, 2);
   assert.equal(store.list(project).length, 0);

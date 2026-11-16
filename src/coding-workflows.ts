@@ -1,7 +1,8 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { resolve, join } from "node:path";
 import Database from "better-sqlite3";
+import { assessGoal } from "./goal-continuity.js";
 
 export type CodingWorkflowStatus = "active" | "blocked" | "completed" | "cancelled";
 
@@ -13,10 +14,23 @@ export interface CodingWorkflowCheckpoint {
   blockers: string[];
   checks: string[];
   taskIds: string[];
+  /** Criterion references to observed verification events, not model-reported checks. */
+  criterionEvidence?: Array<{ criterion: number; eventId: string }>;
   /** Explicitly associated Subagent handles; never infer unrelated agents. */
   agentIds?: string[];
   gitHead?: string;
   gitStatus?: string;
+}
+
+export interface WorkflowExecutionEvidence {
+  eventId: string;
+  workflowId: string;
+  kind: "command" | "verification" | "edit";
+  status: "working" | "completed" | "failed" | "unknown";
+  runId?: string;
+  taskId?: string;
+  exitCode?: number;
+  observedAt: string;
 }
 
 export interface CodingWorkflow {
@@ -137,6 +151,29 @@ export class CodingWorkflowStore {
     );
     create index if not exists coding_workspace_leases_scope_idx
       on coding_workspace_leases(workspace_id, expires_at)`);
+    this.db.exec(`
+      create table if not exists coding_workflow_evidence (
+        event_id text primary key,
+        workflow_id text not null references coding_workflows(workflow_id),
+        event_key text not null,
+        kind text not null,
+        status text not null,
+        run_id text,
+        task_id text,
+        exit_code integer,
+        observed_at text not null,
+        unique(workflow_id, event_key)
+      );
+      create index if not exists coding_workflow_evidence_recent_idx
+        on coding_workflow_evidence(workflow_id, observed_at);
+      create table if not exists coding_workflow_bindings (
+        workspace_id text not null,
+        conversation_scope text not null,
+        workflow_id text not null references coding_workflows(workflow_id),
+        expires_at text not null,
+        primary key (workspace_id, conversation_scope)
+      );
+    `);
   }
 
   close(): void {
@@ -271,6 +308,95 @@ export class CodingWorkflowStore {
     }));
   }
 
+  /** Bind only when the caller explicitly opened/resumed a workflow in this conversation. */
+  bind(workflowId: string, root: string, workspaceId: string, scope: string): void {
+    const workflow = this.getRequired(workflowId, root);
+    if (workflow.workspaceId && workflow.workspaceId !== workspaceId) {
+      throw new Error("Workflow belongs to another workspace session");
+    }
+    if (!scope || scope.length > 4096) throw new Error("Invalid conversation scope");
+    const scopeHash = createHash("sha256").update(scope).digest("hex");
+    this.db.prepare(`insert into coding_workflow_bindings
+      (workspace_id, conversation_scope, workflow_id, expires_at) values (?, ?, ?, ?)
+      on conflict(workspace_id, conversation_scope) do update
+      set workflow_id=excluded.workflow_id, expires_at=excluded.expires_at`)
+      .run(workspaceId, scopeHash, workflowId, new Date(Date.now() + 12 * 60 * 60_000).toISOString());
+  }
+
+  selected(root: string, workspaceId: string, scope?: string, explicitId?: string): CodingWorkflow | undefined {
+    if (explicitId) {
+      const workflow = this.getRequired(explicitId, root);
+      if (workflow.workspaceId && workflow.workspaceId !== workspaceId) {
+        throw new Error("Workflow belongs to another workspace session");
+      }
+      return workflow;
+    }
+    if (!scope) return undefined;
+    const scopeHash = createHash("sha256").update(scope).digest("hex");
+    const row = this.db.prepare(`select workflow_id from coding_workflow_bindings
+      where workspace_id=? and conversation_scope=? and expires_at>?`)
+      .get(workspaceId, scopeHash, new Date().toISOString()) as { workflow_id: string } | undefined;
+    return row ? this.getRequired(row.workflow_id, root) : undefined;
+  }
+
+  evidence(workflowId: string, root: string): WorkflowExecutionEvidence[] {
+    this.getRequired(workflowId, root);
+    const rows = this.db.prepare(`select event_id, workflow_id, kind, status, run_id,
+      task_id, exit_code, observed_at from coding_workflow_evidence
+      where workflow_id=? order by rowid desc limit 2000`)
+      .all(workflowId) as Array<{
+        event_id: string; workflow_id: string; kind: WorkflowExecutionEvidence["kind"];
+        status: WorkflowExecutionEvidence["status"]; run_id: string | null;
+        task_id: string | null; exit_code: number | null; observed_at: string;
+      }>;
+    return rows.reverse().map((row) => ({
+      eventId: row.event_id, workflowId: row.workflow_id, kind: row.kind,
+      status: row.status, observedAt: row.observed_at,
+      ...(row.run_id ? { runId: row.run_id } : {}),
+      ...(row.task_id ? { taskId: row.task_id } : {}),
+      ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
+    }));
+  }
+
+  /** Append/upsert observation without incrementing workflow checkpoint revision. */
+  observe(root: string, workflowId: string, input: {
+    eventKey: string;
+    kind: WorkflowExecutionEvidence["kind"];
+    status: WorkflowExecutionEvidence["status"];
+    runId?: string;
+    taskId?: string;
+    exitCode?: number;
+  }): WorkflowExecutionEvidence {
+    this.getRequired(workflowId, root);
+    if (!input.eventKey || input.eventKey.length > 250) throw new Error("Invalid evidence key");
+    this.db.prepare(`insert into coding_workflow_evidence
+      (event_id, workflow_id, event_key, kind, status, run_id, task_id, exit_code, observed_at)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      on conflict(workflow_id, event_key) do update set
+        status=case when coding_workflow_evidence.status in ('completed','failed')
+          then coding_workflow_evidence.status else excluded.status end,
+        task_id=coalesce(excluded.task_id, coding_workflow_evidence.task_id),
+        exit_code=coalesce(coding_workflow_evidence.exit_code, excluded.exit_code),
+        observed_at=excluded.observed_at`)
+      .run("we_" + randomBytes(12).toString("hex"), workflowId, input.eventKey,
+        input.kind, input.status, input.runId ?? null, input.taskId ?? null,
+        input.exitCode ?? null, new Date().toISOString());
+    const row = this.db.prepare(`select event_id, kind, status, run_id, task_id,
+      exit_code, observed_at from coding_workflow_evidence
+      where workflow_id=? and event_key=?`).get(workflowId, input.eventKey) as {
+        event_id: string; kind: WorkflowExecutionEvidence["kind"];
+        status: WorkflowExecutionEvidence["status"]; run_id: string | null;
+        task_id: string | null; exit_code: number | null; observed_at: string;
+      };
+    return {
+      eventId: row.event_id, workflowId, kind: row.kind, status: row.status,
+      observedAt: row.observed_at,
+      ...(row.run_id ? { runId: row.run_id } : {}),
+      ...(row.task_id ? { taskId: row.task_id } : {}),
+      ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
+    };
+  }
+
   checkpoint(root: string, input: {
     workflowId: string;
     expectedRevision: number;
@@ -298,6 +424,15 @@ export class CodingWorkflowStore {
       }
       if (input.status === "completed" && (input.checkpoint.nextSteps.length || input.checkpoint.blockers.length || input.checkpoint.taskIds.length)) {
         throw new Error("Cannot complete workflow with pending steps, blockers, or unresolved task IDs. Verify the original goal first.");
+      }
+      if (input.status === "completed") {
+        const goal = assessGoal({
+          ...current, status: input.status, checkpoint: input.checkpoint,
+        }, this.evidence(input.workflowId, workspaceRoot));
+        if (goal.status !== "satisfied") {
+          throw new Error("Goal Finish Gate: acceptance is not independently verified (" + goal.status
+            + "); remaining=" + goal.remaining.join("; ") + ", pending=" + goal.pendingTaskIds.join(","));
+        }
       }
       const revision = current.revision + 1;
       const now = new Date().toISOString();

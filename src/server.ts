@@ -924,6 +924,7 @@ function registerMcpSurface(
     workspaces,
     stateDir: config.stateDir,
     memory: createOptionalProjectMemoryPort(),
+    uiEnabled: config.uiEnabled,
   });
 
   toolSurface.register({

@@ -1,4 +1,5 @@
 import * as z from "zod/v4";
+import { createHash } from "node:crypto";
 import { applyPatch } from "../apply-patch.js";
 import { handleRunLogCommand } from "../compact-runtime/run-log-access.js";
 import { compactPreview } from "../compact-runtime/output-policy.js";
@@ -12,6 +13,7 @@ import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
+import { verificationCommand, withWorkflowReceipt } from "../goal-continuity-runtime.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
   SHELL_TOOL_ANNOTATIONS,
@@ -328,11 +330,13 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
         "Apply a Codex patch to workspace files (add/update/delete/move). Use for edits; paths are relative.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional()
+          .describe("Optional explicitly selected workflow; never infer another conversation's workflow."),
         patch: z.string().describe("Patch text enclosed by *** Begin Patch and *** End Patch markers."),
       },
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, patch }) => {
+    async ({ workspaceId, patch, workflowId }, extra) => {
       const startedAt = performance.now();
       const applied = await runLoggedToolOperation(
         config,
@@ -347,7 +351,7 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
       const paths = applied.files.map((file) => file.path).join(", ");
       const result = `Applied patch to ${applied.files.length} file(s): ${paths}`;
       const content = [textBlock(result)];
-      return {
+      const response = {
         content,
         structuredContent: {
           result,
@@ -356,6 +360,15 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
           files: applied.files,
         },
       };
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId,
+        workflowId, conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        observation: {
+          eventKey: "patch:" + createHash("sha256").update(patch).digest("hex"),
+          kind: "edit", status: "completed",
+        },
+      }, response);
     },
   );
 }
@@ -386,6 +399,8 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       description: "Run commands. Durable tasks: task_wait or devspace-task wait/final/get <taskId> on six-tool clients. final checks the last dependency; no replay. Interactive sessions: write_stdin.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional()
+          .describe("Optional explicitly selected workflow; automatic binding requires a host conversation scope."),
         cmd: z.string().min(1).describe("Shell command to execute."),
         tty: z.boolean().optional().describe("Allocate a pseudo-terminal for interactive commands. Defaults to false."),
         columns: z.number().int().min(1).max(1_000).optional().describe("Initial PTY width. Defaults to 80."),
@@ -394,7 +409,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       },
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, cmd, tty, columns, rows, workingDirectory }, extra) => {
+    async ({ workspaceId, workflowId, cmd, tty, columns, rows, workingDirectory }, extra) => {
       const workspace = await workspaces.getWorkspace(workspaceId);
       const taskCompat = await handleTaskCompatCommand(
         cmd,
@@ -449,9 +464,28 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         const task = await durableTasks.get(workspace.root, snapshot.taskId, {
           acknowledge: !snapshot.running,
         });
-        return processToolResponse(snapshot, task);
+        return withWorkflowReceipt({
+          stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+          conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+          observation: {
+            eventKey: "run:" + snapshot.runId,
+            kind: verificationCommand(cmd) ? "verification" : "command",
+            status: snapshot.running ? "working"
+              : snapshot.exitCode === 0 ? "completed" : "failed",
+            runId: snapshot.runId, taskId: snapshot.taskId, exitCode: snapshot.exitCode,
+          },
+        }, processToolResponse(snapshot, task));
       }
-      return processToolResponse(snapshot);
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        observation: {
+          eventKey: "run:" + snapshot.runId,
+          kind: verificationCommand(cmd) ? "verification" : "command",
+          status: snapshot.running ? "working" : snapshot.exitCode === 0 ? "completed" : "failed",
+          runId: snapshot.runId, exitCode: snapshot.exitCode,
+        },
+      }, processToolResponse(snapshot));
     },
   );
 
@@ -462,12 +496,13 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       description: "Read task state. Honor pollIntervalMs.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional(),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
         detail: z.boolean().optional().describe("Return full task metadata instead of the compact receipt."),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, taskId, detail }, extra) => {
+    async ({ workspaceId, workflowId, taskId, detail }, extra) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
       const view = await durableTasks.get(workspace.root, taskId);
@@ -483,7 +518,18 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           deliveredTaskRevisions.delete(oldest);
         }
       }
-      return taskViewResponse(view, { detail, unchanged });
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        conversationScope: conversationScopeId,
+        observation: {
+          eventKey: "run:" + view.runId, kind: "command",
+          status: view.status === "working" || view.status === "input_required" ? "working"
+            : view.status === "completed" && view.result?.exitCode === 0 && !view.result?.isError
+              ? "completed" : view.status === "completed" || view.status === "failed"
+                || view.status === "cancelled" ? "failed" : "unknown",
+          runId: view.runId, taskId: view.taskId, exitCode: view.result?.exitCode ?? undefined,
+        },
+      }, taskViewResponse(view, { detail, unchanged }));
     },
   );
 
@@ -494,16 +540,30 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       description: "Bounded read-only task wait (10s max). final=true adds final-dependency diagnostics. No replay.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional(),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
         sinceRevision: z.string().optional().describe("Revision from prior task receipt."),
         final: z.boolean().optional().describe("Final dependency status and diagnostics."),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ workspaceId, taskId, sinceRevision, final }) => {
+    async ({ workspaceId, workflowId, taskId, sinceRevision, final }, extra) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
-      return waitForDurableTask(workspace.root, taskId, durableTasks, sinceRevision, final === true);
+      const response = await waitForDurableTask(workspace.root, taskId, durableTasks, sinceRevision, final === true);
+      const view = await durableTasks.get(workspace.root, taskId, { acknowledge: false });
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        observation: {
+          eventKey: "run:" + view.runId, kind: "command",
+          status: view.status === "working" || view.status === "input_required" ? "working"
+            : view.status === "completed" && view.result?.exitCode === 0 && !view.result?.isError
+              ? "completed" : view.status === "completed" || view.status === "failed"
+                || view.status === "cancelled" ? "failed" : "unknown",
+          runId: view.runId, taskId: view.taskId, exitCode: view.result?.exitCode ?? undefined,
+        },
+      }, response);
     },
   );
 

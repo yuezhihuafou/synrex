@@ -259,6 +259,11 @@ function render(): void {
     return;
   }
 
+  if (card.tool === "workflow") {
+    renderWorkflowCard(card);
+    return;
+  }
+
   const display = cardDisplay(card);
   if (card.tool === "show_changes") {
     renderReviewCard(card, display);
@@ -315,6 +320,102 @@ function render(): void {
   main.append(section);
   appRoot.replaceChildren(main);
   renderPayloadIfNeeded();
+}
+
+/** A user gesture is required; this does not schedule or silently wake a GPT turn. */
+function renderWorkflowCard(value: ToolResultCard): void {
+  const workflowId = value.workflowId;
+  if (!workflowId || !/^wf_[a-f0-9]{24}$/.test(workflowId)) {
+    renderEmpty("Invalid workflow identity.", "error");
+    return;
+  }
+  const main = element("main", { className: "shell" });
+  const section = element("section", { className: "tool-card workflow-card" });
+  const title = element("strong", { text: value.workflowTitle ?? "Synrex workflow" });
+  const status = element("span", {
+    className: "workflow-state",
+    text: value.workflowStatus ?? "unknown",
+  });
+  const heading = element("div", { className: "workflow-heading" });
+  heading.append(title, status);
+  section.append(heading);
+  const summary = value.workflowSummary;
+  if (summary) section.append(element("p", { text: summary }));
+  const next = value.workflowNextSteps?.[0] ?? value.workflowRemaining?.[0];
+  if (next) section.append(element("p", { className: "workflow-next", text: "下一步：" + next }));
+  if (value.workflowBlockers?.length) {
+    section.append(element("p", { className: "workflow-blocker", text: "阻塞：" + value.workflowBlockers[0] }));
+  }
+  const resumeText = "继续 Synrex 工作流 " + workflowId
+    + "。请调用 workflow_open({workflowId: \"" + workflowId
+    + "\"}) 恢复工作区，再使用 workflow_status 核对实际 Git、未完成验收条件和任务记录，继续完成原始目标。不要把自述检查当成验证结果。";
+  const actions = element("div", { className: "workflow-actions" });
+  const resume = element("button", { type: "button", text: "继续任务" });
+  if (value.workflowStatus === "satisfied" || value.workflowStatus === "completed"
+    || value.workflowStatus === "cancelled") resume.disabled = true;
+  const detailsButton = element("button", { type: "button", text: "查看详情" });
+  const feedback = element("div", { className: "workflow-feedback" });
+  const details = element("div", { className: "workflow-details" });
+  details.hidden = true;
+  details.append(
+    element("p", { text: "Workflow ID: " + workflowId }),
+    element("p", { text: "Workspace: " + (value.workspaceId ?? "unknown") }),
+    element("p", { text: "剩余验收：" + (value.workflowRemaining?.join("；") || "需要核验") }),
+  );
+  const manual = element("textarea");
+  manual.readOnly = true;
+  manual.rows = 3;
+  manual.value = resumeText;
+  manual.setAttribute("aria-label", "手动继续任务的指令");
+  const copy = element("button", { type: "button", text: "复制续接指令" });
+  copy.addEventListener("click", () => {
+    if (!navigator.clipboard?.writeText) {
+      feedback.textContent = "此环境不支持自动复制，请手动复制下方指令。";
+      details.hidden = false;
+      return;
+    }
+    void navigator.clipboard.writeText(resumeText).then(() => {
+      feedback.textContent = "已复制。可在新对话粘贴此指令。";
+    }).catch(() => {
+      feedback.textContent = "请手动选择并复制下方指令。";
+      details.hidden = false;
+    });
+  });
+  details.append(manual, copy);
+  detailsButton.addEventListener("click", () => {
+    details.hidden = !details.hidden;
+  });
+  resume.addEventListener("click", async () => {
+    resume.disabled = true;
+    feedback.textContent = "正在向 ChatGPT 提交续接请求…";
+    let accepted = false;
+    try {
+      if (app) {
+        const result = await app.sendMessage({
+          role: "user",
+          content: [{ type: "text", text: resumeText }],
+        });
+        accepted = !result.isError;
+      }
+    } catch {
+      // Some hosts expose only the ChatGPT-specific follow-up bridge.
+    }
+    if (!accepted && window.openai?.sendFollowUpMessage) {
+      try {
+        await window.openai.sendFollowUpMessage({ prompt: resumeText });
+        accepted = true;
+      } catch { /* Fall through to a user-visible manual continuation. */ }
+    }
+    feedback.textContent = accepted
+      ? "续接请求已提交给 Host；请确认 ChatGPT 是否开始处理。"
+      : "当前 Host 未接受续接消息；请复制下面的指令继续。";
+    if (!accepted) details.hidden = false;
+    resume.disabled = false;
+  });
+  actions.append(resume, detailsButton);
+  section.append(actions, feedback, details);
+  main.append(section);
+  appRoot.replaceChildren(main);
 }
 
 function renderEmpty(message: string, tone: "muted" | "error" = "muted"): void {

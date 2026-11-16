@@ -16,6 +16,23 @@ export function decodeToolResult(result: CallToolResult): DecodedToolResult {
   const metaCard = cardFields(asRecord(asRecord(result._meta)?.card));
 
   if (structured) {
+    const workflow = asRecord(structured.workflow) ?? structured;
+    const workflowId = stringField(workflow.workflowId);
+    const workflowTitle = stringField(workflow.title);
+    if (workflowId && workflowTitle) {
+      const checkpoint = asRecord(workflow.checkpoint);
+      const continuity = asRecord(structured.continuity);
+      return { kind: "card", card: {
+        tool: "workflow",
+        workspaceId: stringField(workflow.workspaceId) ?? stringField(structured.workspaceId),
+        workflowId, workflowTitle,
+        workflowStatus: stringField(continuity?.status) ?? stringField(workflow.status),
+        workflowSummary: stringField(checkpoint?.summary),
+        workflowNextSteps: stringArray(checkpoint?.nextSteps),
+        workflowRemaining: stringArray(continuity?.remaining),
+        workflowBlockers: stringArray(checkpoint?.blockers),
+      } };
+    }
     const workspaceId = stringField(structured.workspaceId);
     const reviewRef = stringField(structured.reviewRef);
     if (workspaceId && reviewRef) {
@@ -238,6 +255,10 @@ function arrayRecords(value: unknown): Array<Record<string, unknown>> | undefine
     const record = asRecord(item);
     return record ? [record] : [];
   });
+}
+
+function stringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 8) : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -12,7 +12,7 @@ import type { ProjectMemoryPort, ProjectMemoryRecall, ProjectMemoryHydration } f
 import type { McpRegistrationTarget } from "./mcp-modern-server.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
 
-type Handler = (args: Record<string, unknown>) => Promise<{
+type Handler = (args: Record<string, unknown>, extra?: { _meta?: Record<string, unknown> }) => Promise<{
   structuredContent: Record<string, any>;
 }>;
 
@@ -57,9 +57,11 @@ test("real workflow tools compose a scoped handoff, historical agent evidence an
     workflows.close();
 
     const handlers = new Map<string, Handler>();
+    const descriptors = new Map<string, Record<string, any>>();
     const server = {
-      registerTool: (name: string, _metadata: unknown, handler: Handler) => {
+      registerTool: (name: string, metadata: Record<string, any>, handler: Handler) => {
         handlers.set(name, handler);
+        descriptors.set(name, metadata);
       },
     } as unknown as McpRegistrationTarget;
     const workspaces = {
@@ -75,12 +77,18 @@ test("real workflow tools compose a scoped handoff, historical agent evidence an
         return { status: "disabled", reason: "No hydrate in this test" };
       },
     };
-    registerCodingWorkflowTools({ server, workspaces, stateDir, memory });
-    const resumed = await handlers.get("workflow_open")!({ workflowId: workflow.workflowId });
+    registerCodingWorkflowTools({ server, workspaces, stateDir, memory, uiEnabled: true });
+    assert.equal(descriptors.get("workflow_status")?._meta?.ui?.resourceUri, "ui://devspace/workspace-app.html");
+    const resumed = await handlers.get("workflow_open")!(
+      { workflowId: workflow.workflowId },
+      { _meta: { "openai/session": "sample-chat-scope" } },
+    );
     assert.equal(resumed.structuredContent.workspaceId, "ws_integration");
     assert.equal(resumed.structuredContent.handoff.checkpointGitMatchesCurrent, true);
     const reopenedStore = new CodingWorkflowStore(stateDir);
     assert.equal(reopenedStore.getById(workflow.workflowId)?.workspaceId, "ws_integration");
+    assert.equal(reopenedStore.selected(project, "ws_integration", "sample-chat-scope")?.workflowId, workflow.workflowId);
+    assert.equal(reopenedStore.selected(project, "ws_integration", "other-chat"), undefined);
     reopenedStore.close();
     // A new ChatGPT connection can discover the original workspace without
     // opening a second tree or trusting a stale model summary.

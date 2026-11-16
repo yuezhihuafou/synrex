@@ -13,6 +13,9 @@ import { textBlock } from "./tool-surfaces/shared.js";
 import { workspaceIdDescription } from "./tool-surfaces/types.js";
 import { workflowHandoffText } from "./workflow-handoff.js";
 import { withWorkspaceLifecycleLock } from "./workspace-lifecycle-lock.js";
+import { assessGoal, continuityHint } from "./goal-continuity.js";
+import { conversationScopeIdFromRequestMeta } from "./request-meta.js";
+import { WORKSPACE_APP_URI } from "./tool-surfaces/types.js";
 
 const workflowId = z.string().regex(/^wf_[a-f0-9]{24}$/);
 const shortText = z.string().trim().min(1).max(4000);
@@ -50,16 +53,21 @@ export function registerCodingWorkflowTools(input: {
   workspaces: WorkspaceRegistry;
   stateDir: string;
   memory?: ProjectMemoryPort;
+  uiEnabled?: boolean;
 }): void {
   const { server, workspaces, stateDir } = input;
   const memory = input.memory ?? new DisabledProjectMemoryPort();
+  const uiMeta = input.uiEnabled ? { _meta: {
+    ui: { resourceUri: WORKSPACE_APP_URI, visibility: ["model"] },
+  } } : {};
 
   server.registerTool("workflow_open", {
     title: "Open coding workflow",
     description: "Create or resume a workflow. Resume by workflowId alone across chats; optional leaseAction protects active worktrees.",
     inputSchema: openInput,
+    ...uiMeta,
     annotations: { readOnlyHint: false, openWorldHint: false },
-  }, async ({ workspaceId, workflowId: requestedId, requestKey, title, goal, acceptanceCriteria, constraints, leaseAction, leaseId }) => {
+  }, async ({ workspaceId, workflowId: requestedId, requestKey, title, goal, acceptanceCriteria, constraints, leaseAction, leaseId }, extra) => {
     if (leaseAction) {
       if (!workspaceId || requestedId || goal || title || acceptanceCriteria || constraints || requestKey) {
         throw new Error("Lease operation requires workspaceId and leaseAction only (plus leaseId for renew/release)");
@@ -116,9 +124,19 @@ export function registerCodingWorkflowTools(input: {
       workflow: result.record, workspaceId: result.id, workspaceRoot: result.root,
       liveGit: gitSnapshot(result.root), agentEvidence: [],
     }) : undefined;
+    const scope = conversationScopeIdFromRequestMeta(extra?._meta);
+    if (scope && result.record.status !== "completed" && result.record.status !== "cancelled") {
+      withCodingWorkflowStore(stateDir, store => store.bind(result.record.workflowId, result.root, result.id, scope));
+    }
+    const continuity = withCodingWorkflowStore(stateDir, store =>
+      assessGoal(result.record, store.evidence(result.record.workflowId, result.root)));
     return {
-      content: [textBlock(workflowHandoffText(result.record, handoff?.checkpointGitMatchesCurrent ?? null))],
-      structuredContent: { ...result.record, workspaceId: result.id, ...(handoff ? { handoff } : {}) },
+      content: [textBlock(workflowHandoffText(result.record, handoff?.checkpointGitMatchesCurrent ?? null)
+        + "\n" + continuityHint(result.record, continuity))],
+      structuredContent: {
+        ...result.record, workspaceId: result.id, continuity,
+        ...(handoff ? { handoff } : {}),
+      },
     };
   });
 
@@ -132,6 +150,7 @@ export function registerCodingWorkflowTools(input: {
       includeMemory: z.boolean().optional().describe("Optional bounded read-only MemHub recall."),
       memoryProject: z.string().trim().min(1).max(128).optional().describe("Explicit MemHub project slug."),
     },
+    ...uiMeta,
     annotations: { readOnlyHint: true },
   }, async ({ workspaceId, workflowId: requestedId, includeCompleted, includeMemory, memoryProject }) => {
     const workspace = await workspaces.getWorkspace(workspaceId);
@@ -183,14 +202,18 @@ export function registerCodingWorkflowTools(input: {
         }))
         : { status: "ambiguous" as const, reason: "Explicit memoryProject required." }
       : undefined;
+    const goal = workflow ? withCodingWorkflowStore(stateDir, store =>
+      assessGoal(workflow, store.evidence(workflow.workflowId, workspace.root))) : undefined;
     return {
       content: [textBlock(handoff && workflow
         ? workflowHandoffText(workflow, handoff.checkpointGitMatchesCurrent)
+          + (goal ? "\n" + continuityHint(workflow, goal) : "")
         : ("workflows" in result ? result.workflows?.map(w=>`${w.workflowId} ${w.status} rev=${w.revision}: ${w.goal.slice(0, 100)}; next=${(w.checkpoint.nextSteps[0]??"inspect original goal").slice(0, 100)}; tasks=${w.checkpoint.taskIds.slice(0,3).join(",")}`).join("\n") || "No unfinished workflows." : JSON.stringify(result)))],
       structuredContent: {
         ...result,
         ...(handoff ? { handoff } : {}),
         ...(memoryContext ? { memoryContext } : {}),
+        ...(goal ? { continuity: goal } : {}),
       },
     };
   });
@@ -213,9 +236,14 @@ export function registerCodingWorkflowTools(input: {
         .describe("Durable task IDs requiring follow-up."),
       agentIds: z.array(z.string().regex(/^agt_[a-f0-9]{8}$/)).max(20).optional()
         .describe("Referenced Subagent evidence IDs."),
+      criterionEvidence: z.array(z.object({
+        criterion: z.number().int().nonnegative(),
+        eventId: z.string().regex(/^we_[a-f0-9]{24}$/),
+      })).max(40).optional().describe("Map acceptance criterion indexes to observed verification event IDs."),
     },
+    ...uiMeta,
     annotations: { readOnlyHint: false, openWorldHint: false },
-  }, async ({ workspaceId, workflowId: id, expectedRevision, status, phase, summary, completedSteps, nextSteps, blockers, checks, taskIds, agentIds }) => {
+  }, async ({ workspaceId, workflowId: id, expectedRevision, status, phase, summary, completedSteps, nextSteps, blockers, checks, taskIds, agentIds, criterionEvidence }) => {
     const workspace = await workspaces.getWorkspace(workspaceId);
     if (status === "completed" && (nextSteps.length || blockers.length || taskIds.length)) {
       throw new Error("Cannot mark completed while next steps, blockers, or unverified running task IDs remain.");
@@ -224,9 +252,15 @@ export function registerCodingWorkflowTools(input: {
       ? withCodingWorkflowStore(stateDir, (store) =>
         store.getRequired(id, workspace.root).checkpoint.agentIds)
       : undefined;
+    const previousCriterionEvidence = criterionEvidence === undefined
+      ? withCodingWorkflowStore(stateDir, store =>
+        store.getRequired(id, workspace.root).checkpoint.criterionEvidence)
+      : undefined;
     const checkpoint: CodingWorkflowCheckpoint = {
       phase, summary, completedSteps, nextSteps, blockers, checks, taskIds,
       ...((agentIds ?? previousAgentIds) ? { agentIds: agentIds ?? previousAgentIds } : {}),
+      ...((criterionEvidence ?? previousCriterionEvidence)
+        ? { criterionEvidence: criterionEvidence ?? previousCriterionEvidence } : {}),
       ...gitSnapshot(workspace.root),
     };
     const result = await withWorkspaceLifecycleLock(stateDir, async () =>
@@ -251,9 +285,12 @@ export function registerCodingWorkflowTools(input: {
       // Never fail an already-persisted workflow checkpoint because an
       // optional retrospective index could not be updated.
     }
+    const goal = withCodingWorkflowStore(stateDir, store =>
+      assessGoal(result, store.evidence(result.workflowId, workspace.root)));
     return {
-      content: [textBlock(`Saved ${result.workflowId} revision ${result.revision}, status ${result.status}. Next: ${result.checkpoint.nextSteps.join("; ") || "none"}.`) ],
-      structuredContent: { ...result },
+      content: [textBlock(`Saved ${result.workflowId} revision ${result.revision}, status ${result.status}. Next: ${result.checkpoint.nextSteps.join("; ") || "none"}.`
+        + "\n" + continuityHint(result, goal))],
+      structuredContent: { ...result, continuity: goal },
     };
   });
 }

@@ -1,6 +1,6 @@
 import type { App } from "@modelcontextprotocol/ext-apps";
 
-export type ToolName = "open_workspace" | "show_changes";
+export type ToolName = "open_workspace" | "show_changes" | "workflow";
 export type HostContext = NonNullable<ReturnType<App["getHostContext"]>>;
 
 export type ReviewFileType =
@@ -12,6 +12,13 @@ export type ReviewFileType =
 
 export interface ToolResultCard {
   tool: ToolName;
+  workflowId?: string;
+  workflowTitle?: string;
+  workflowStatus?: string;
+  workflowSummary?: string;
+  workflowNextSteps?: string[];
+  workflowRemaining?: string[];
+  workflowBlockers?: string[];
   workspaceId?: string;
   path?: string;
   root?: string;
