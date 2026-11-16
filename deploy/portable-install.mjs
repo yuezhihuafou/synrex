@@ -120,10 +120,14 @@ function runNative(command, args, cwd, timeout = 240_000) {
 }
 
 function installLockedArchive(dir, source, version, sha256) {
-  const archive = source.startsWith("https://") ? join(dir, "official-release.tgz") : source;
+  // Use a staging-local archive name with tar. GNU tar on Windows interprets
+  // absolute drive paths such as D:\\a\\... as remote host specifications.
+  const archive = join(dir, "official-release.tgz");
   if (source.startsWith("https://")) {
     runNative("curl", ["--fail", "--location", "--silent", "--show-error",
       "--max-time", "120", "--output", archive, source], dir, 135_000);
+  } else {
+    copyFileSync(source, archive);
   }
   let expected = sha256;
   if (source.startsWith("https://")) {
@@ -140,15 +144,15 @@ function installLockedArchive(dir, source, version, sha256) {
     expected = published;
   }
   archiveDigest(archive, expected);
-  const entries = runNative("tar", ["-tzf", archive], dir, 30_000)
+  const entries = runNative("tar", ["-tzf", "official-release.tgz"], dir, 30_000)
     .split(/\r?\n/).filter(Boolean);
   assertLockedArchiveEntries(entries);
-  const detail = runNative("tar", ["-tvzf", archive], dir, 30_000);
+  const detail = runNative("tar", ["-tvzf", "official-release.tgz"], dir, 30_000);
   if (detail.split(/\r?\n/).some((line) => /^[lh]/.test(line)))
     throw new Error("Symlink and hardlink release members are not accepted.");
   const root = join(dir, "node_modules", "synrex");
   mkdirSync(root, { recursive: true });
-  runNative("tar", ["-xzf", archive, "--strip-components=1", "-C", root], dir, 60_000);
+  runNative("tar", ["-xzf", "official-release.tgz", "--strip-components=1", "-C", "node_modules/synrex"], dir, 60_000);
   // npm pack intentionally excludes pnpm-lock.yaml even when listed under
   // package.json files. The release carries a checked, byte-identical copy.
   copyFileSync(join(root, "deploy", "release-lock.yaml"), join(root, "pnpm-lock.yaml"));
