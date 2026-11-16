@@ -7,6 +7,10 @@ on:
         description: Version to release (must match package.json)
         required: true
         type: string
+      source_sha:
+        description: Exact, CI-passing main-ancestor source commit to release
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -25,6 +29,7 @@ jobs:
     env:
       DEVSPACE_OAUTH_OWNER_TOKEN: ci-owner-token-that-is-long-enough
       VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
       - name: Checkout release workflow branch
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -56,25 +61,32 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
 
-      - name: Require matching immutable annotated tag
+      - name: Require immutable, audited release source
         id: tagged
         env:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
           git fetch --tags
-          test "$(git cat-file -t "$TAG")" = tag
-          tag_sha="$(git rev-parse "$TAG^{}")"
-          git merge-base --is-ancestor "$tag_sha" "$GITHUB_SHA" || {
-            echo "Tagged release is not on the canonical main lineage" >&2
+          if ! [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Provide an exact forty-character main commit SHA." >&2
+            exit 1
+          fi
+          test "$(git cat-file -t "$SOURCE_SHA")" = commit
+          git merge-base --is-ancestor "$SOURCE_SHA" "$GITHUB_SHA" || {
+            echo "Release commit is not on canonical main lineage" >&2
             exit 1
           }
-          echo "source_sha=$tag_sha" >> "$GITHUB_OUTPUT"
+          if git show-ref --verify --quiet "refs/tags/$TAG"; then
+            test "$(git cat-file -t "$TAG")" = tag
+            test "$(git rev-parse "$TAG^{}")" = "$SOURCE_SHA"
+          fi
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Checkout exact tagged release source
+      - name: Checkout exact verified release source
         env:
           TAG: ${{ steps.release.outputs.tag }}
         run: |
-          git checkout --detach "$TAG^{}"
+          git checkout --detach "$SOURCE_SHA"
           source_version="$(node -p 'require("./package.json").version')"
           if [[ "$VERSION" != "$source_version" ]]; then
             echo "Requested version $VERSION does not match tagged package.json $source_version." >&2
@@ -140,6 +152,20 @@ jobs:
         uses: actions/attest-build-provenance@v3
         with:
           subject-path: ${{ steps.pack.outputs.tarball }}
+
+      - name: Create immutable annotated tag after verification
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if git show-ref --tags --verify --quiet "refs/tags/$TAG"; then
+            test "$(git cat-file -t "$TAG")" = tag
+            test "$(git rev-parse "$TAG^{}")" = "$SOURCE_SHA"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$TAG" "$SOURCE_SHA" -m "Verified Synrex release $TAG"
+            git push origin "refs/tags/$TAG:refs/tags/$TAG"
+          fi
 
       - name: Create GitHub release
         env:
