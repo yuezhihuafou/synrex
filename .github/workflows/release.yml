@@ -10,6 +10,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 concurrency:
   group: release
@@ -61,6 +63,15 @@ jobs:
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
           echo "prerelease=$is_prerelease" >> "$GITHUB_OUTPUT"
 
+      - name: Require matching immutable annotated tag
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git fetch --tags --force
+          test "$(git cat-file -t "$TAG")" = tag
+          test "$(git rev-parse "$TAG^{}")" = "$GITHUB_SHA"
+          test -f "docs/releases/$TAG.md"
+
       - name: Require successful main CI
         env:
           GH_TOKEN: ${{ github.token }}
@@ -91,6 +102,7 @@ jobs:
         run: |
           pnpm typecheck
           pnpm test:package-install
+          pnpm audit --prod --audit-level high --registry https://registry.npmjs.org
 
       - name: Pack release artifact
         id: pack
@@ -98,8 +110,25 @@ jobs:
           mkdir -p .release
           filename="$(npm pack --silent --pack-destination .release | tail -n 1)"
           test -n "$filename"
+          cmp pnpm-lock.yaml deploy/release-lock.yaml
+          tar -tzf ".release/$filename" | grep -Fx 'package/deploy/release-lock.yaml'
+          tar -tzf ".release/$filename" | grep -Fx 'package/pnpm-workspace.yaml'
+          tar -tzf ".release/$filename" | grep -Fx 'package/SECURITY.md'
           echo "filename=$filename" >> "$GITHUB_OUTPUT"
           echo "tarball=.release/$filename" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SBOM and verified archive checksums
+        env:
+          ARCHIVE: ${{ steps.pack.outputs.filename }}
+        run: |
+          pnpm sbom --sbom-format=cyclonedx --prod > ".release/synrex-$VERSION.cdx.json"
+          node -e 'const fs=require("node:fs");const sbom=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!sbom.bomFormat||!sbom.components?.length)throw Error("SBOM is empty or invalid");console.log("Validated CycloneDX component count:",sbom.components.length)' ".release/synrex-$VERSION.cdx.json"
+          (cd .release && sha256sum "$ARCHIVE" "synrex-$VERSION.cdx.json" > SHA256SUMS && sha256sum --check SHA256SUMS)
+
+      - name: Attest built release archive provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.pack.outputs.tarball }}
 
       - name: Create GitHub release
         env:
@@ -113,7 +142,7 @@ jobs:
             exit 1
           fi
 
-          args=(release create "$TAG" "$TARBALL" --title "$TAG" --target "$GITHUB_SHA" --generate-notes)
+          args=(release create "$TAG" "$TARBALL" ".release/synrex-$VERSION.cdx.json" ".release/SHA256SUMS" --title "$TAG" --verify-tag --notes-file "docs/releases/$TAG.md")
           if [[ "$IS_PRERELEASE" == "true" ]]; then
             args+=(--prerelease)
           else
