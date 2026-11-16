@@ -193,6 +193,12 @@ test("terminal tasks persist a completion notification until task_get acknowledg
     }, 250);
     assert.ok(snapshot.taskId);
 
+    // A bounded start call may return before this tiny subprocess reaches its
+    // terminal state on a busy CI runner. Wait for the actual durable runner,
+    // not an assumed execution time; pendingNotifications is intentionally
+    // non-acknowledging, while manager.get acknowledges completion.
+    assert.ok(runner, "the launch callback must register the durable runner");
+    await runner;
     const pending = await manager.pendingNotifications(process.cwd());
     assert.equal(pending.length, 1);
     assert.equal(pending[0]?.taskId, snapshot.taskId);
