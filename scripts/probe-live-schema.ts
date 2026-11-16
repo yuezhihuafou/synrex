@@ -285,13 +285,22 @@ try {
         if (typeof task.revision === "string") revision = task.revision;
       }
       if (!completed) throw new Error("QA durable command did not complete after service restart");
-      const closed = await call("workflow_checkpoint", {
+      const resumedWorkflow = await call("workflow_checkpoint", {
         workspaceId: firstWorkspace, workflowId: resumeId, expectedRevision: 1,
-        status: "completed", phase: "verified", summary: "Durable work completed through restart",
+        // A recovered command is not independent proof that every user goal
+        // was satisfied. Persist the honest continuation state instead.
+        status: "active", phase: "verification", summary: "Durable command recovered through restart",
         completedSteps: ["MCP create and replay", "Durable command survived service restart"],
-        nextSteps: [], blockers: [], checks: ["Recovered task_wait exitCode 0"], taskIds: [],
+        nextSteps: ["Verify remaining acceptance with independent evidence"],
+        blockers: [], checks: ["Recovered task_wait exitCode 0"], taskIds: [],
       });
-      if (closed.revision !== 2) throw new Error("QA workflow could not finish after recovery");
+      if (resumedWorkflow.revision !== 2 || resumedWorkflow.status !== "active") {
+        throw new Error("QA workflow could not preserve unfinished goal after recovery");
+      }
+      const continuity = resumedWorkflow.continuity as { status?: string } | undefined;
+      if (!continuity || continuity.status === "satisfied") {
+        throw new Error("QA must not confuse task completion with goal satisfaction");
+      }
       qaDurableTaskRecovered = true;
       qaWorkflowId = resumeId;
     } else {

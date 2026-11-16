@@ -670,8 +670,9 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
     (sum, tool) => sum + Buffer.byteLength(JSON.stringify(tool), "utf8"),
     0,
   );
-  // Persistent workflow creation/status/checkpoint add three explicit tools.
-  assert.ok(totalBytes <= 21_000, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
+  // Explicit workflow IDs, observed goal evidence and the continuity UI add
+  // bounded optional fields; keep the entire surface below 22.5 KiB.
+  assert.ok(totalBytes <= 22_500, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
   const opened = structuredContent(await callOpen(context.client, context.project));
   const semanticResponse = await context.client.callTool({
     name: "semantic_code",
@@ -1117,7 +1118,7 @@ test("show_changes blocks deterministic architecture violations without blocking
   assert.match(repeatedCard?.payload?.patch ?? "", /import \{ b \}/);
 });
 
-test("UI metadata is limited to workspace and aggregate review", async (t) => {
+test("UI metadata is limited to workspace, review and user-initiated workflow continuation", async (t) => {
   for (const uiEnabled of [true, false]) {
     await t.test(uiEnabled ? "enabled" : "disabled", async (nested) => {
       const context = await fixture(nested, { toolMode: "claude", uiEnabled });
@@ -1127,7 +1128,8 @@ test("UI metadata is limited to workspace and aggregate review", async (t) => {
         .map((tool) => tool.name)
         .sort();
 
-      assert.deepEqual(toolsWithUi, uiEnabled ? ["open_workspace", "show_changes"] : []);
+      assert.deepEqual(toolsWithUi, uiEnabled
+        ? ["open_workspace", "show_changes", "workflow_checkpoint", "workflow_open", "workflow_status"] : []);
     });
   }
 });

@@ -133,7 +133,13 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
   cat "$regression_log"
   # Some tsx/Node combinations incorrectly return status 0 even when TAP
   # reports failed tests. Never accept the process exit alone as QA proof.
-  /bin/bash deploy/check-node-test-summary.sh "$regression_log"
+  # This block is part of an outer "||" condition, so shell errexit is not
+  # reliable for inner commands. Stop explicitly on an invalid TAP summary:
+  # Node/tsx can exit 0 even if nested test assertions failed.
+  if ! /bin/bash deploy/check-node-test-summary.sh "$regression_log"; then
+    echo "PROMOTION_BLOCKED full test regression failed; see $regression_log" >&2
+    exit 75
+  fi
   python3 -m unittest discover -s tests -p 'test_*p0.py'
   python3 -m unittest discover -s tests -p 'test_release_provenance.py'
   python3 -m unittest discover -s tests -p 'test_activate_owner_release.py'

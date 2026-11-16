@@ -53,10 +53,15 @@ test("lifecycle GC protects unknown/unfinished work, leases, dirty files; safely
   });
   assert.equal(listWorktreeLifecycle(stateDir)[0]?.reason, "unfinished_workflow");
   assert.deepEqual((await preview()).wouldRemove, []);
+  const verification = workflows.observe(tree, workflow.workflowId, {
+    eventKey: "fixture:lifecycle-verification", kind: "verification",
+    status: "completed", exitCode: 0,
+  });
   const finished = workflows.checkpoint(tree, {
     workflowId: workflow.workflowId, expectedRevision: 0, status: "completed",
     checkpoint: { summary: "test verified", phase: "finished", completedSteps: ["done"],
-      nextSteps: [], blockers: [], taskIds: [], checks: ["test fixture verification"] },
+      nextSteps: [], blockers: [], taskIds: [], checks: ["test fixture verification"],
+      criterionEvidence: [{ criterion: 0, eventId: verification.eventId }] },
   });
   assert.equal(finished.status, "completed");
   const lease = workflows.lease(id);
