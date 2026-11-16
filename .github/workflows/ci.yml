@@ -66,3 +66,71 @@ jobs:
 
       - name: Doctor
         run: node dist/cli.js doctor
+
+  dependency-security:
+    name: Production dependency vulnerability gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          runtime: node@22
+          install: false
+      - name: Audit locked production dependencies (official registry)
+        run: |
+          pnpm audit --prod --audit-level high --registry https://registry.npmjs.org
+          test -f pnpm-lock.yaml
+          test -f pnpm-workspace.yaml
+          cmp pnpm-lock.yaml deploy/release-lock.yaml
+          pnpm install --lockfile-only --offline --frozen-lockfile
+
+  native-portable:
+    name: Native package acceptance (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      DEVSPACE_OAUTH_OWNER_TOKEN: ci-native-install-isolated-owner-token
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup pnpm and Node
+        uses: pnpm/setup@84cb39b217b10273981911c288cd62326dc7c6d2 # v2
+        with:
+          runtime: node@24
+          install: false
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify shipped dependency lock is exactly the validated lock
+        shell: bash
+        run: cmp pnpm-lock.yaml deploy/release-lock.yaml
+      - name: Validate types and native installer contracts
+        run: |
+          pnpm typecheck
+          node --test deploy/portable-install.test.mjs deploy/portable-service.test.mjs
+      - name: Validate packed CLI entrypoints
+        run: pnpm test:package-install
+      - name: Install, activate and verify the candidate tarball on native OS
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          archive_dir="$RUNNER_TEMP/synrex-native-qa-archive"
+          prefix="$RUNNER_TEMP/synrex-native-qa-install"
+          mkdir -p "$archive_dir"
+          npm pack --ignore-scripts --silent --pack-destination "$archive_dir" > "$RUNNER_TEMP/package-name.txt"
+          filename="$(tail -n 1 "$RUNNER_TEMP/package-name.txt")"
+          test -n "$filename"
+          archive="$archive_dir/$filename"
+          digest="$(node -e 'const fs=require("node:fs"),c=require("node:crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$archive")"
+          node deploy/portable-install.mjs --stage --version "$version" --prefix "$prefix" --source "$archive" --sha256 "$digest"
+          node deploy/portable-install.mjs --activate --version "$version" --prefix "$prefix"
+          node "$prefix/bin/synrex.mjs" --version
+          node deploy/portable-install.mjs --status --prefix "$prefix"
+          node deploy/portable-service.mjs --plan --prefix "$prefix"
