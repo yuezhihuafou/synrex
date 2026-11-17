@@ -24,7 +24,8 @@ test("service definitions are additive and refuse overwriting unexpected changes
   const pkg = join(releasePath(root, "0.3.0"), "node_modules", "synrex");
   mkdirSync(join(pkg, "dist"), { recursive: true });
   writeFileSync(join(pkg, "package.json"), '{"name":"synrex","version":"0.3.0"}');
-  writeFileSync(join(pkg, "dist", "cli.js"), "console.log('x')");
+  // Activation now validates the real CLI version, not just the package metadata.
+  writeFileSync(join(pkg, "dist", "cli.js"), "console.log('0.3.0')");
   activateRelease(root, "0.3.0");
   const paths = writeServiceFiles(root, "linux");
   assert.equal(paths.length, 1);
