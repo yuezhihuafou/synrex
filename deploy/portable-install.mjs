@@ -68,6 +68,19 @@ export function verifyRelease(dir, version) {
   return cliPath(dir);
 }
 
+export function verifyRunnableRelease(dir, version) {
+  const cli = verifyRelease(dir, version);
+  const smoke = spawnSync(process.execPath, [cli, "--version"], {
+    encoding: "utf8", timeout: 15_000, windowsHide: true,
+  });
+  if (smoke.error || smoke.status !== 0 || smoke.stdout?.trim() !== version) {
+    const details = [smoke.error?.message, smoke.stderr?.trim().slice(-900),
+      smoke.stdout?.trim().slice(-300), `exit=${smoke.status ?? "unknown"}`].filter(Boolean).join("; ");
+    throw new Error(`Release CLI verification failed at ${dir}: ${details}`);
+  }
+  return cli;
+}
+
 export function readCurrent(prefix) {
   try {
     const data = JSON.parse(readFileSync(join(prefix, "current.json"), "utf8"));
@@ -86,7 +99,7 @@ function writeCurrent(prefix, doc) {
 }
 
 export function activateRelease(prefix, version) {
-  verifyRelease(releasePath(prefix, version), version);
+  verifyRunnableRelease(releasePath(prefix, version), version);
   const old = readCurrent(prefix);
   if (old?.version === version) return { version, previous: old.previous ?? null, unchanged: true };
   const doc = { version, previous: old?.version ?? null, activatedAt: new Date().toISOString() };
@@ -106,20 +119,23 @@ function checkRuntime() {
     throw new Error("Synrex requires Node.js >=22.19 and <27.");
 }
 
-function runNative(command, args, cwd, timeout = 240_000) {
+export function runNative(command, args, cwd, timeout = 240_000) {
   const options = { cwd, encoding: "utf8", timeout, maxBuffer: 128 * 1024, windowsHide: true };
   const cmdShim = process.platform === "win32" && command === "npx";
   const executable = cmdShim ? "cmd.exe" : command;
   const commandArgs = cmdShim ? ["/d", "/s", "/c", command, ...args] : args;
   const result = spawnSync(executable, commandArgs, options);
   if (result.error || result.status !== 0) {
-    throw new Error(command + " staging failed (existing release untouched): " +
-      (result.error?.message ?? result.stderr?.slice(-600) ?? "unknown"));
+    const output = [result.stderr?.trim(), result.stdout?.trim()]
+      .filter(Boolean).map((part) => part.slice(-1_200)).join("\n");
+    throw new Error(command + " staging failed (active release untouched; exit=" +
+      (result.status ?? "unknown") + ", signal=" + (result.signal ?? "none") + "): " +
+      (result.error?.message ?? (output || "no child-process output")));
   }
   return result.stdout;
 }
 
-function installLockedArchive(dir, source, version, sha256) {
+function prepareLockedArchive(dir, source, version, sha256) {
   // Use a staging-local archive name with tar. GNU tar on Windows interprets
   // absolute drive paths such as D:\\a\\... as remote host specifications.
   const archive = join(dir, "official-release.tgz");
@@ -159,10 +175,35 @@ function installLockedArchive(dir, source, version, sha256) {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   if (pkg.name !== "synrex" || pkg.version !== version) throw new Error("Archive identity/version mismatch.");
   if (pkg.packageManager !== "pnpm@11.25.0") throw new Error("Unrecognized locked package manager.");
+}
+
+function installLockedDependencies(dir) {
+  const root = join(dir, "node_modules", "synrex");
   // The published pnpm-lock.yaml and pnpm-workspace.yaml pin every dependency,
   // including overrides. npm install on a library tarball does NOT honor the
   // library's overrides and can silently resurrect vulnerable transitive versions.
   runNative("npx", ["--yes", "pnpm@11.25.0", "install", "--prod", "--frozen-lockfile"], root, 360_000);
+}
+
+// pnpm on Windows creates absolute Junction targets. Move the validated package
+// first, and only then install dependencies at its final, immutable version path.
+// A failed installation must never leave a half-installed release eligible for
+// activation, or change the active launcher pointer.
+export function installPreparedRelease(stage, dest, version, install = installLockedDependencies) {
+  mkdirSync(dirname(dest), { recursive: true });
+  renameSync(stage, dest);
+  try {
+    install(dest);
+    verifyRunnableRelease(dest, version);
+  } catch (error) {
+    try {
+      rmSync(dest, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError],
+        "Failed to install release and clean up incomplete version at " + dest);
+    }
+    throw error;
+  }
 }
 
 function writeLaunchers(prefix) {
@@ -241,14 +282,11 @@ export function main(argv = process.argv.slice(2)) {
       const stage = join(args.prefix, ".stage-" + process.pid + "-" + Date.now());
       mkdirSync(stage, { mode: 0o700 });
       try {
-        installLockedArchive(stage, source, args.version, args.sha256);
-        const cli = verifyRelease(stage, args.version);
-        const smoke = spawnSync(process.execPath, [cli, "--version"], { encoding: "utf8", timeout: 15_000 });
-        if (smoke.status !== 0) throw new Error("Installed CLI --version smoke check failed.");
-        mkdirSync(dirname(dest), { recursive: true });
-        renameSync(stage, dest);
+        prepareLockedArchive(stage, source, args.version, args.sha256);
+        verifyRelease(stage, args.version);
+        installPreparedRelease(stage, dest, args.version);
       } finally { if (existsSync(stage)) rmSync(stage, { recursive: true, force: true }); }
-    } else verifyRelease(dest, args.version);
+    } else verifyRunnableRelease(dest, args.version);
     writeLaunchers(args.prefix);
     console.log(JSON.stringify({ staged: args.version, prefix: args.prefix, activated: false,
       cli: join(args.prefix, "bin", process.platform === "win32" ? "synrex.cmd" : "synrex"),

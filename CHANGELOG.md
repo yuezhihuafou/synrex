@@ -4,6 +4,21 @@ Synrex's version numbers are independent of the upstream DevSpace project.
 Only verified release artifacts, tags and running manifests identify deployed
 versions; a changelog entry alone does not prove that a release was published.
 
+## 0.4.2 — Windows portable installer repair (2026-11-17)
+
+- Fixed pnpm Junction links becoming invalid when an already installed Windows
+  `node_modules` tree was moved from a temporary staging directory.
+  Dependency installation now runs only **after** verified archive extraction
+  has been moved to its final, versioned path.
+- Require the packaged CLI to run from its final location before staging,
+  activation, or rollback can succeed. Incomplete new installs are cleaned up
+  without changing the active release or any existing installation.
+- Include the native command exit code and bounded stdout/stderr in install
+  failures; add regression tests for moved absolute Junctions and failures.
+- Verified the fix on a real Windows x64 peer with Node.js v24.13.0 using the
+  official v0.4.1 archive in an isolated prefix; production Owner and existing
+  Windows peer services were not modified by that installer regression test.
+
 ## 0.4.1 — dependency security and reproducible release candidate (2026-11-15)
 
 - Refreshed the direct and transitive package dependency graph, updating the

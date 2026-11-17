@@ -29,9 +29,9 @@ Obtain this repository's `deploy/` scripts (for example with `git clone`).
 After the desired version is published, run from the repository root:
 
 ```sh
-node deploy/portable-install.mjs --plan --version 0.4.1
-node deploy/portable-install.mjs --stage --version 0.4.1
-node deploy/portable-install.mjs --activate --version 0.4.1
+node deploy/portable-install.mjs --plan --version 0.4.2
+node deploy/portable-install.mjs --stage --version 0.4.2
+node deploy/portable-install.mjs --activate --version 0.4.2
 node deploy/portable-install.mjs --status
 ```
 
@@ -39,6 +39,18 @@ The first command is read-only. `--stage` verifies the GitHub Release
 tarball against the published `SHA256SUMS`, then installs its **locked pnpm dependencies**
 into a **new, versioned user directory**
 without changing any service, configuration or active version pointer.
+`--stage` extracts and validates the archive in a temporary directory, moves
+the unpacked package to its final version directory, and **only then** runs
+pnpm there. On Windows, pnpm's Junction targets can be absolute; moving a
+fully installed `node_modules` tree afterwards would leave broken links
+(`ERR_MODULE_NOT_FOUND` after an apparently successful install). The installer
+checks `synrex --version` from the **final** path and removes a failed new
+version without touching existing versions or the active pointer. An existing
+version is also rechecked before `--stage` or `--activate` accepts it.
+Child-process failures include their exit status and bounded stdout/stderr.
+If an interrupted installation left a partial version directory, preserve
+the current active release and diagnose or manually isolate that incomplete
+directory before retrying; do not delete an existing active release.
 `--activate` moves only the portable launcher's version pointer after
 verifying the staged package. It does not restart a service. A previous
 version remains available:
@@ -68,11 +80,11 @@ multinode mode configure the single Owner and peer roles intentionally,
 not from guessed network locations.
 
 If your host cannot reach GitHub directly, download the official
-`synrex-0.4.1.tgz` on a connected machine and transfer it to that host.
+`synrex-0.4.2.tgz` on a connected machine and transfer it to that host.
 Then use:
 
 ```sh
-node deploy/portable-install.mjs --stage --version 0.4.1 --source ./synrex-0.4.1.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
+node deploy/portable-install.mjs --stage --version 0.4.2 --source ./synrex-0.4.2.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
 ```
 
 Dependencies and the exact pnpm bootstrap still need registry access or an already populated cache.
