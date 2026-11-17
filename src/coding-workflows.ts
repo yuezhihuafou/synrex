@@ -257,6 +257,8 @@ export class CodingWorkflowStore {
     }
     this.db.exec(`create index if not exists coding_workflow_evidence_state_idx
       on coding_workflow_evidence(workflow_id, status)`);
+    this.db.exec(`create index if not exists coding_workflow_evidence_task_idx
+      on coding_workflow_evidence(workflow_id, task_id)`);
   }
 
   close(): void {
@@ -433,6 +435,7 @@ export class CodingWorkflowStore {
     const refs = [...new Set([
       ...(workflow.checkpoint.criterionEvidence ?? []).map(c => c.eventId), ...proposedEventIds,
     ])].slice(0, 80);
+    const checkpointTaskIds = [...new Set(workflow.checkpoint.taskIds)].slice(0, 40);
     const columns = `event_id, workflow_id, kind, status, run_id, task_id, session_id, exit_code,
       command, source, scope_json, fingerprint, working_directory, workspace_id, node_alias, observed_at`;
     const unresolvedCount = (this.db.prepare(`select count(*) as n from coding_workflow_evidence
@@ -447,6 +450,9 @@ export class CodingWorkflowStore {
       ...(refs.length ? this.db.prepare(`select ${columns} from coding_workflow_evidence
         where workflow_id=? and event_id in (${refs.map(() => "?").join(",")})`)
         .all(workflowId, ...refs) : []),
+      ...(checkpointTaskIds.length ? this.db.prepare(`select ${columns} from coding_workflow_evidence
+        where workflow_id=? and task_id in (${checkpointTaskIds.map(() => "?").join(",")})
+        order by rowid desc limit 80`).all(workflowId, ...checkpointTaskIds) : []),
     ] as Array<{
         event_id: string; workflow_id: string; kind: WorkflowExecutionEvidence["kind"];
         status: WorkflowExecutionEvidence["status"]; run_id: string | null;
@@ -544,10 +550,12 @@ export class CodingWorkflowStore {
         scope_json: string | null; fingerprint: string | null;
         working_directory: string | null; workspace_id: string | null; node_alias: string | null;
       };
-    // Final test receipts may arrive later via task_get/task_wait without a
-    // command. Preserve the original trusted exec_command and scope, then
-    // capture the content fingerprint only after successful completion.
-    if (row.kind === "verification" && row.status === "completed" && row.exit_code === 0
+    // Capture at the original exec_command observation, even if the test is
+    // still running. Capturing only at task_get completion would incorrectly
+    // validate code edited WHILE an old test was running. Legacy records
+    // first seen at task_get remain unverified rather than inventing a start
+    // fingerprint from the already-modified tree.
+    if (row.kind === "verification" && input.source === "exec_command"
       && row.source === "exec_command" && row.command && !row.fingerprint) {
       const scope = row.scope_json ? JSON.parse(row.scope_json) as string[] : [];
       const fingerprint = verificationFingerprint(root, scope);

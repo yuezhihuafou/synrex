@@ -2,7 +2,9 @@ import { execFileSync } from "node:child_process";
 import * as z from "zod/v4";
 import type { McpRegistrationTarget } from "./mcp-modern-server.js";
 import type { WorkspaceRegistry } from "./workspaces.js";
-import { withCodingWorkflowStore, type CodingWorkflowCheckpoint } from "./coding-workflows.js";
+import { withCodingWorkflowStore, type CodingWorkflowCheckpoint, type CodingWorkflow, type WorkflowExecutionEvidence } from "./coding-workflows.js";
+import type { DurableTaskManager } from "./durable-tasks.js";
+import type { ProcessSessionManager } from "./process-sessions.js";
 import { LearningStore } from "./learning-store.js";
 import { buildCodingWorkflowHandoff, type WorkflowAgentEvidence } from "./coding-workflow-handoff.js";
 import { LocalAgentStore } from "./local-agent-store.js";
@@ -20,6 +22,58 @@ import { WORKSPACE_APP_URI } from "./tool-surfaces/types.js";
 const workflowId = z.string().regex(/^wf_[a-f0-9]{24}$/);
 const shortText = z.string().trim().min(1).max(4000);
 const items = z.array(z.string().trim().min(1).max(2000)).max(40);
+
+/** Reconcile only when a user explicitly opens/inspects a workflow, never
+ * during ordinary command execution. Historical receipts remain immutable;
+ * returned live evidence takes precedence without replaying a command.
+ */
+export async function liveWorkflowEvidence(input: {
+  stateDir: string;
+  workflow: CodingWorkflow;
+  workspaceRoot: string;
+  workspaceId: string;
+  durableTasks?: Pick<DurableTaskManager, "get" | "available">;
+  processSessions?: Pick<ProcessSessionManager, "status">;
+}): Promise<WorkflowExecutionEvidence[]> {
+  const records = withCodingWorkflowStore(input.stateDir, store =>
+    store.evidence(input.workflow.workflowId, input.workspaceRoot));
+  const unresolved = records.filter(e =>
+    ["working", "running", "input_required", "unknown"].includes(e.status) &&
+    ((e.taskId && input.durableTasks?.available) ||
+      (e.sessionId !== undefined && input.processSessions)));
+  const latest = unresolved.slice(0, 32);
+  if (latest.length === 0) return records;
+  const statuses = await Promise.all(latest.map(async evidence => {
+    try {
+      if (evidence.taskId && input.durableTasks?.available) {
+        const view = await input.durableTasks.get(input.workspaceRoot, evidence.taskId,
+          { acknowledge: false });
+        if (evidence.runId && view.runId !== evidence.runId) throw new Error("Task handle run mismatch");
+        const status: WorkflowExecutionEvidence["status"] =
+          view.status === "working" ? "running"
+            : view.status === "input_required" ? "input_required"
+              : view.status === "cancelled" ? "cancelled"
+                : view.status === "completed" && view.result?.exitCode === 0 && !view.result?.isError
+                  ? "completed" : view.status === "failed" || view.status === "completed"
+                    ? "failed" : "unknown";
+        return { ...evidence, status, exitCode: view.result?.exitCode ?? undefined };
+      }
+      if (evidence.sessionId !== undefined && input.processSessions) {
+        const view = input.processSessions.status(input.workspaceId, evidence.sessionId);
+        if (evidence.runId && view.runId !== evidence.runId) throw new Error("Process session run mismatch");
+        return { ...evidence, status: view.running ? "running" as const
+          : view.exitCode === 0 ? "completed" as const
+            : view.exitCode !== undefined || view.signal ? "failed" as const : "unknown" as const,
+          exitCode: view.exitCode };
+      }
+    } catch { // Missing/expired receipts cannot be promoted to success.
+      return { ...evidence, status: "unknown" as const };
+    }
+    return evidence;
+  }));
+  const updates = new Map(statuses.map(e => [e.eventId, e]));
+  return records.map(e => updates.get(e.eventId) ?? e);
+}
 
 function gitSnapshot(root: string): Pick<CodingWorkflowCheckpoint, "gitHead" | "gitStatus"> {
   const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], {
@@ -52,6 +106,8 @@ export function registerCodingWorkflowTools(input: {
   server: McpRegistrationTarget;
   workspaces: WorkspaceRegistry;
   stateDir: string;
+  durableTasks?: Pick<DurableTaskManager, "get" | "available">;
+  processSessions?: Pick<ProcessSessionManager, "status">;
   memory?: ProjectMemoryPort;
   uiEnabled?: boolean;
 }): void {
@@ -120,8 +176,10 @@ export function registerCodingWorkflowTools(input: {
       if (record.workspaceId && record.workspaceId !== id) throw new Error("Workflow workspace session mismatch");
       return { record, id, root: workspace.root };
     });
-    const continuity = withCodingWorkflowStore(stateDir, store =>
-      assessGoal(result.record, store.evidence(result.record.workflowId, result.root)));
+    const continuity = assessGoal(result.record, await liveWorkflowEvidence({
+      stateDir, workflow: result.record, workspaceRoot: result.root, workspaceId: result.id,
+      durableTasks: input.durableTasks, processSessions: input.processSessions,
+    }));
     const handoff = requestedId ? buildCodingWorkflowHandoff({
       workflow: result.record, workspaceId: result.id, workspaceRoot: result.root,
       liveGit: gitSnapshot(result.root), agentEvidence: [], continuity,
@@ -161,8 +219,10 @@ export function registerCodingWorkflowTools(input: {
     // takeover show a separate, fresh read of the actual local Git state so a
     // new conversation cannot mistake a stale summary for current checkout.
     const workflow = "workflow" in result ? result.workflow : undefined;
-    const goal = workflow ? withCodingWorkflowStore(stateDir, store =>
-      assessGoal(workflow, store.evidence(workflow.workflowId, workspace.root))) : undefined;
+    const goal = workflow ? assessGoal(workflow, await liveWorkflowEvidence({
+      stateDir, workflow, workspaceRoot: workspace.root, workspaceId,
+      durableTasks: input.durableTasks, processSessions: input.processSessions,
+    })) : undefined;
     const handoff = workflow ? (() => {
       const liveGit = gitSnapshot(workspace.root);
       const checkpoint = workflow.checkpoint;

@@ -923,6 +923,8 @@ function registerMcpSurface(
     server: registrationTarget,
     workspaces,
     stateDir: config.stateDir,
+    durableTasks,
+    processSessions,
     memory: createOptionalProjectMemoryPort(),
     uiEnabled: config.uiEnabled,
   });

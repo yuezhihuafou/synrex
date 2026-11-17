@@ -167,6 +167,35 @@ test("a durable task's later receipt resolves the original command without losin
   } finally { store.close(); rmSync(state, { recursive: true, force: true }); }
 });
 
+test("a verification started before a code edit cannot validate the newer tree at task completion", () => {
+  const { root, state } = repository();
+  const store = new CodingWorkflowStore(state);
+  try {
+    const wf = store.create(root, {
+      title: "race", goal: "race", acceptanceCriteria: ["feature test passes"], constraints: [],
+    });
+    const command = "pnpm exec tsx --test src/feature.test.ts";
+    const started = store.observe(root, wf.workflowId, {
+      eventKey: "run:slow", kind: "verification", status: "running",
+      runId: "run_slow", taskId: "task_slow", command,
+      verificationScope: verificationScope(command), source: "exec_command",
+    });
+    assert.ok(started.fingerprint, "capture the source fingerprint before the task finishes");
+    writeFileSync(join(root, "src", "feature.ts"), "export const feature = 27;\n");
+    const finished = store.observe(root, wf.workflowId, {
+      eventKey: "run:slow", kind: "command", status: "completed",
+      runId: "run_slow", taskId: "task_slow", exitCode: 0, source: "task_receipt",
+    });
+    assert.equal(finished.fingerprint, started.fingerprint, "a late receipt must not re-fingerprint modified code");
+    const proposed = { ...wf, checkpoint: { ...wf.checkpoint,
+      criterionEvidence: [{ criterion: 0, eventId: finished.eventId }],
+    } };
+    const evidence = store.evidence(wf.workflowId, root, [finished.eventId]);
+    assert.equal(evidence.find(e => e.eventId === finished.eventId)?.stale, true);
+    assert.deepEqual(assessGoal(proposed, evidence).verifiedCriteria, []);
+  } finally { store.close(); rmSync(state, { recursive: true, force: true }); }
+});
+
 test("evidence retrieval stays bounded even with many historical events", () => {
   const { root, state } = repository();
   const store = new CodingWorkflowStore(state);
@@ -183,6 +212,31 @@ test("evidence retrieval stays bounded even with many historical events", () => 
     assert.equal(status.status, "in_progress");
     assert.ok(status.pendingOperations.length > 0);
     assert.ok(store.evidence(wf.workflowId, root).length <= 64 + 256 + 1);
+  } finally { store.close(); rmSync(state, { recursive: true, force: true }); }
+});
+
+test("terminal checkpoint task receipts remain discoverable beyond the recent event window", () => {
+  const { root, state } = repository();
+  const store = new CodingWorkflowStore(state);
+  try {
+    const wf = store.create(root, {
+      title: "old task", goal: "old task", acceptanceCriteria: ["test passes"], constraints: [],
+    });
+    const terminal = store.observe(root, wf.workflowId, {
+      eventKey: "run:old", kind: "command", status: "cancelled",
+      runId: "run_old", taskId: "task_old",
+    });
+    const updated = store.checkpoint(root, {
+      workflowId: wf.workflowId, expectedRevision: 0, status: "active",
+      checkpoint: { phase: "verify", summary: "stale checkpoint", completedSteps: [],
+        nextSteps: [], blockers: [], checks: [], taskIds: ["task_old"] },
+    });
+    for (let i = 0; i < 110; i++) store.observe(root, wf.workflowId, {
+      eventKey: `run:noise${i}`, kind: "command", status: "completed", runId: `run_noise${i}`,
+    });
+    const visible = store.evidence(wf.workflowId, root);
+    assert.ok(visible.some(e => e.eventId === terminal.eventId));
+    assert.deepEqual(assessGoal(updated, visible).pendingTaskIds, []);
   } finally { store.close(); rmSync(state, { recursive: true, force: true }); }
 });
 

@@ -33,6 +33,9 @@ proof of a completed ordinary-ChatGPT end-to-end task.
    manifests; a general check uses the code/dependency scope. Unknown or
    oversized import graphs fail closed. This is not a complete package/alias
    dependency verifier.
+   For asynchronous tests, the fingerprint is captured when the trusted
+   `exec_command` receipt is first observed, not when a later `task_get`
+   reports success; edits during a running test invalidate that evidence.
 4. Active durable tasks, input-required work, TTY sessions, cancellation and
    unknown outcomes are represented separately. Unconfirmed tasks without a
    `taskId` still block finish. A stale running observation is shown as
@@ -66,6 +69,15 @@ proof of a completed ordinary-ChatGPT end-to-end task.
   acceptance, saved steps, independently verified criteria (if any), current
   Git state, outstanding task/process handles and next action. The caller must
   inspect live receipts and files before replaying writes.
+- On explicit resume/status inspection only, query up to 32 unresolved live
+  Task/TTY handles. Terminal receipts supersede old `running` events for the
+  handoff; missing or mismatched receipts remain `unknown`. Confirmed terminal
+  tasks no longer remain blocked by stale checkpoint IDs. This is read-only
+  live reconciliation, not a replay or a new background polling service.
+- The existing ChatGPT connector successfully resumed this workflow by its
+  explicit ID and returned its original goal and live Git discrepancy. This
+  verifies manual-ID recovery transport, not the candidate App button's
+  automatic `ui/message` follow-up behavior.
 - **Still required:** manually click "继续任务" in the real, supported ordinary
   ChatGPT Host, and verify a real follow-up GPT turn and correct workspace
   restoration. If the Host rejects the message bridge, verify the copy-and-
@@ -122,6 +134,24 @@ cost measurements. Real Host before/after completion rate, early stops,
 manual continues and total Token consumption remain unmeasured.
 
 ## P4 — Evidence requirements before enabling a new production release
+
+**Additional measured run:** With a kernel-capability-aware Pi sandbox test,
+`pnpm test` reported 468 tests: **465 pass, 0 fail, 3 skip**; the 11 subsequent
+script tests passed. The sandbox test was skipped because nested
+`apply-seccomp` user namespaces are forbidden on this swy1 host; it correctly
+**fails** with `DEVSPACE_REQUIRE_PI_SANDBOX=1`. The explicit security gate still
+requires execution on a supported host. Log:
+`/tmp/synrex-continuity-v13-full-20261117.log`. A further full regression is
+required after the later live-handle reconciliation and async-test fingerprint
+changes; the focused integration tests pass.
+
+**Latest complete source regression after those changes:** `pnpm test` exited
+zero with **471 tests: 468 pass, 0 fail, 3 skip**, followed by **11/11** passing
+script tests. Log: `/tmp/synrex-continuity-v13-verified-full.log`. One of the
+three skips remains the host-restricted Pi sandbox; the result must not be
+interpreted as successful sandbox enforcement on swy1. The new cases include
+late durable task/TTY reconciliation, checkpoint task receipts outside recent
+history, and code edits during an asynchronous verification.
 
 Local source tests establish the deterministic store and MCP handler behavior,
 not ChatGPT's inferred decision policy. Keep these measurements distinct:

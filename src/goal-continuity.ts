@@ -59,8 +59,11 @@ export function assessGoal(workflow: CodingWorkflow, events: readonly WorkflowEx
     ? "verified" as const : criterionCheck(criterion, "") === "manual"
       ? "requires_confirmation" as const : "unverified" as const);
   const remaining = workflow.acceptanceCriteria.filter((_, index) => !verifiedCriteria.includes(index));
+  const terminalTaskIds = new Set(events.filter(event =>
+    ["completed", "failed", "cancelled"].includes(event.status) && event.taskId)
+    .map(event => event.taskId!));
   const pendingTaskIds = [...new Set([
-    ...workflow.checkpoint.taskIds,
+    ...workflow.checkpoint.taskIds.filter(id => !terminalTaskIds.has(id)),
     ...events.filter((event) => ["working", "running", "input_required", "unknown"].includes(event.status) && event.taskId)
       .map((event) => event.taskId!),
   ])].slice(0, 40);

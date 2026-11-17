@@ -4,7 +4,8 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { registerCodingWorkflowTools } from "./coding-workflow-tools.js";
+import { liveWorkflowEvidence, registerCodingWorkflowTools } from "./coding-workflow-tools.js";
+import { assessGoal } from "./goal-continuity.js";
 import { CodingWorkflowStore } from "./coding-workflows.js";
 import { LocalAgentStore } from "./local-agent-store.js";
 import { LocalAgentEvidenceStore } from "./local-agent-evidence.js";
@@ -135,5 +136,81 @@ test("real workflow tools compose a scoped handoff, historical agent evidence an
     const stale = await status({ workspaceId: "ws_integration", workflowId: workflow.workflowId });
     assert.equal(stale.structuredContent.handoff.checkpointGitMatchesCurrent, false);
     assert.equal(stale.structuredContent.handoff.agentEvidence[0].evidence.ref, evidence.ref);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("resume reconciles stale task and TTY handles without executing writes or creating a workflow", async () => {
+  const root = mkdtempSync(join(tmpdir(), "synrex-recovery-live-"));
+  const project = join(root, "project"), stateDir = join(root, "state");
+  mkdirSync(project);
+  try {
+    const store = new CodingWorkflowStore(stateDir);
+    const wf = store.create(project, {
+      title: "Recover", goal: "Confirm stalled work", constraints: [],
+      acceptanceCriteria: ["integration test passes"], workspaceId: "ws_recovery",
+    });
+    const task = store.observe(project, wf.workflowId, {
+      eventKey: "run:run_dead", kind: "command", status: "running",
+      runId: "run_dead", taskId: "task_dead",
+    });
+    store.observe(project, wf.workflowId, {
+      eventKey: "run:run_tty", kind: "command", status: "running",
+      runId: "run_tty", sessionId: 88,
+    });
+    store.checkpoint(project, { workflowId: wf.workflowId, expectedRevision: 0, status: "active",
+      checkpoint: { phase: "verify", summary: "Old receipts", completedSteps: [],
+        nextSteps: [], blockers: [], checks: [], taskIds: ["task_dead"] },
+    });
+    store.close();
+    let liveReads = 0;
+    const durableTasks = { available: true, async get(_root: string, id: string,
+      options: { acknowledge?: boolean }) {
+      assert.equal(id, "task_dead");
+      assert.equal(options.acknowledge, false);
+      liveReads++;
+      return { status: "cancelled", taskId: id, runId: "run_dead" };
+    } } as any;
+    const processSessions = { status(_workspaceId: string, sessionId: number) {
+      assert.equal(_workspaceId, "ws_recovery");
+      assert.equal(sessionId, 88);
+      return { sessionId, runId: "run_tty", running: false, exitCode: 0 };
+    } } as any;
+    const before = new CodingWorkflowStore(stateDir);
+    const current = before.getRequired(wf.workflowId, project);
+    before.close();
+    const events = await liveWorkflowEvidence({
+      stateDir, workflow: current, workspaceRoot: project, workspaceId: "ws_recovery",
+      durableTasks, processSessions,
+    });
+    assert.equal(events.find(e => e.eventId === task.eventId)?.status, "cancelled");
+    assert.equal(events.find(e => e.sessionId === 88)?.status, "completed");
+    const goal = assessGoal(current, events);
+    assert.deepEqual(goal.pendingTaskIds, []);
+    assert.deepEqual(goal.pendingOperations, []);
+    assert.equal(goal.status, "unknown", "unfinished acceptance cannot turn into success");
+    const handlers = new Map<string, Handler>();
+    registerCodingWorkflowTools({
+      server: { registerTool: (name: string, _meta: unknown, handler: Handler) =>
+        handlers.set(name, handler) } as unknown as McpRegistrationTarget,
+      workspaces: { getWorkspace: async () => ({ root: project }) } as unknown as WorkspaceRegistry,
+      stateDir, durableTasks, processSessions,
+    });
+    const resumed = await handlers.get("workflow_open")!({ workflowId: wf.workflowId });
+    assert.equal(resumed.structuredContent.revision, 1);
+    assert.deepEqual(resumed.structuredContent.continuity.pendingOperations, []);
+    const view = await handlers.get("workflow_status")!({ workspaceId: "ws_recovery", workflowId: wf.workflowId });
+    assert.deepEqual(view.structuredContent.continuity.pendingTaskIds, []);
+    assert.equal(view.structuredContent.workflow.revision, 1, "resume is read-only to task source state");
+    assert.ok(liveReads >= 3);
+    const fresh = new CodingWorkflowStore(stateDir);
+    assert.equal(fresh.getRequired(wf.workflowId, project).revision, 1);
+    fresh.close();
+    const missing = await liveWorkflowEvidence({
+      stateDir, workflow: current, workspaceRoot: project, workspaceId: "ws_recovery",
+      durableTasks: { available: true, async get() { throw new Error("task log unavailable"); } } as any,
+    });
+    assert.equal(missing.find(e => e.eventId === task.eventId)?.status, "unknown");
+    assert.ok(assessGoal(current, missing).pendingOperations.length > 0,
+      "missing receipts must never become an assumed success");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

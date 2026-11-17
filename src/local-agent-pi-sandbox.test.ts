@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
@@ -22,6 +23,7 @@ const bwrapProbe = process.platform === "linux"
     })
   : undefined;
 const bwrapUsable = !bwrapProbe || (bwrapProbe.status === 0 && !bwrapProbe.error);
+test("Pi sandbox enforces filesystem restrictions where kernel capabilities permit it", async (t) => {
 if (process.env.DEVSPACE_REQUIRE_PI_SANDBOX === "1") {
   assert.equal(SandboxManager.isSupportedPlatform(), true, "Pi sandbox integration is required on this CI lane");
   assert.deepEqual(dependencies.errors, [], "Pi sandbox dependencies must be available on this CI lane");
@@ -45,6 +47,22 @@ if (SandboxManager.isSupportedPlatform() && dependencies.errors.length === 0 && 
 
     const bash = tools.get("bash");
     assert.ok(bash, "Pi sandbox extension registers a bash tool");
+    // `bwrap --unshare-net` alone can succeed while the actual nested
+    // apply-seccomp user namespace is forbidden by host capabilities.
+    // Probe that exact execution path before checking filesystem security.
+    try {
+      await bash.execute("pi-sandbox-capability-probe", { command: "true" });
+    } catch (error) {
+      const message = String(error);
+      const restrictedUserns = /apply-seccomp: write \/proc\/self\/setgroups|nested userns is capability-restricted/.test(message)
+        && /Permission denied|CAP_SYS_ADMIN/.test(message);
+      if (restrictedUserns && process.env.DEVSPACE_REQUIRE_PI_SANDBOX !== "1") {
+        t.diagnostic(`Pi sandbox kernel capability unavailable: ${message.slice(0, 250)}`);
+        t.skip("nested apply-seccomp user namespace requires unavailable host privileges");
+        return;
+      }
+      throw error;
+    }
     await bash.execute("bash-inside-write-test", {
       command: `touch '${join(workspace, "inside.txt")}'`,
     });
@@ -106,5 +124,6 @@ if (SandboxManager.isSupportedPlatform() && dependencies.errors.length === 0 && 
     await rm(root, { recursive: true, force: true });
   }
 } else {
-  console.log("Pi sandbox integration test skipped: sandbox-runtime dependencies or Linux namespace privileges are unavailable.");
+  t.skip("sandbox-runtime dependencies or Linux namespace privileges are unavailable");
 }
+});
