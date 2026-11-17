@@ -44,3 +44,34 @@ test('zero connections: third check proposes restart; cooldown suppresses; recov
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('unavailable generic HTTPS probe cannot silently suppress zero-connection recovery', async () => {
+  const server = createServer((req, res) => {
+    if (req.url === '/metrics') res.end('cloudflared_tunnel_ha_connections 0\n');
+    else { res.statusCode = 401; res.end(''); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port;
+  const dir = mkdtempSync(path.join(tmpdir(), 'synrex-tunnel-guard-offline-'));
+  const run = () => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [new URL('./tunnel-guard.mjs', import.meta.url).pathname, '--dry-run'], {
+      env: { ...process.env, SYNREX_TUNNEL_GUARD_STATE: dir,
+        SYNREX_TUNNEL_GUARD_METRICS: 'http://127.0.0.1:' + port + '/metrics',
+        SYNREX_TUNNEL_GUARD_INGRESS: 'http://127.0.0.1:' + port + '/',
+        SYNREX_TUNNEL_GUARD_TEST_WAN: 'offline' },
+    });
+    child.on('error', reject);
+    child.on('close', code => code === 0 ? resolve() : reject(new Error('exit ' + code)));
+  });
+  try {
+    await run(); await run();
+    assert.equal(JSON.parse(readFileSync(path.join(dir, 'state.json'))).failures, 2);
+    await run();
+    const events = readFileSync(path.join(dir, 'events.jsonl'), 'utf8');
+    assert.match(events, /"reason":"wan_probe_unavailable"/);
+    assert.match(events, /tunnel_guard_would_restart/);
+  } finally {
+    await new Promise(resolve => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

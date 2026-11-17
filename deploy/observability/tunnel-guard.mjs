@@ -66,15 +66,16 @@ if (connections > 0) {
   process.exit(0);
 }
 state.outageSince ||= new Date(now).toISOString();
-// A local-only signal must not trigger restarts while the machine has no WAN.
-const internet = process.env.SYNREX_TUNNEL_GUARD_TEST_WAN === 'online' && dryRun
-  ? { code: 200 } : await fetchStatus('https://api.cloudflare.com', true);
-if (!internet) {
-  state.failures = 0; save(state);
-  emit('tunnel_guard_degraded', { reason: 'wan_unreachable' });
-  process.exit(0);
-}
+// Generic HTTPS can fail under Fake-IP/VPN policies while Tunnel QUIC works.
+// It is a diagnostic signal, not a permanent veto on bounded recovery.
+const testWan = dryRun ? process.env.SYNREX_TUNNEL_GUARD_TEST_WAN : undefined;
+const internet = testWan === 'online' ? { code: 200 }
+  : testWan === 'offline' ? null
+    : await fetchStatus('https://api.cloudflare.com', true);
 state.failures += 1;
+if (!internet) {
+  emit('tunnel_guard_degraded', { reason: 'wan_probe_unavailable', failures: state.failures });
+}
 if (state.failures < 3) {
   save(state); emit('tunnel_guard_failure', { failures: state.failures, connections });
   process.exit(0);
@@ -93,8 +94,12 @@ state.restarts.push(now);
 state.failures = 0;
 save(state);
 try {
-  execFileSync('systemctl', ['--user', 'restart', 'cloudflared-devspace.service'], { timeout: 20000, stdio: 'ignore' });
-  emit('tunnel_guard_restart', { reason: 'zero_connections_after_three_checks' });
+  // Do not block the watchdog behind cloudflared's slow SIGTERM stop timeout.
+  // The next sample, not this call, proves the tunnel actually recovered.
+  execFileSync('systemctl', ['--user', 'restart', '--no-block', 'cloudflared-devspace.service'],
+    { timeout: 5000, stdio: 'ignore' });
+  emit('tunnel_guard_restart', { reason: 'zero_connections_after_three_checks', requested: true,
+    wanProbeAvailable: !!internet });
 } catch {
   emit('tunnel_guard_restart_failed');
 }
