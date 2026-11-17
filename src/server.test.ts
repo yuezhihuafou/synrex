@@ -38,6 +38,10 @@ test("MCP initialization identifies Synrex and preserves the coding tool surface
   assert.match(server?.description ?? "", /self-hosted, GPT-first coding and execution harness/);
   const tools = await context.client.listTools();
   assert.ok(tools.tools.some((tool) => tool.name === "open_workspace"));
+  assert.match(server?.description ?? "", /only when the user explicitly chooses Synrex/);
+  assert.match(context.client.getInstructions() ?? "", /Synrex is opt-in/);
+  assert.doesNotMatch(context.client.getInstructions() ?? "", /Use Synrex for coding work/);
+  assert.match(tools.tools.find((tool) => tool.name === "open_workspace")?.description ?? "", /Only if the user explicitly selected Synrex/);
 });
 
 test("real MCP initialize delivers the goal-completion rule in both tool modes", async (t) => {

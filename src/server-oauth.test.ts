@@ -11,6 +11,94 @@ import { SqliteOAuthStore } from "./oauth-store.js";
 import { createServer } from "./server.js";
 import { writeTestDevspaceConfig } from "./test-support/config.test.js";
 
+test("Codex OAuth clients are denied before dispatch; explicit owner override allows them", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-codex-optin-"));
+  const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
+    server: { publicBaseUrl: "https://owner.example.test" },
+    storage: { stateDir: join(root, "state") },
+    workspaces: { allowedRoots: [root] },
+    logging: { level: "silent" },
+  }));
+  const store = new SqliteOAuthStore(config.stateDir);
+  const codex = store.registerClient({
+    client_name: "Codex Desktop", redirect_uris: ["https://chatgpt.com/connector_platform_oauth_redirect"],
+  }, config.oauth.allowedRedirectHosts);
+  const chatgpt = store.registerClient({
+    client_name: "ChatGPT", redirect_uris: ["https://chatgpt.com/connector_platform_oauth_redirect"],
+  }, config.oauth.allowedRedirectHosts);
+  const resource = "https://owner.example.test/mcp";
+  for (const [client, token] of [[codex, "codex-test-token"], [chatgpt, "chatgpt-test-token"]] as const) {
+    store.saveAccessToken(createHash("sha256").update(token).digest("base64url"), {
+      clientId: client.client_id, scopes: ["devspace"], resource,
+      expiresAt: Math.floor(Date.now() / 1000) + 3600,
+    });
+  }
+  store.close();
+
+  const running = createServer(config);
+  const listener = running.app.listen(0, "127.0.0.1");
+  t.after(async () => {
+    await running.close();
+    listener.closeAllConnections();
+    await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  await once(listener, "listening");
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const call = async (token: string, method: string, userAgent = "test-client", clientInfo = "ChatGPT") => {
+    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        "User-Agent": userAgent,
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0", id: 1, method,
+        params: method === "initialize"
+          ? { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: clientInfo, version: "1.0" } }
+          : {},
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    return { status: response.status, body: await response.text() };
+  };
+  const blockedInit = await call("codex-test-token", "initialize");
+  assert.equal(blockedInit.status, 403, blockedInit.body);
+  assert.match(blockedInit.body, /Codex clients cannot use Synrex/);
+  const blockedWithoutInit = await call("codex-test-token", "tools/list");
+  assert.equal(blockedWithoutInit.status, 403, blockedWithoutInit.body);
+  const blockedAgent = await call("chatgpt-test-token", "tools/list", "openai-codex/1.0");
+  assert.equal(blockedAgent.status, 403, blockedAgent.body);
+  const blockedInitialize = await call("chatgpt-test-token", "initialize", "test-client", "Codex CLI");
+  assert.equal(blockedInitialize.status, 403, blockedInitialize.body);
+  const allowedChatgpt = await call("chatgpt-test-token", "initialize");
+  assert.equal(allowedChatgpt.status, 200, allowedChatgpt.body);
+  assert.match(allowedChatgpt.body, /"serverInfo"/);
+  const optIn = createServer({ ...config, allowCodexMcpClients: true });
+  const optInListener = optIn.app.listen(0, "127.0.0.1");
+  t.after(async () => {
+    await optIn.close();
+    optInListener.closeAllConnections();
+    await new Promise<void>((resolve, reject) => optInListener.close((error) => error ? reject(error) : resolve()));
+  });
+  await once(optInListener, "listening");
+  const optInAddress = optInListener.address();
+  assert.ok(optInAddress && typeof optInAddress !== "string");
+  const override = await fetch(`http://127.0.0.1:${optInAddress.port}/mcp`, {
+    method: "POST", headers: {
+      Authorization: "Bearer codex-test-token", "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "Codex CLI", version: "1.0" } } }),
+    signal: AbortSignal.timeout(5000),
+  });
+  assert.equal(override.status, 200, await override.text());
+});
+
 test("HTTP MCP enforces canonical and exact alias bearer resources", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "devspace-http-oauth-"));
   const canonical = "https://agent.example.com/mcp";

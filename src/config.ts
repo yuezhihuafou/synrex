@@ -11,6 +11,7 @@ export type { ToolMode } from "./config-schema.js";
 
 export interface ServerConfig {
   configDir: string;
+  allowCodexMcpClients: boolean;
   host: string;
   port: number;
   oauth: OAuthConfig;
@@ -77,6 +78,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
 
   return {
     configDir: files.dir,
+    // An owner must deliberately enable Codex-originated MCP clients.
+    // This defaults to false for every node and every installation.
+    allowCodexMcpClients: env.DEVSPACE_ALLOW_CODEX_MCP_CLIENTS === "1",
     host,
     port,
     oauth: {

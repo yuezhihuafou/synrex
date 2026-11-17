@@ -121,6 +121,10 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
   private readonly resourceServerUrl: URL;
   private readonly allowedResourceUrls: Set<string>;
 
+  registeredClientName(clientId: string): string | undefined {
+    return this.oauthStore.getClient(clientId)?.client_name;
+  }
+
   constructor(
     private readonly config: OAuthConfig,
     resourceServerUrl: URL,

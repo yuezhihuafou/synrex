@@ -69,6 +69,7 @@ import { CompletionMailbox, appendMailboxEvents, mailboxScope } from "./completi
 import { shutdownHttpServer } from "./server-shutdown.js";
 import { formatPathForPrompt } from "./skills.js";
 import { DEVSPACE_VERSION } from "./version.js";
+import { isCodexMcpClient, SYNREX_EXPLICIT_SELECTION_RULE } from "./mcp-client-policy.js";
 import { createWorkspaceStore } from "./workspace-store.js";
 import { withCodingWorkflowStore } from "./coding-workflows.js";
 import { registerCodingWorkflowTools } from "./coding-workflow-tools.js";
@@ -131,7 +132,7 @@ function mcpServerInfo() {
     title: "Synrex",
     version: DEVSPACE_VERSION,
     description:
-      "Synrex is a self-hosted, GPT-first coding and execution harness. Read and edit project code, run builds and tests, inspect changes, resume durable tasks, and work across authorized hosts with project architecture safeguards. GPT leads reasoning; Synrex executes and records verifiable results.",
+      "Synrex is a self-hosted, GPT-first coding and execution harness, available only when the user explicitly chooses Synrex for the current task. Do not substitute it for Codex or generic coding tools. Read and edit code, test, and execute across authorized hosts once selected.",
   };
 }
 
@@ -187,7 +188,7 @@ function serverInstructions(
     ? `When ${toolNames.openWorkspace} returns available skills and a task matches a skill, use ${toolNames.read} to read that skill's path before proceeding. Skill paths may be outside the workspace, and ${toolNames.read} permits files within advertised skill directories. `
     : "";
   const agents = `Follow instructions returned by ${toolNames.openWorkspace}. Before working under a path listed in availableAgentsFiles, use ${toolNames.read} to inspect that instruction file and follow it. `;
-  const common = `Use Synrex for coding work. Call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, selecting a different execution node, or when the current workspaceId is rejected.`;
+  const common = `${SYNREX_EXPLICIT_SELECTION_RULE}Once selected, call ${toolNames.openWorkspace} once for each project folder or isolated worktree, then keep using its workspaceId. During continued work in the same project or worktree, do not call ${toolNames.openWorkspace} again. Open another workspace only when changing projects, switching checkout/worktree mode, creating another isolated worktree, selecting a different execution node, or when the current workspaceId is rejected.`;
   const placement = " In multi-node mode, normally omit the open_workspace node selector and let Synrex resolve placement. Never guess a node. Set node only when the user explicitly identifies a host or Synrex reports an ambiguity with candidate nodes; required placement rules cannot be overridden by the model.";
   const intelligence = " Use project for relevant architecture changes or verified local experience, not for repetitive approval of ordinary reads/edits. Do not run the same project check without new evidence.";
   const workflows = " For complex multi-file repair, deployment, repeated diagnose/fix/test, or work likely to span replies, call workflow_open ONCE with the original user goal and specific acceptance criteria before substantial changes. The selected workflow then collects ordinary tool evidence automatically; do not call workflow_checkpoint after every command. Simple lookups, single-file fixes and short commands retain their direct path. Continue the next executable step in this GPT reply until the original acceptance is verified or a concrete blocker exists; a test/checkpoint is not the whole outcome. Batch independent reads, prefer task_wait to repeated task_get polling, and perform focused then final checks. Keep GPT responsible for decisions; deterministic execution needs no repeated model confirmations. On recovery use explicit workflowId and verify live Git/process/task evidence before any uncertain write. Synrex cannot resume GPT reasoning after a host turn ends.";
@@ -460,7 +461,7 @@ function registerMcpSurface(
     {
       title: "Open workspace",
       description:
-        "Open a project checkout or isolated worktree. Reuse an existing workspaceId for continued work.",
+        "Only if the user explicitly selected Synrex: open a project checkout or isolated worktree. Do not use as a fallback for Codex or generic coding. Reuse the workspaceId for continued work.",
       inputSchema: {
         path: z
           .string()
@@ -1481,6 +1482,28 @@ export function createServer(
           ...requestLogFields(req, config),
         });
         sendJsonRpcError(res, 401, -32001, "Unauthorized");
+        return;
+      }
+
+      // Enforce the Codex-client default at the coordinator HTTP ingress,
+      // before tool registration/dispatch (including remote peer routing).
+      // No prompt or machine-local AGENTS.md can enforce this boundary.
+      if (!config.allowCodexMcpClients && isCodexMcpClient({
+        registeredName: req.auth.clientId
+          ? oauthProvider.registeredClientName(req.auth.clientId)
+          : undefined,
+        userAgent: req.header("user-agent"),
+        initializeClientName: req.body?.method === "initialize"
+          ? req.body?.params?.clientInfo?.name
+          : undefined,
+      })) {
+        logEvent(config.logging, "warn", "mcp_client_denied", {
+          requestId,
+          method: req.method,
+          reason: "codex_client_requires_owner_opt_in",
+        });
+        sendJsonRpcError(res, 403, -32003,
+          "Codex clients cannot use Synrex by default. The owner must explicitly enable DEVSPACE_ALLOW_CODEX_MCP_CLIENTS=1 on the Synrex coordinator.");
         return;
       }
 
