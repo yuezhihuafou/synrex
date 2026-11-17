@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat, mkdir, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +11,11 @@ test("coding workflow survives store re-open, records evidence and rejects stale
   t.after(() => rm(root, { recursive: true, force: true }));
   const project = join(root, "project");
   const state = join(root, "state");
+  await mkdir(project);
+  execFileSync("git", ["init", "-q", project]);
+  await writeFile(join(project, "package.json"), "{}\n");
+  execFileSync("git", ["-C", project, "add", "."]);
+  execFileSync("git", ["-C", project, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "baseline"]);
   const first = new CodingWorkflowStore(state);
   const created = first.create(project, {
     title: "Long code change",
@@ -81,6 +87,7 @@ test("coding workflow survives store re-open, records evidence and rejects stale
   const verification = store.observe(project, created.workflowId, {
     eventKey: "run:test-001", kind: "verification", status: "completed",
     runId: "run_test001", exitCode: 0,
+    command: "pnpm exec tsx --test src/recovery.test.ts", source: "exec_command", verificationScope: [],
   });
   assert.equal(store.observe(project, created.workflowId, {
     eventKey: "run:test-001", kind: "verification", status: "working", runId: "run_test001",

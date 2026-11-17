@@ -120,18 +120,18 @@ export function registerCodingWorkflowTools(input: {
       if (record.workspaceId && record.workspaceId !== id) throw new Error("Workflow workspace session mismatch");
       return { record, id, root: workspace.root };
     });
+    const continuity = withCodingWorkflowStore(stateDir, store =>
+      assessGoal(result.record, store.evidence(result.record.workflowId, result.root)));
     const handoff = requestedId ? buildCodingWorkflowHandoff({
       workflow: result.record, workspaceId: result.id, workspaceRoot: result.root,
-      liveGit: gitSnapshot(result.root), agentEvidence: [],
+      liveGit: gitSnapshot(result.root), agentEvidence: [], continuity,
     }) : undefined;
     const scope = conversationScopeIdFromRequestMeta(extra?._meta);
     if (scope && result.record.status !== "completed" && result.record.status !== "cancelled") {
       withCodingWorkflowStore(stateDir, store => store.bind(result.record.workflowId, result.root, result.id, scope));
     }
-    const continuity = withCodingWorkflowStore(stateDir, store =>
-      assessGoal(result.record, store.evidence(result.record.workflowId, result.root)));
     return {
-      content: [textBlock(workflowHandoffText(result.record, handoff?.checkpointGitMatchesCurrent ?? null)
+      content: [textBlock(workflowHandoffText(result.record, handoff?.checkpointGitMatchesCurrent ?? null, continuity)
         + "\n" + continuityHint(result.record, continuity))],
       structuredContent: {
         ...result.record, workspaceId: result.id, continuity,
@@ -161,6 +161,8 @@ export function registerCodingWorkflowTools(input: {
     // takeover show a separate, fresh read of the actual local Git state so a
     // new conversation cannot mistake a stale summary for current checkout.
     const workflow = "workflow" in result ? result.workflow : undefined;
+    const goal = workflow ? withCodingWorkflowStore(stateDir, store =>
+      assessGoal(workflow, store.evidence(workflow.workflowId, workspace.root))) : undefined;
     const handoff = workflow ? (() => {
       const liveGit = gitSnapshot(workspace.root);
       const checkpoint = workflow.checkpoint;
@@ -187,7 +189,7 @@ export function registerCodingWorkflowTools(input: {
         } finally { agentStore.close(); }
       }
       return buildCodingWorkflowHandoff({
-        workflow, workspaceId, workspaceRoot: workspace.root, liveGit, agentEvidence,
+        workflow, workspaceId, workspaceRoot: workspace.root, liveGit, agentEvidence, continuity: goal,
       });
     })() : undefined;
     const memoryContext = requestedId && includeMemory
@@ -202,11 +204,9 @@ export function registerCodingWorkflowTools(input: {
         }))
         : { status: "ambiguous" as const, reason: "Explicit memoryProject required." }
       : undefined;
-    const goal = workflow ? withCodingWorkflowStore(stateDir, store =>
-      assessGoal(workflow, store.evidence(workflow.workflowId, workspace.root))) : undefined;
     return {
       content: [textBlock(handoff && workflow
-        ? workflowHandoffText(workflow, handoff.checkpointGitMatchesCurrent)
+        ? workflowHandoffText(workflow, handoff.checkpointGitMatchesCurrent, goal)
           + (goal ? "\n" + continuityHint(workflow, goal) : "")
         : ("workflows" in result ? result.workflows?.map(w=>`${w.workflowId} ${w.status} rev=${w.revision}: ${w.goal.slice(0, 100)}; next=${(w.checkpoint.nextSteps[0]??"inspect original goal").slice(0, 100)}; tasks=${w.checkpoint.taskIds.slice(0,3).join(",")}`).join("\n") || "No unfinished workflows." : JSON.stringify(result)))],
       structuredContent: {

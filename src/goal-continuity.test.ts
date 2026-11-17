@@ -1,15 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CodingWorkflowStore } from "./coding-workflows.js";
 import { assessGoal } from "./goal-continuity.js";
 import { verificationCommand, withWorkflowReceipt } from "./goal-continuity-runtime.js";
 
+function initGit(root: string): void {
+  mkdirSync(root, { recursive: true });
+  execFileSync("git", ["init", "-q", root]);
+  writeFileSync(join(root, "package.json"), "{}\n");
+  execFileSync("git", ["-C", root, "add", "."]);
+  execFileSync("git", ["-C", root, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "baseline"]);
+}
+
 test("goal is not satisfied by a successful operation or self-reported checks", () => {
   const state = mkdtempSync(join(tmpdir(), "synrex-goal-"));
   const root = join(state, "work");
+  initGit(root);
   const store = new CodingWorkflowStore(state);
   try {
     const wf = store.create(root, {
@@ -38,6 +48,7 @@ test("goal is not satisfied by a successful operation or self-reported checks", 
       observation: {
         eventKey: "run:check", kind: "verification", status: "completed",
         runId: "run_check", exitCode: 0,
+        command: "pnpm test", source: "exec_command", verificationScope: [],
       },
     }, { content: [{ type: "text", text: "exit=0" }], structuredContent: { exitCode: 0 } });
     const fields = receipt.structuredContent as Record<string, unknown>;
@@ -68,6 +79,7 @@ test("verification command recognition rejects shell control operators", () => {
 test("an unfinished run, a failed test, and a self-reported pass never satisfy acceptance", () => {
   const state = mkdtempSync(join(tmpdir(), "synrex-pending-"));
   const root = join(state, "project");
+  initGit(root);
   const store = new CodingWorkflowStore(state);
   try {
     const wf = store.create(root, {

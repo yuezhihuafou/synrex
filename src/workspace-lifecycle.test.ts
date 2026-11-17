@@ -48,14 +48,15 @@ test("lifecycle GC protects unknown/unfinished work, leases, dirty files; safely
 
   const workflows = new CodingWorkflowStore(stateDir);
   const workflow = workflows.create(tree, {
-    title: "safe lifecycle", goal: "finish test", acceptanceCriteria: ["verified"],
+    title: "safe lifecycle", goal: "finish test", acceptanceCriteria: ["test passes"],
     constraints: [], workspaceId: id,
   });
   assert.equal(listWorktreeLifecycle(stateDir)[0]?.reason, "unfinished_workflow");
   assert.deepEqual((await preview()).wouldRemove, []);
   const verification = workflows.observe(tree, workflow.workflowId, {
     eventKey: "fixture:lifecycle-verification", kind: "verification",
-    status: "completed", exitCode: 0,
+    status: "completed", exitCode: 0, command: "pnpm test",
+    source: "exec_command", verificationScope: [],
   });
   const finished = workflows.checkpoint(tree, {
     workflowId: workflow.workflowId, expectedRevision: 0, status: "completed",

@@ -65,12 +65,13 @@ test("worktrees prune removes only managed worktrees unused for three days", asy
   const workflows = new CodingWorkflowStore(stateDir);
   const completed = workflows.create(oldWorktree, {
     title: "Verified old worktree", goal: "Finish isolated fixture",
-    acceptanceCriteria: ["check"], constraints: [], workspaceId: "ws_old",
+    acceptanceCriteria: ["test passes"], constraints: [], workspaceId: "ws_old",
   });
   // The clean-up fixture must use the same evidence-backed finish gate as production.
   const verified = workflows.observe(oldWorktree, completed.workflowId, {
     eventKey: "fixture:worktree-check", kind: "verification",
-    status: "completed", exitCode: 0,
+    status: "completed", exitCode: 0, command: "pnpm test",
+    source: "exec_command", verificationScope: [],
   });
   workflows.checkpoint(oldWorktree, {
     workflowId: completed.workflowId, expectedRevision: 0, status: "completed",

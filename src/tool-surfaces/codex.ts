@@ -13,7 +13,7 @@ import { LearningStore } from "../learning-store.js";
 import type { DurableTaskView } from "../durable-task-model.js";
 import type { ProcessSnapshot, ProcessStatusSnapshot } from "../process-sessions.js";
 import { conversationScopeIdFromRequestMeta } from "../request-meta.js";
-import { verificationCommand, withWorkflowReceipt } from "../goal-continuity-runtime.js";
+import { verificationCommand, verificationScope, withWorkflowReceipt } from "../goal-continuity-runtime.js";
 import {
   EDIT_TOOL_ANNOTATIONS,
   SHELL_TOOL_ANNOTATIONS,
@@ -135,6 +135,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
         action: semanticEditActionSchema,
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional(),
         path: z.string().describe("Workspace-relative source file containing the target symbol."),
         symbol: z.string().describe("Target symbol/name-path."),
         newName: z.string().optional().describe("New symbol name for rename."),
@@ -142,7 +143,7 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       },
       annotations: EDIT_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, action, path: relativePath, symbol, newName, body }) => {
+    async ({ workspaceId, workflowId, action, path: relativePath, symbol, newName, body }, extra) => {
       const startedAt = performance.now();
       if (!semantic?.available) {
         throw new Error("Semantic code editing is unavailable on this host. Install/configure Serena; the tool remains registered so the MCP schema stays stable across restarts.");
@@ -173,10 +174,18 @@ function registerSemanticTools(context: ToolRegistrationContext): void {
       }
       const response = await semantic.call(workspace.root, tool, args);
       logToolCall(config, { tool: "semantic_edit", workspaceId, path: relativePath, success: true, durationMs: Math.round(performance.now() - startedAt) });
-      return {
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
+        conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        observation: {
+          eventKey: `semantic:${action}:${relativePath}:${Date.now()}`,
+          kind: "edit", status: "completed", source: "semantic_edit",
+        },
+      }, {
         content: [textBlock(response.result)],
         structuredContent: { result: response.result, action, truncated: response.truncated, backendAgeMs: response.backendAgeMs },
-      };
+      });
     },
   );
 }
@@ -363,10 +372,11 @@ function registerApplyPatchTool(context: ToolRegistrationContext): void {
       const workspace = await workspaces.getWorkspace(workspaceId);
       return withWorkflowReceipt({
         stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId,
+        enabled: config.taskContinuity?.enabled,
         workflowId, conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
         observation: {
           eventKey: "patch:" + createHash("sha256").update(patch).digest("hex"),
-          kind: "edit", status: "completed",
+          kind: "edit", status: "completed", source: "apply_patch",
         },
       }, response);
     },
@@ -466,24 +476,30 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         });
         return withWorkflowReceipt({
           stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+          enabled: config.taskContinuity?.enabled,
           conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
           observation: {
             eventKey: "run:" + snapshot.runId,
             kind: verificationCommand(cmd) ? "verification" : "command",
             status: snapshot.running ? "working"
               : snapshot.exitCode === 0 ? "completed" : "failed",
-            runId: snapshot.runId, taskId: snapshot.taskId, exitCode: snapshot.exitCode,
+            command: cmd, source: "exec_command", verificationScope: verificationScope(cmd, workingDirectory),
+            workingDirectory: workingDirectory ?? ".", workspaceId, nodeAlias: config.node.alias ?? undefined,
+            runId: snapshot.runId, taskId: snapshot.taskId, sessionId: snapshot.sessionId, exitCode: snapshot.exitCode,
           },
         }, processToolResponse(snapshot, task));
       }
       return withWorkflowReceipt({
         stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
         conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
         observation: {
           eventKey: "run:" + snapshot.runId,
           kind: verificationCommand(cmd) ? "verification" : "command",
           status: snapshot.running ? "working" : snapshot.exitCode === 0 ? "completed" : "failed",
-          runId: snapshot.runId, exitCode: snapshot.exitCode,
+          command: cmd, source: "exec_command", verificationScope: verificationScope(cmd, workingDirectory),
+          workingDirectory: workingDirectory ?? ".", workspaceId, nodeAlias: config.node.alias ?? undefined,
+          runId: snapshot.runId, sessionId: snapshot.sessionId, exitCode: snapshot.exitCode,
         },
       }, processToolResponse(snapshot));
     },
@@ -520,13 +536,15 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       }
       return withWorkflowReceipt({
         stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
         conversationScope: conversationScopeId,
         observation: {
           eventKey: "run:" + view.runId, kind: "command",
-          status: view.status === "working" || view.status === "input_required" ? "working"
+          status: view.status === "working" ? "running" : view.status === "input_required" ? "input_required"
             : view.status === "completed" && view.result?.exitCode === 0 && !view.result?.isError
               ? "completed" : view.status === "completed" || view.status === "failed"
-                || view.status === "cancelled" ? "failed" : "unknown",
+                ? "failed" : view.status === "cancelled" ? "cancelled" : "unknown",
+          source: "task_receipt",
           runId: view.runId, taskId: view.taskId, exitCode: view.result?.exitCode ?? undefined,
         },
       }, taskViewResponse(view, { detail, unchanged }));
@@ -554,13 +572,15 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       const view = await durableTasks.get(workspace.root, taskId, { acknowledge: false });
       return withWorkflowReceipt({
         stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
         conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
         observation: {
           eventKey: "run:" + view.runId, kind: "command",
-          status: view.status === "working" || view.status === "input_required" ? "working"
+          status: view.status === "working" ? "running" : view.status === "input_required" ? "input_required"
             : view.status === "completed" && view.result?.exitCode === 0 && !view.result?.isError
               ? "completed" : view.status === "completed" || view.status === "failed"
-                || view.status === "cancelled" ? "failed" : "unknown",
+                ? "failed" : view.status === "cancelled" ? "cancelled" : "unknown",
+          source: "task_receipt",
           runId: view.runId, taskId: view.taskId, exitCode: view.result?.exitCode ?? undefined,
         },
       }, response);
@@ -596,16 +616,37 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       description: "Cancel a durable task.",
       inputSchema: {
         workspaceId: z.string().describe(workspaceIdDescription),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional(),
         taskId: z.string().describe("Stable task identifier returned by exec_command."),
       },
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, taskId }) => {
+    async ({ workspaceId, workflowId, taskId }, extra) => {
       if (!durableTasks?.available) throw new Error("Durable tasks are unavailable in this build.");
       const workspace = await workspaces.getWorkspace(workspaceId);
       await durableTasks.cancel(workspace.root, taskId);
       const result = `Cancellation requested for ${taskId}.`;
-      return { content: [textBlock(result)], structuredContent: { result } };
+      // Cancellation requested != cancelled. Observe the actual receipt if
+      // available, otherwise retain the original running event until task_get.
+      let view: Awaited<ReturnType<NonNullable<typeof durableTasks>["get"]>> | undefined;
+      try { view = await durableTasks.get(workspace.root, taskId, { acknowledge: false }); }
+      catch { /* The cancellation request itself has already succeeded. */ }
+      const response = { content: [textBlock(result)], structuredContent: { result } };
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
+        conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        ...(view ? { observation: {
+          eventKey: "run:" + view.runId,
+          kind: "command" as const, source: "task_receipt" as const,
+          runId: view.runId, taskId: view.taskId,
+          status: view.status === "cancelled" ? "cancelled" as const
+            : view.status === "completed" && view.result?.exitCode === 0 ? "completed" as const
+              : view.status === "failed" ? "failed" as const
+                : view.status === "input_required" ? "input_required" as const : "running" as const,
+          exitCode: view.result?.exitCode ?? undefined,
+        } } : {}),
+      }, response);
     },
   );
 
@@ -617,11 +658,12 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         "Check a process session immediately without consuming buffered output. Use only when exec_command returned sessionId.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional(),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
       },
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, sessionId }) => {
+    async ({ workspaceId, workflowId, sessionId }, extra) => {
       const startedAt = performance.now();
       const status = await runLoggedToolOperation(
         config,
@@ -643,7 +685,19 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       ];
       if (status.logError) result.push(`warning=full local log persistence failed: ${status.logError}`);
       const resultText = result.join("\n");
-      return {
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
+        conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        observation: {
+          eventKey: "run:" + status.runId,
+          kind: "command", source: "process_receipt", runId: status.runId, sessionId: status.sessionId,
+          status: status.running ? "running" : status.exitCode === 0 ? "completed"
+            : status.exitCode !== undefined || status.signal ? "failed" : "unknown",
+          exitCode: status.exitCode,
+        },
+      }, {
         content: [textBlock(resultText)],
         structuredContent: {
           result: resultText,
@@ -658,7 +712,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           ...(status.running ? { nextPollMs } : {}),
           ...(status.logError ? { logError: status.logError } : {}),
         },
-      };
+      });
     },
   );
 
@@ -670,6 +724,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
         "Send input/Ctrl-C, resize, or poll a TTY sessionId from exec_command. Never use sessionId=0 for tasks; use task_get or exec_command 'devspace-task get <taskId>'.",
       inputSchema: {
         workspaceId: z.string().describe("Workspace identifier used to start the process."),
+        workflowId: z.string().regex(/^wf_[a-f0-9]{24}$/).optional(),
         sessionId: z.number().describe("Process session identifier returned by exec_command."),
         chars: z.string().optional().describe("Characters to write. Omit or pass an empty string to poll."),
         columns: z.number().int().min(1).max(1_000).optional().describe("Resize a PTY to this width."),
@@ -677,7 +732,7 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
       },
       annotations: SHELL_TOOL_ANNOTATIONS,
     },
-    async ({ workspaceId, sessionId, chars, columns, rows }) => {
+    async ({ workspaceId, workflowId, sessionId, chars, columns, rows }, extra) => {
       const startedAt = performance.now();
       const snapshot = await runLoggedToolOperation(
         config,
@@ -696,7 +751,19 @@ function registerCodexProcessTools(context: ToolRegistrationContext): void {
           });
         },
       );
-      return processToolResponse(snapshot);
+      const workspace = await workspaces.getWorkspace(workspaceId);
+      return withWorkflowReceipt({
+        stateDir: config.stateDir, workspaceRoot: workspace.root, workspaceId, workflowId,
+        enabled: config.taskContinuity?.enabled,
+        conversationScope: conversationScopeIdFromRequestMeta(extra?._meta),
+        observation: {
+          eventKey: "run:" + snapshot.runId,
+          kind: "command", source: "process_receipt", runId: snapshot.runId, sessionId: snapshot.sessionId,
+          status: snapshot.running ? "running" : snapshot.exitCode === 0 ? "completed"
+            : snapshot.exitCode !== undefined || snapshot.signal ? "failed" : "unknown",
+          exitCode: snapshot.exitCode,
+        },
+      }, processToolResponse(snapshot));
     },
   );
 }

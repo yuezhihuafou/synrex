@@ -42,6 +42,7 @@ export interface ServerConfig {
     nodeToken?: string;
   };
   toolMode: ToolMode;
+  taskContinuity?: { enabled: boolean };
   uiEnabled: boolean;
   stateDir: string;
   metadataRetentionDays: number;
@@ -98,6 +99,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       nodeToken: env.DEVSPACE_NODE_TOKEN ?? files.auth.nodeToken,
     },
     toolMode: stored.tools.mode,
+    taskContinuity: stored.taskContinuity,
     uiEnabled: stored.ui.enabled,
     stateDir: normalizePath(stored.storage.stateDir),
     metadataRetentionDays: stored.storage.metadataRetentionDays,

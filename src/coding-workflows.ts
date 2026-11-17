@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { dirname, relative, resolve, join } from "node:path";
 import Database from "better-sqlite3";
 import { assessGoal } from "./goal-continuity.js";
 
@@ -26,11 +27,77 @@ export interface WorkflowExecutionEvidence {
   eventId: string;
   workflowId: string;
   kind: "command" | "verification" | "edit";
-  status: "working" | "completed" | "failed" | "unknown";
+  status: "working" | "running" | "input_required" | "completed" | "failed" | "cancelled" | "unknown";
   runId?: string;
   taskId?: string;
+  sessionId?: number;
   exitCode?: number;
+  command?: string;
+  workingDirectory?: string;
+  workspaceId?: string;
+  nodeAlias?: string;
+  source?: "exec_command" | "task_receipt" | "process_receipt" | "apply_patch" | "semantic_edit";
+  verificationScope?: string[];
+  fingerprint?: string;
+  stale?: boolean;
   observedAt: string;
+}
+
+/** Hash the actual Git contents in scope (committed tree, dirty diff and untracked files).
+ * Unlike HEAD/status alone this detects a second edit to an already-dirty file.
+ * A scoped test does not expire when an unrelated file outside its scope changes.
+ */
+export function verificationFingerprint(root: string, scope: readonly string[]): string | undefined {
+  const selected = scope.length ? scope : ["src", "test", "tests", "package.json", "pnpm-lock.yaml", "tsconfig.json"];
+  const paths = [...selected];
+  if (paths.length > 32 || paths.some(p => p.startsWith("/") || p.split("/").includes(".."))) return undefined;
+  // Expand the targeted test/implementation files through relative imports.
+  // This catches changes to shared helpers without invalidating every test
+  // when an unrelated source file is modified. Unknown/oversized graphs fail
+  // closed instead of incorrectly reusing the verification receipt.
+  if (scope.length) {
+    const seen = new Set(paths);
+    const queue = paths.filter(p => /\.[cm]?[jt]sx?$/.test(p));
+    while (queue.length) {
+      if (seen.size > 128) return undefined;
+      const file = queue.shift()!;
+      const full = join(root, file);
+      if (!existsSync(full)) continue;
+      if (!lstatSync(full).isFile()) return undefined;
+      const source = readFileSync(full);
+      if (source.length > 1024 * 1024) return undefined;
+      const imports = source.toString("utf8").matchAll(/(?:\bfrom\s*|\bimport\s*\(|\brequire\s*\(|\bimport\s*)["'](\.[^"']+)["']/g);
+      for (const match of imports) {
+        const local = match[1]!;
+        const base = relative(root, resolve(dirname(full), local));
+        if (base.startsWith("..") || base.startsWith("/")) return undefined;
+        const candidates = [base.replace(/\.[cm]?js$/, ".ts"), base.replace(/\.[cm]?js$/, ".tsx"),
+          base, `${base}.ts`, `${base}.tsx`, `${base}.js`, join(base, "index.ts")];
+        const target = candidates.find(p => existsSync(join(root, p)) && lstatSync(join(root, p)).isFile());
+        if (!target) return undefined;
+        if (!seen.has(target)) { seen.add(target); paths.push(target); queue.push(target); }
+      }
+    }
+  }
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], {
+    timeout: 3500, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"],
+  });
+  try {
+    const hash = createHash("sha256");
+    for (const bytes of [git("ls-tree", "-r", "-z", "HEAD", "--", ...paths),
+      git("diff", "--binary", "HEAD", "--", ...paths)]) hash.update(bytes);
+    const untracked = git("ls-files", "-z", "--others", "--exclude-standard", "--", ...paths)
+      .toString("utf8").split("\0").filter(Boolean);
+    if (untracked.length > 128) return undefined;
+    for (const file of untracked) {
+      if (!lstatSync(join(root, file)).isFile()) return undefined;
+      hash.update(file);
+      const data = readFileSync(join(root, file));
+      if (data.length > 2 * 1024 * 1024) return undefined;
+      hash.update(data);
+    }
+    return hash.digest("hex");
+  } catch { return undefined; }
 }
 
 export interface CodingWorkflow {
@@ -160,7 +227,15 @@ export class CodingWorkflowStore {
         status text not null,
         run_id text,
         task_id text,
+        session_id integer,
         exit_code integer,
+        command text,
+        working_directory text,
+        workspace_id text,
+        node_alias text,
+        source text,
+        scope_json text,
+        fingerprint text,
         observed_at text not null,
         unique(workflow_id, event_key)
       );
@@ -174,6 +249,14 @@ export class CodingWorkflowStore {
         primary key (workspace_id, conversation_scope)
       );
     `);
+    const evidenceColumns = this.db.pragma("table_info(coding_workflow_evidence)") as Array<{ name: string }>;
+    for (const [column, type] of [["command", "text"], ["source", "text"], ["scope_json", "text"], ["fingerprint", "text"], ["session_id", "integer"], ["working_directory", "text"], ["workspace_id", "text"], ["node_alias", "text"]]) {
+      if (!evidenceColumns.some(c => c.name === column)) {
+        this.db.exec(`alter table coding_workflow_evidence add column ${column} ${type}`);
+      }
+    }
+    this.db.exec(`create index if not exists coding_workflow_evidence_state_idx
+      on coding_workflow_evidence(workflow_id, status)`);
   }
 
   close(): void {
@@ -336,26 +419,75 @@ export class CodingWorkflowStore {
     const row = this.db.prepare(`select workflow_id from coding_workflow_bindings
       where workspace_id=? and conversation_scope=? and expires_at>?`)
       .get(workspaceId, scopeHash, new Date().toISOString()) as { workflow_id: string } | undefined;
-    return row ? this.getRequired(row.workflow_id, root) : undefined;
+    if (!row) return undefined;
+    // Sliding expiry, but do not force a SQLite write on every routine tool call.
+    this.db.prepare(`update coding_workflow_bindings set expires_at=?
+      where workspace_id=? and conversation_scope=? and expires_at<?`)
+      .run(new Date(Date.now() + 12 * 60 * 60_000).toISOString(), workspaceId, scopeHash,
+        new Date(Date.now() + 60 * 60_000).toISOString());
+    return this.getRequired(row.workflow_id, root);
   }
 
-  evidence(workflowId: string, root: string): WorkflowExecutionEvidence[] {
-    this.getRequired(workflowId, root);
-    const rows = this.db.prepare(`select event_id, workflow_id, kind, status, run_id,
-      task_id, exit_code, observed_at from coding_workflow_evidence
-      where workflow_id=? order by rowid desc limit 2000`)
-      .all(workflowId) as Array<{
+  evidence(workflowId: string, root: string, proposedEventIds: readonly string[] = []): WorkflowExecutionEvidence[] {
+    const workflow = this.getRequired(workflowId, root);
+    const refs = [...new Set([
+      ...(workflow.checkpoint.criterionEvidence ?? []).map(c => c.eventId), ...proposedEventIds,
+    ])].slice(0, 80);
+    const columns = `event_id, workflow_id, kind, status, run_id, task_id, session_id, exit_code,
+      command, source, scope_json, fingerprint, working_directory, workspace_id, node_alias, observed_at`;
+    const unresolvedCount = (this.db.prepare(`select count(*) as n from coding_workflow_evidence
+      where workflow_id=? and status in ('working','running','input_required','unknown')`)
+      .get(workflowId) as { n: number }).n;
+    const rows = [
+      ...this.db.prepare(`select ${columns} from coding_workflow_evidence
+        where workflow_id=? order by rowid desc limit 64`).all(workflowId),
+      ...this.db.prepare(`select ${columns} from coding_workflow_evidence
+        where workflow_id=? and status in ('working','running','input_required','unknown')
+        order by rowid desc limit 256`).all(workflowId),
+      ...(refs.length ? this.db.prepare(`select ${columns} from coding_workflow_evidence
+        where workflow_id=? and event_id in (${refs.map(() => "?").join(",")})`)
+        .all(workflowId, ...refs) : []),
+    ] as Array<{
         event_id: string; workflow_id: string; kind: WorkflowExecutionEvidence["kind"];
         status: WorkflowExecutionEvidence["status"]; run_id: string | null;
-        task_id: string | null; exit_code: number | null; observed_at: string;
+        task_id: string | null; session_id: number | null; exit_code: number | null; observed_at: string;
+        command: string | null; source: WorkflowExecutionEvidence["source"] | null;
+        scope_json: string | null; fingerprint: string | null;
+        working_directory: string | null; workspace_id: string | null; node_alias: string | null;
       }>;
-    return rows.reverse().map((row) => ({
+    const unique = new Map(rows.map(row => [row.event_id, row]));
+    const cache = new Map<string, string | undefined>();
+    const claims = new Set(refs);
+    const evidence = [...unique.values()].map((row) => {
+      const scope = row.scope_json ? JSON.parse(row.scope_json) as string[] : undefined;
+      const key = JSON.stringify(scope ?? []);
+      if (row.fingerprint && claims.has(row.event_id) && !cache.has(key)) {
+        cache.set(key, verificationFingerprint(root, scope ?? []));
+      }
+      return ({
       eventId: row.event_id, workflowId: row.workflow_id, kind: row.kind,
-      status: row.status, observedAt: row.observed_at,
+      status: (["working", "running"].includes(row.status)
+        && Date.now() - Date.parse(row.observed_at) > 24 * 60 * 60_000
+        ? "unknown" : row.status), observedAt: row.observed_at,
       ...(row.run_id ? { runId: row.run_id } : {}),
       ...(row.task_id ? { taskId: row.task_id } : {}),
+      ...(row.session_id !== null ? { sessionId: row.session_id } : {}),
       ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
-    }));
+      ...(row.command ? { command: row.command } : {}),
+      ...(row.working_directory ? { workingDirectory: row.working_directory } : {}),
+      ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+      ...(row.node_alias ? { nodeAlias: row.node_alias } : {}),
+      ...(row.source ? { source: row.source } : {}),
+      ...(scope ? { verificationScope: scope } : {}),
+      ...(row.fingerprint ? { fingerprint: row.fingerprint,
+        ...(claims.has(row.event_id) ? { stale: cache.get(key) !== row.fingerprint } : {}) } : {}),
+    });
+    });
+    if (unresolvedCount > 256) evidence.push({
+      eventId: "unresolved-overflow", workflowId, kind: "command", status: "unknown",
+      runId: `unresolved-overflow-${unresolvedCount}`, observedAt: new Date().toISOString(),
+    });
+    return evidence;
   }
 
   /** Append/upsert observation without incrementing workflow checkpoint revision. */
@@ -365,35 +497,81 @@ export class CodingWorkflowStore {
     status: WorkflowExecutionEvidence["status"];
     runId?: string;
     taskId?: string;
+    sessionId?: number;
     exitCode?: number;
+    command?: string;
+    workingDirectory?: string;
+    workspaceId?: string;
+    nodeAlias?: string;
+    source?: WorkflowExecutionEvidence["source"];
+    verificationScope?: string[];
+    fingerprint?: string;
   }): WorkflowExecutionEvidence {
     this.getRequired(workflowId, root);
     if (!input.eventKey || input.eventKey.length > 250) throw new Error("Invalid evidence key");
     this.db.prepare(`insert into coding_workflow_evidence
-      (event_id, workflow_id, event_key, kind, status, run_id, task_id, exit_code, observed_at)
-      values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (event_id, workflow_id, event_key, kind, status, run_id, task_id, session_id, exit_code,
+       command, source, scope_json, fingerprint, working_directory, workspace_id, node_alias, observed_at)
+      values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       on conflict(workflow_id, event_key) do update set
-        status=case when coding_workflow_evidence.status in ('completed','failed')
+        status=case when coding_workflow_evidence.status in ('completed','failed','cancelled')
           then coding_workflow_evidence.status else excluded.status end,
         task_id=coalesce(excluded.task_id, coding_workflow_evidence.task_id),
+        session_id=coalesce(excluded.session_id, coding_workflow_evidence.session_id),
         exit_code=coalesce(coding_workflow_evidence.exit_code, excluded.exit_code),
+        command=coalesce(coding_workflow_evidence.command, excluded.command),
+        working_directory=coalesce(coding_workflow_evidence.working_directory, excluded.working_directory),
+        workspace_id=coalesce(coding_workflow_evidence.workspace_id, excluded.workspace_id),
+        node_alias=coalesce(coding_workflow_evidence.node_alias, excluded.node_alias),
+        source=coalesce(coding_workflow_evidence.source, excluded.source),
+        scope_json=coalesce(coding_workflow_evidence.scope_json, excluded.scope_json),
+        fingerprint=coalesce(coding_workflow_evidence.fingerprint, excluded.fingerprint),
         observed_at=excluded.observed_at`)
       .run("we_" + randomBytes(12).toString("hex"), workflowId, input.eventKey,
-        input.kind, input.status, input.runId ?? null, input.taskId ?? null,
-        input.exitCode ?? null, new Date().toISOString());
-    const row = this.db.prepare(`select event_id, kind, status, run_id, task_id,
-      exit_code, observed_at from coding_workflow_evidence
+        input.kind, input.status, input.runId ?? null, input.taskId ?? null, input.sessionId ?? null,
+        input.exitCode ?? null, input.command ?? null, input.source ?? null,
+        input.verificationScope ? JSON.stringify(input.verificationScope) : null,
+        input.fingerprint ?? null, input.workingDirectory ?? null, input.workspaceId ?? null,
+        input.nodeAlias ?? null, new Date().toISOString());
+    const row = this.db.prepare(`select event_id, kind, status, run_id, task_id, session_id,
+      exit_code, command, source, scope_json, fingerprint,
+      working_directory, workspace_id, node_alias, observed_at from coding_workflow_evidence
       where workflow_id=? and event_key=?`).get(workflowId, input.eventKey) as {
         event_id: string; kind: WorkflowExecutionEvidence["kind"];
         status: WorkflowExecutionEvidence["status"]; run_id: string | null;
-        task_id: string | null; exit_code: number | null; observed_at: string;
+        task_id: string | null; session_id: number | null; exit_code: number | null; observed_at: string;
+        command: string | null; source: WorkflowExecutionEvidence["source"] | null;
+        scope_json: string | null; fingerprint: string | null;
+        working_directory: string | null; workspace_id: string | null; node_alias: string | null;
       };
+    // Final test receipts may arrive later via task_get/task_wait without a
+    // command. Preserve the original trusted exec_command and scope, then
+    // capture the content fingerprint only after successful completion.
+    if (row.kind === "verification" && row.status === "completed" && row.exit_code === 0
+      && row.source === "exec_command" && row.command && !row.fingerprint) {
+      const scope = row.scope_json ? JSON.parse(row.scope_json) as string[] : [];
+      const fingerprint = verificationFingerprint(root, scope);
+      if (fingerprint) {
+        this.db.prepare(`update coding_workflow_evidence set fingerprint=?
+          where workflow_id=? and event_id=? and fingerprint is null`)
+          .run(fingerprint, workflowId, row.event_id);
+        row.fingerprint = fingerprint;
+      }
+    }
     return {
       eventId: row.event_id, workflowId, kind: row.kind, status: row.status,
       observedAt: row.observed_at,
       ...(row.run_id ? { runId: row.run_id } : {}),
       ...(row.task_id ? { taskId: row.task_id } : {}),
+      ...(row.session_id !== null ? { sessionId: row.session_id } : {}),
       ...(row.exit_code !== null ? { exitCode: row.exit_code } : {}),
+      ...(row.command ? { command: row.command } : {}),
+      ...(row.working_directory ? { workingDirectory: row.working_directory } : {}),
+      ...(row.workspace_id ? { workspaceId: row.workspace_id } : {}),
+      ...(row.node_alias ? { nodeAlias: row.node_alias } : {}),
+      ...(row.source ? { source: row.source } : {}),
+      ...(row.scope_json ? { verificationScope: JSON.parse(row.scope_json) as string[] } : {}),
+      ...(row.fingerprint ? { fingerprint: row.fingerprint } : {}),
     };
   }
 
@@ -428,7 +606,8 @@ export class CodingWorkflowStore {
       if (input.status === "completed") {
         const goal = assessGoal({
           ...current, status: input.status, checkpoint: input.checkpoint,
-        }, this.evidence(input.workflowId, workspaceRoot));
+        }, this.evidence(input.workflowId, workspaceRoot,
+          (input.checkpoint.criterionEvidence ?? []).map(c => c.eventId)));
         if (goal.status !== "satisfied") {
           throw new Error("Goal Finish Gate: acceptance is not independently verified (" + goal.status
             + "); remaining=" + goal.remaining.join("; ") + ", pending=" + goal.pendingTaskIds.join(","));
@@ -445,6 +624,17 @@ export class CodingWorkflowStore {
       this.db.prepare(`insert into coding_workflow_events
         (workflow_id, revision, status, checkpoint_json, created_at) values (?, ?, ?, ?, ?)`)
         .run(input.workflowId, revision, input.status, payload, now);
+      // Keep the recent 512 receipts and all currently referenced acceptance
+      // evidence. Expired, unreferenced terminal observations already have
+      // their primary run logs; they need not grow this auxiliary index forever.
+      const retained = [...new Set((input.checkpoint.criterionEvidence ?? []).map(c => c.eventId))];
+      this.db.prepare(`delete from coding_workflow_evidence
+        where workflow_id=? and status in ('completed','failed','cancelled')
+          and observed_at<? and rowid not in
+            (select rowid from coding_workflow_evidence where workflow_id=? order by rowid desc limit 512)
+          ${retained.length ? `and event_id not in (${retained.map(() => "?").join(",")})` : ""}`)
+        .run(input.workflowId, new Date(Date.now() - 90 * 24 * 60 * 60_000).toISOString(),
+          input.workflowId, ...retained);
       return this.getRequired(input.workflowId, workspaceRoot);
     }).immediate();
   }

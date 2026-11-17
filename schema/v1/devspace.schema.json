@@ -281,6 +281,17 @@
       },
       "additionalProperties": false
     },
+    "taskContinuity": {
+      "default": {},
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
     "ui": {
       "default": {},
       "type": "object",

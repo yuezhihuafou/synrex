@@ -1,4 +1,5 @@
 import type { CodingWorkflow, CodingWorkflowCheckpoint } from "./coding-workflows.js";
+import type { GoalContinuity } from "./goal-continuity.js";
 import type { AgentEvidenceSummary } from "./local-agent-evidence.js";
 
 export interface WorkflowAgentEvidence {
@@ -25,6 +26,9 @@ export interface CodingWorkflowHandoff {
   checks: string[];
   checksAreSelfReported: true;
   taskIdsToInspect: string[];
+  verifiedResults?: Array<{ criterion: number; description: string }>;
+  pendingOperations?: string[];
+  nextExecutableAction?: string;
   agentEvidence: WorkflowAgentEvidence[];
   liveGit: Pick<CodingWorkflowCheckpoint, "gitHead" | "gitStatus">;
   checkpointGitMatchesCurrent: boolean | null;
@@ -37,6 +41,7 @@ export function buildCodingWorkflowHandoff(input: {
   workspaceRoot: string;
   liveGit: Pick<CodingWorkflowCheckpoint, "gitHead" | "gitStatus">;
   agentEvidence?: WorkflowAgentEvidence[];
+  continuity?: GoalContinuity;
 }): CodingWorkflowHandoff {
   const { workflow, liveGit } = input;
   const checkpoint = workflow.checkpoint;
@@ -61,6 +66,14 @@ export function buildCodingWorkflowHandoff(input: {
     checks: checkpoint.checks,
     checksAreSelfReported: true,
     taskIdsToInspect: checkpoint.taskIds,
+    ...(input.continuity ? {
+      verifiedResults: input.continuity.verifiedCriteria.map(criterion => ({
+        criterion, description: workflow.acceptanceCriteria[criterion]!,
+      })),
+      pendingOperations: input.continuity.pendingOperations,
+      nextExecutableAction: input.continuity.nextAction,
+      taskIdsToInspect: [...new Set([...checkpoint.taskIds, ...input.continuity.pendingTaskIds])],
+    } : {}),
     agentEvidence: input.agentEvidence ?? [],
     liveGit,
     checkpointGitMatchesCurrent,

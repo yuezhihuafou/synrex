@@ -137,6 +137,7 @@ export const devspaceConfigSchema = z.object({
   workspaces: workspacesConfigSchema,
   storage: storageConfigSchema,
   tools: toolsConfigSchema,
+  taskContinuity: z.object({ enabled: z.boolean().default(true) }).strict().prefault({}),
   ui: uiConfigSchema,
   artifacts: artifactsConfigSchema,
   skills: skillsConfigSchema,
