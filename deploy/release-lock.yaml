@@ -98,6 +98,9 @@ importers:
       semver:
         specifier: ^7.8.4
         version: 7.8.4
+      undici:
+        specifier: 8.12.4
+        version: 8.12.4
       yaml:
         specifier: ^2.9.0
         version: 2.9.0

@@ -1,0 +1,48 @@
+name: Bug report
+description: Report a reproducible Synrex failure, with redacted diagnostics.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Synrex is self-hosted. Do **not** paste passwords, OAuth credentials,
+        session cookies, private hostnames, or unredacted command logs.
+        For security vulnerabilities, use the process in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Synrex version or source commit
+      placeholder: "v0.4.4 or 40-character commit SHA"
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and Node.js version
+      placeholder: "Ubuntu 24.04 / Node 22.22"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide a minimal, safe reproduction in a disposable repository.
+      placeholder: |
+        1. ...
+        2. ...
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Actual behavior and redacted diagnostics
+      description: Include task/run IDs where useful, but no secrets or private data.
+    validations:
+      required: true

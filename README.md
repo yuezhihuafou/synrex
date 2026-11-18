@@ -8,7 +8,7 @@
 
 Synrex connects conversational AI to real repositories and long-running engineering work over MCP, with durable jobs, inspectable evidence, and optional execution peers.
 
-**[Get started](#install-from-source)** · **[Architecture and scope](docs/PRODUCT_CHARTER.md)** · **[Deployment](docs/platform/SINGLE_OWNER_SELF_HOSTED.md)** · **[Releases](https://github.com/yuezhihuafou/synrex/releases)** · **[Contributing](CONTRIBUTING.md)**
+**[Website](https://yuezhihuafou.github.io/synrex/)** · **[Get the latest release](https://github.com/yuezhihuafou/synrex/releases/latest)** · **[Quickstart](docs/TRY_SYNREX.md)** · **[Architecture and scope](docs/PRODUCT_CHARTER.md)** · **[Deployment](docs/platform/SINGLE_OWNER_SELF_HOSTED.md)** · **[Contributing](CONTRIBUTING.md)**
 
 **[Security reporting](SECURITY.md)** · **[Platform support matrix](docs/platform/SUPPORTED_PLATFORMS.md)** · **[Portable upgrade and rollback](docs/PORTABLE_DEPLOYMENT.md)**
 
@@ -81,8 +81,11 @@ The `v0.4.0` source line closes verified historical feature gaps with
 workspace lifecycle, safe retention and release-aware observability. Check the actual
 GitHub release and live manifest before assuming a source change is shipped.
 Versioning is separate from upstream DevSpace's release numbering.
-The `v0.4.4` candidate improves first-use setup, Windows background startup and connection diagnostics;
-its release archive and availability must be verified from GitHub Releases.
+The published [v0.4.4 release](https://github.com/yuezhihuafou/synrex/releases/tag/v0.4.4)
+improves first-use setup, Windows background startup and connection diagnostics.
+The [latest release page](https://github.com/yuezhihuafou/synrex/releases/latest)
+is authoritative for installation artifacts; a commit on `main` is not by itself
+a production release.
 
 For a reproducible demonstration, use the deliberately failing test fixture in
 [`examples/public-demo`](examples/public-demo) and follow the

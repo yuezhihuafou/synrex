@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Synrex logo">
+  <rect width="64" height="64" rx="14" fill="#0b1117"/>
+  <rect x="9" y="9" width="46" height="46" rx="10" fill="#13251f" stroke="#a4ebd0" stroke-width="3"/>
+  <path d="M17 35 36 18M28 46l19-17" fill="none" stroke="#a4ebd0" stroke-width="6" stroke-linecap="round"/>
+</svg>

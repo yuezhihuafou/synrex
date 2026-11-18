@@ -1,62 +1,156 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Synrex gives ChatGPT durable, inspectable coding and engineering execution on your own machines. Self-hosted and open source.">
-  <meta name="theme-color" content="#10151c">
-  <title>Synrex — Governed execution for AI</title>
-  <style>
-    :root{color-scheme:dark;--bg:#0b1016;--panel:#131c26;--line:#2b3a49;--text:#ecf3fa;--muted:#a2b2c2;--accent:#7fdec4}
-    *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:radial-gradient(ellipse at 70% 0%,#1c3341 0%,var(--bg) 48%);color:var(--text);font:16px/1.6 system-ui,-apple-system,Segoe UI,sans-serif}
-    a{color:inherit}a:focus-visible{outline:2px solid var(--accent);outline-offset:4px} .wrap{width:min(1100px,calc(100% - 44px));margin:auto}
-    nav{display:flex;justify-content:space-between;align-items:center;padding:25px 0;border-bottom:1px solid var(--line)}.brand{font-size:21px;font-weight:750;letter-spacing:-.04em}.brand span{color:var(--accent)}
-    .navlinks{display:flex;gap:25px;font-size:14px;color:var(--muted);align-items:center}.navlinks a{text-decoration:none}.navlinks a:hover{color:var(--text)}.lang{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:5px 10px;cursor:pointer;font:inherit}
-    .hero{padding:103px 0 86px;max-width:880px}.eyebrow{color:var(--accent);font-size:13px;font-weight:700;letter-spacing:.14em;text-transform:uppercase}
-    h1{font-size:clamp(44px,7vw,78px);line-height:1.06;letter-spacing:-.065em;margin:22px 0 26px}h1 em{font-style:normal;color:var(--accent)}
-    .lead{font-size:clamp(19px,2.4vw,23px);color:#c6d2dc;max-width:770px;line-height:1.55}
-    .actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:33px}.btn{display:inline-block;text-decoration:none;border-radius:10px;padding:12px 20px;background:var(--accent);color:#0a2423;font-weight:750}.btn.secondary{background:transparent;color:var(--text);border:1px solid #536675}
-    .note{margin-top:22px;color:var(--muted);font-size:13px}section{padding:55px 0;border-top:1px solid var(--line)}h2{font-size:clamp(29px,4vw,43px);letter-spacing:-.04em;line-height:1.15;margin:0 0 17px} .sub{color:var(--muted);max-width:770px;margin:0 0 28px}
-    .features{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.feature{background:linear-gradient(140deg,#152330,#111922);border:1px solid var(--line);border-radius:15px;padding:25px}
-    .feature strong{font-size:18px}.feature p{color:var(--muted);margin:10px 0 0;font-size:14px}
-    .architecture{display:flex;flex-wrap:wrap;align-items:center;gap:11px;color:var(--muted);font-size:14px}.step{border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:16px 19px;color:var(--text)}
-    pre{background:#080d12;border:1px solid var(--line);border-radius:14px;overflow:auto;padding:23px;color:#b8f0dd;font-size:14px;line-height:1.8}
-    .split{display:grid;grid-template-columns:1fr 1fr;gap:35px;align-items:start}footer{border-top:1px solid var(--line);padding:30px 0 55px;color:var(--muted);font-size:14px}footer a{color:var(--text)}
-    @media(max-width:760px){.hero{padding:72px 0}.features,.split{grid-template-columns:1fr}.navlinks{gap:14px}.navlinks a:nth-child(2){display:none}.architecture{align-items:stretch;flex-direction:column}.arrow{display:none}}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <nav aria-label="Main navigation"><div class="brand">syn<span>rex</span><span style="color:var(--muted)"> / </span></div><div class="navlinks"><a href="#features">Capabilities</a><a href="#how">How it works</a><a href="#start">Get started</a><a href="https://github.com/yuezhihuafou/synrex">GitHub ↗</a><button class="lang" id="lang-switch" type="button" aria-label="Switch language">中文</button></div></nav>
-    <main>
-      <header class="hero">
-        <div class="eyebrow">Open source · Self-hosted · Early access</div>
-        <h1>Keep the reasoning.<br><em>Own the execution.</em></h1>
-        <p class="lead">Synrex connects ordinary ChatGPT conversations to real engineering work on your own machines—with durable tasks, inspectable evidence, workflow recovery and optional execution peers.</p>
-        <div class="actions"><a class="btn" href="https://github.com/yuezhihuafou/synrex/releases/tag/v0.1.0-preview.20261022">Explore early-access release ↗</a><a class="btn secondary" href="https://github.com/yuezhihuafou/synrex">View source on GitHub</a></div>
-        <p class="note">One owner per installation. No hosted account, managed cloud or separate reasoning agent required.</p>
-      </header>
-      <section id="features">
-        <div class="eyebrow">Built for real engineering loops</div><h2>More than one-off tool calls.</h2>
-        <p class="sub">The model decides what to do. Synrex executes within permitted workspaces and returns concrete artifacts and state that can be inspected and recovered.</p>
-        <div class="features">
-          <div class="feature"><strong>Durable tasks</strong><p>Run long commands without tying process lifetime to a single MCP response. Retrieve bounded status and full logs later.</p></div>
-          <div class="feature"><strong>Workflow recovery</strong><p>Persistent task and workflow identities preserve checkpoints, evidence and context for resumed engineering work.</p></div>
-          <div class="feature"><strong>Multi-host execution</strong><p>Keep your main Linux owner machine in control and connect optional compatible peers for additional workloads.</p></div>
-          <div class="feature"><strong>Inspect before accepting</strong><p>Workspace-aware code access, Git worktrees, changes, test results and retrievable execution receipts.</p></div>
-          <div class="feature"><strong>Operational Console</strong><p>An owner-authenticated browser surface for service, workflow and diagnostic visibility, separate from ChatGPT.</p></div>
-          <div class="feature"><strong>Architecture boundaries</strong><p>Versioned project intent and deterministic checks help maintain consistency across repeated AI edits.</p></div>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0b1117">
+    <meta name="description" content="Synrex connects ordinary ChatGPT conversations to self-hosted coding and engineering execution. Durable tasks, verifiable results, and optional multi-host workspaces.">
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="Synrex">
+    <meta property="og:title" content="Synrex — Governed execution for AI">
+    <meta property="og:description" content="Keep AI reasoning in ChatGPT. Run, inspect, and recover real engineering work on machines you control.">
+    <meta property="og:url" content="https://yuezhihuafou.github.io/synrex/">
+    <meta name="twitter:card" content="summary">
+    <link rel="canonical" href="https://yuezhihuafou.github.io/synrex/">
+    <link rel="icon" type="image/svg+xml" href="./assets/synrex-mark.svg">
+    <link rel="stylesheet" href="./assets/synrex-site.css">
+    <title>Synrex — Governed execution for AI</title>
+    <script defer src="./assets/synrex-site.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#content" data-i18n="skip">Skip to content</a>
+    <div class="site-shell" id="top">
+      <header class="site-header">
+        <div class="container header-inner">
+          <a class="wordmark" href="#top" aria-label="Synrex home">
+            <span class="wordmark-symbol" aria-hidden="true"><span></span><span></span></span>
+            <span>synrex</span><span class="wordmark-suffix">/</span>
+          </a>
+          <nav class="main-nav" aria-label="Main navigation">
+            <a href="#capabilities" data-i18n="navFeatures">Capabilities</a>
+            <a href="#architecture" data-i18n="navHow">How it works</a>
+            <a href="#start" data-i18n="navStart">Get started</a>
+          </nav>
+          <div class="header-actions">
+            <a class="github-link" href="https://github.com/yuezhihuafou/synrex" target="_blank" rel="noopener noreferrer" aria-label="Synrex on GitHub">GitHub <span aria-hidden="true">↗</span></a>
+            <button class="language-switch" id="language-switch" type="button" aria-label="切换到中文" aria-pressed="false">中文</button>
+          </div>
         </div>
-      </section>
-      <section id="how">
-        <div class="eyebrow">A model-independent execution layer</div><h2>GPT leads. Your infrastructure executes.</h2>
-        <div class="architecture"><div class="step">ChatGPT conversation<br><small>Reasoning &amp; decisions</small></div><span class="arrow">→</span><div class="step">MCP / Synrex owner<br><small>Tools, state &amp; governance</small></div><span class="arrow">→</span><div class="step">Your repositories &amp; peers<br><small>Commands, tests &amp; logs</small></div></div>
-        <p class="sub" style="margin-top:24px">Synrex does not run a hidden model loop and cannot wake a finished ChatGPT turn automatically. Its job is to expose reliable execution capabilities, not replace the conversational model.</p>
-      </section>
-      <section id="start">
-        <div class="split">
-          <div><div class="eyebrow">Quick start</div><h2>Start with a disposable repository.</h2><p class="sub">Linux is the primary tested environment. You need Node.js 22.19+, pnpm 11.25.0, Git and a Bash-compatible shell. Configure your own authenticated MCP endpoint before remote access.</p><div class="actions"><a class="btn secondary" href="https://github.com/yuezhihuafou/synrex/blob/main/docs/TRY_SYNREX.md">Read the trial guide ↗</a></div></div>
-          <pre><code>git clone https://github.com/yuezhihuafou/synrex.git
+      </header>
+
+      <main id="content">
+        <section class="hero container" aria-labelledby="hero-title">
+          <div class="hero-copy">
+            <div class="eyebrow"><span class="status-dot" aria-hidden="true"></span><span data-i18n="heroEyebrow">OPEN SOURCE / SELF-HOSTED / GPT-FIRST</span></div>
+            <h1 id="hero-title"><span data-i18n="heroLineOne">AI thinks.</span><br><span class="hero-emphasis" data-i18n="heroLineTwo">Your machines build.</span></h1>
+            <p class="hero-description" data-i18n="heroDescription">Turn an ordinary ChatGPT conversation into a real engineering workflow. Synrex connects the model to your repositories and execution environments—with durable tasks, verifiable results, and work you can resume.</p>
+            <div class="hero-actions">
+              <a class="button button-primary" href="https://github.com/yuezhihuafou/synrex/releases/latest" target="_blank" rel="noopener noreferrer"><span data-i18n="ctaRelease">Get the latest release</span><span aria-hidden="true">↗</span></a>
+              <a class="button button-outline" href="#start"><span data-i18n="ctaQuickstart">View quickstart</span><span aria-hidden="true">→</span></a>
+            </div>
+            <div class="hero-footnote">
+              <span class="micro-mark" aria-hidden="true"></span>
+              <span data-i18n="heroNote">No hosted account. No replacement AI agent. Your projects stay on your machines.</span>
+            </div>
+          </div>
+
+          <div class="hero-visual" aria-label="Illustration of the Synrex execution workflow">
+            <div class="visual-index" aria-hidden="true">FIG 01 / EXECUTION LAYER</div>
+            <div class="console-window">
+              <div class="console-chrome">
+                <div class="window-controls" aria-hidden="true"><i></i><i></i><i></i></div>
+                <span>synrex / workflow</span>
+                <span class="window-live"><span aria-hidden="true"></span><span data-i18n="diagramLabel">ILLUSTRATIVE</span></span>
+              </div>
+              <div class="console-body">
+                <div class="terminal-prompt"><span aria-hidden="true">~/project</span> <span class="prompt-marker">›</span> <span data-i18n="diagramTitle">A complete engineering loop</span></div>
+                <div class="trace-row"><span class="trace-number">01</span><span class="trace-line"></span><div><span class="trace-code">open_workspace</span><small data-i18n="traceOne">Select an approved repository</small></div><span class="trace-check" aria-hidden="true">↗</span></div>
+                <div class="trace-row"><span class="trace-number">02</span><span class="trace-line"></span><div><span class="trace-code">semantic_code / read</span><small data-i18n="traceTwo">Understand the actual source</small></div><span class="trace-check" aria-hidden="true">↗</span></div>
+                <div class="trace-row"><span class="trace-number">03</span><span class="trace-line"></span><div><span class="trace-code">exec_command</span><small data-i18n="traceThree">Run tests, builds, and long jobs</small></div><span class="trace-check" aria-hidden="true">↗</span></div>
+                <div class="trace-row"><span class="trace-number">04</span><span class="trace-line"></span><div><span class="trace-code">task_wait / show_changes</span><small data-i18n="traceFour">Inspect status, logs, and diffs</small></div><span class="trace-check" aria-hidden="true">↗</span></div>
+                <div class="console-footer"><span class="console-footer-dot"></span><span data-i18n="diagramFooter">Evidence over “done”</span><span class="console-cursor" aria-hidden="true">_</span></div>
+              </div>
+            </div>
+            <p class="visual-note" data-i18n="diagramDisclaimer">Illustrative tool sequence — not a live benchmark or execution log.</p>
+            <div class="visual-orbit" aria-hidden="true"></div>
+          </div>
+        </section>
+
+        <div class="feature-strip" aria-label="Product principles">
+          <div class="container strip-inner">
+            <span><i aria-hidden="true"></i><span data-i18n="stripOne">MCP-native</span></span>
+            <span><i aria-hidden="true"></i><span data-i18n="stripTwo">Owner-controlled</span></span>
+            <span><i aria-hidden="true"></i><span data-i18n="stripThree">Durable execution</span></span>
+            <span><i aria-hidden="true"></i><span data-i18n="stripFour">MIT licensed</span></span>
+          </div>
+        </div>
+
+        <section class="section container" id="capabilities" aria-labelledby="features-heading">
+          <div class="section-intro">
+            <div class="section-label"><span>01 /</span><span data-i18n="featuresEyebrow">WHAT IT SOLVES</span></div>
+            <div class="section-heading">
+              <h2 id="features-heading" data-i18n="featuresTitle">Built for the work between prompts.</h2>
+              <p data-i18n="featuresSubtitle">Not another chat interface. A reliable execution layer for the messy, multi-step work that happens in real repositories.</p>
+            </div>
+          </div>
+          <div class="capability-grid">
+            <article class="capability-card">
+              <span class="card-index">01 / CONTINUITY</span>
+              <span class="card-glyph" aria-hidden="true">↗</span>
+              <h3 data-i18n="cardOneTitle">Long-running work, without losing the thread.</h3>
+              <p data-i18n="cardOneText">Commands can outlive an individual MCP response. Durable task IDs, checkpoints, and retrievable logs make unfinished work inspectable.</p>
+            </article>
+            <article class="capability-card">
+              <span class="card-index">02 / EVIDENCE</span>
+              <span class="card-glyph" aria-hidden="true">⌁</span>
+              <h3 data-i18n="cardTwoTitle">Proof you can inspect.</h3>
+              <p data-i18n="cardTwoText">See what changed, what ran, and what failed. Review source diffs and execution receipts instead of trusting an unverified success message.</p>
+            </article>
+            <article class="capability-card">
+              <span class="card-index">03 / INFRASTRUCTURE</span>
+              <span class="card-glyph" aria-hidden="true">⌘</span>
+              <h3 data-i18n="cardThreeTitle">Your environment, not a remote black box.</h3>
+              <p data-i18n="cardThreeText">Run against your own workspaces on a self-hosted machine. Connect optional compatible peers for distributed engineering tasks.</p>
+            </article>
+            <article class="capability-card">
+              <span class="card-index">04 / BOUNDARIES</span>
+              <span class="card-glyph" aria-hidden="true">◇</span>
+              <h3 data-i18n="cardFourTitle">Context with boundaries.</h3>
+              <p data-i18n="cardFourText">Workspace-scoped tools, isolated Git worktrees, architecture checks, and compact results help keep large coding tasks accountable.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="architecture-section" id="architecture" aria-labelledby="architecture-heading">
+          <div class="container architecture-container">
+            <div class="architecture-copy">
+              <div class="section-label"><span>02 /</span><span data-i18n="architectureEyebrow">HOW IT WORKS</span></div>
+              <h2 id="architecture-heading"><span data-i18n="architectureLineOne">Keep the intelligence.</span><br><span data-i18n="architectureLineTwo">Own the execution.</span></h2>
+              <p data-i18n="architectureDescription">ChatGPT remains the visible reasoning and decision-making host. Synrex provides authenticated tools, workflow state, and controlled access to your execution peers. It does not start a second hidden AI agent or promise to wake ChatGPT after a conversation ends.</p>
+              <a class="inline-link" href="https://github.com/yuezhihuafou/synrex/blob/main/docs/PRODUCT_CHARTER.md" target="_blank" rel="noopener noreferrer"><span data-i18n="architectureLink">Read the product charter</span><span aria-hidden="true">↗</span></a>
+            </div>
+            <div class="architecture-diagram" aria-label="ChatGPT connects over MCP to Synrex, which executes work on owner-controlled machines">
+              <div class="diagram-card"><span class="diagram-overline">REASON</span><strong>ChatGPT</strong><small data-i18n="architectureReason">Decides and reviews</small></div>
+              <div class="diagram-connector" aria-hidden="true"><span>MCP</span></div>
+              <div class="diagram-card diagram-card-active"><span class="diagram-overline">EXECUTE</span><strong>Synrex</strong><small data-i18n="architectureExecute">Tools · tasks · evidence</small></div>
+              <div class="diagram-connector" aria-hidden="true"><span>LOCAL</span></div>
+              <div class="diagram-card"><span class="diagram-overline">CONTROL</span><strong data-i18n="architectureMachines">Your machines</strong><small data-i18n="architecturePeers">Repositories · optional peers</small></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="section container start-section" id="start" aria-labelledby="start-heading">
+          <div class="section-intro start-intro">
+            <div class="section-label"><span>03 /</span><span data-i18n="startEyebrow">START BUILDING</span></div>
+            <div class="section-heading">
+              <h2 id="start-heading" data-i18n="startTitle">From source to first task.</h2>
+              <p data-i18n="startSubtitle">Start in a disposable repository. Linux is the primary supported environment; macOS and Windows have platform-specific limitations. Configure authentication before remote access.</p>
+            </div>
+          </div>
+          <div class="quickstart">
+            <div class="quickstart-topline"><span><span class="topline-square" aria-hidden="true"></span><span data-i18n="quickstartLabel">SOURCE INSTALL / NODE 22.19+ / PNPM 11.25.0</span></span><button class="copy-button" type="button" id="copy-commands" aria-label="Copy installation commands"><span data-i18n="copy">Copy commands</span><span aria-hidden="true">↗</span></button></div>
+            <pre><code id="install-commands">git clone https://github.com/yuezhihuafou/synrex.git
 cd synrex
 corepack enable
 corepack prepare pnpm@11.25.0 --activate
@@ -65,64 +159,40 @@ pnpm build
 npm link
 synrex init
 synrex doctor</code></pre>
+            <p class="copy-feedback" id="copy-feedback" role="status" aria-live="polite"></p>
+          </div>
+          <div class="start-links">
+            <a href="https://github.com/yuezhihuafou/synrex/blob/main/docs/TRY_SYNREX.md" target="_blank" rel="noopener noreferrer"><span data-i18n="trialLink">Step-by-step trial guide</span><span aria-hidden="true">↗</span></a>
+            <a href="https://github.com/yuezhihuafou/synrex/blob/main/docs/PORTABLE_DEPLOYMENT.md" target="_blank" rel="noopener noreferrer"><span data-i18n="portableLink">Immutable release installation</span><span aria-hidden="true">↗</span></a>
+            <a href="https://github.com/yuezhihuafou/synrex/blob/main/docs/launch/PUBLIC_DEMO.md" target="_blank" rel="noopener noreferrer"><span data-i18n="demoLink">Reproducible demo</span><span aria-hidden="true">↗</span></a>
+          </div>
+        </section>
+
+        <section class="closing-section">
+          <div class="container closing-inner">
+            <div>
+              <div class="section-label"><span>04 /</span><span data-i18n="closingEyebrow">OPEN DEVELOPMENT</span></div>
+              <h2 data-i18n="closingTitle">Real workflows. Clear limitations.</h2>
+              <p data-i18n="closingText">Synrex is an early, independently maintained open-source release. Broad third-party deployment and controlled performance comparisons are still in progress. Report reproducible issues; help improve the evidence.</p>
+            </div>
+            <a class="button button-primary" href="https://github.com/yuezhihuafou/synrex/issues" target="_blank" rel="noopener noreferrer"><span data-i18n="issueLink">Report an issue</span><span aria-hidden="true">↗</span></a>
+          </div>
+        </section>
+      </main>
+
+      <footer class="site-footer">
+        <div class="container footer-grid">
+          <div><a class="footer-brand" href="#top">synrex<span>/</span></a><p data-i18n="footerTagline">Governed execution for AI. Self-hosted and open source.</p></div>
+          <div class="footer-links">
+            <a href="https://github.com/yuezhihuafou/synrex" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a href="https://github.com/yuezhihuafou/synrex/releases/latest" target="_blank" rel="noopener noreferrer" data-i18n="footerReleases">Releases</a>
+            <a href="https://github.com/yuezhihuafou/synrex/blob/main/CONTRIBUTING.md" target="_blank" rel="noopener noreferrer" data-i18n="footerContribute">Contribute</a>
+            <a href="https://github.com/yuezhihuafou/synrex/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security</a>
+            <a href="https://github.com/yuezhihuafou/synrex/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">MIT</a>
+          </div>
         </div>
-      </section>
-      <section>
-        <div class="eyebrow">Transparent about its maturity</div><h2>Public preview, not a performance claim.</h2>
-        <p class="sub">Synrex is actively used in a self-hosted Linux engineering environment, but broad third-party deployment, fault-injection coverage and controlled end-to-end comparisons are still in progress. Windows remains best effort. Try it, report reproducible issues and help sharpen the evidence.</p>
-        <div class="actions"><a class="btn secondary" href="https://github.com/yuezhihuafou/synrex/issues">Report an issue ↗</a><a class="btn secondary" href="https://github.com/yuezhihuafou/synrex/blob/main/CONTRIBUTING.md">Contribution guide ↗</a></div>
-      </section>
-    </main>
-    <footer>Synrex is an independently maintained derivative of <a href="https://github.com/Waishnav/devspace">Waishnav/DevSpace</a>, preserving its MIT license and attribution. Not an official DevSpace release. · <a href="https://github.com/yuezhihuafou/synrex/blob/main/LICENSE">License</a></footer>
-  </div>
-  <script>
-    (() => {
-      const zh = {
-        "Capabilities":"核心功能","How it works":"工作原理","Get started":"快速开始",
-        "Open source · Self-hosted · Early access":"开源 · 自托管 · 早期试用",
-        "Keep the reasoning.":"保留 AI 推理。","Own the execution.":"掌控工程执行。",
-        "Synrex connects ordinary ChatGPT conversations to real engineering work on your own machines—with durable tasks, inspectable evidence, workflow recovery and optional execution peers.":"Synrex 将日常 ChatGPT 对话连接到你自己设备上的真实工程任务，支持持久任务、可检查的执行证据、工作流恢复及可选的多主机执行节点。",
-        "Explore early-access release ↗":"查看公开试用版本 ↗","View source on GitHub":"查看 GitHub 源码",
-        "One owner per installation. No hosted account, managed cloud or separate reasoning agent required.":"每套部署由单一所有者管理，无需托管账户、云服务或额外推理智能体。",
-        "Built for real engineering loops":"面向真实工程闭环","More than one-off tool calls.":"不止是一次性工具调用。",
-        "The model decides what to do. Synrex executes within permitted workspaces and returns concrete artifacts and state that can be inspected and recovered.":"AI 模型负责决策，Synrex 在授权工作区内执行任务，返回可检查、可恢复的状态与实际产物。",
-        "Durable tasks":"持久任务","Run long commands without tying process lifetime to a single MCP response. Retrieve bounded status and full logs later.":"长任务不受单次 MCP 响应生命周期限制，可随时查询状态和完整日志。",
-        "Workflow recovery":"工作流恢复","Persistent task and workflow identities preserve checkpoints, evidence and context for resumed engineering work.":"通过稳定任务标识和持久检查点保存上下文与证据，支持跨会话恢复工作。",
-        "Multi-host execution":"多主机执行","Keep your main Linux owner machine in control and connect optional compatible peers for additional workloads.":"主 Linux 节点保持控制权，可按需连接兼容的执行节点分担工作。",
-        "Inspect before accepting":"修改可审查","Workspace-aware code access, Git worktrees, changes, test results and retrievable execution receipts.":"按工作区访问代码、Git 工作树、修改差异、测试结果及可追溯执行记录。",
-        "Operational Console":"运维控制台","An owner-authenticated browser surface for service, workflow and diagnostic visibility, separate from ChatGPT.":"独立于 ChatGPT 的授权浏览器控制台，用于查看服务、工作流与诊断信息。",
-        "Architecture boundaries":"架构边界","Versioned project intent and deterministic checks help maintain consistency across repeated AI edits.":"版本化架构约束与确定性检查帮助保持 AI 多轮修改的一致性。",
-        "A model-independent execution layer":"与模型解耦的执行层","GPT leads. Your infrastructure executes.":"GPT 主导决策，你的设备负责执行。",
-        "ChatGPT conversation":"ChatGPT 对话","Reasoning & decisions":"推理与决策","MCP / Synrex owner":"MCP / Synrex 主节点","Tools, state & governance":"工具、状态与治理","Your repositories & peers":"代码仓库与执行节点","Commands, tests & logs":"命令、测试与日志",
-        "Synrex does not run a hidden model loop and cannot wake a finished ChatGPT turn automatically. Its job is to expose reliable execution capabilities, not replace the conversational model.":"Synrex 不运行隐藏的模型循环，也不能自动唤醒已结束的 ChatGPT 对话。它提供可靠的执行能力，而非替代对话模型。",
-        "Quick start":"快速开始","Start with a disposable repository.":"先从临时测试仓库开始。",
-        "Linux is the primary tested environment. You need Node.js 22.19+, pnpm 11.25.0, Git and a Bash-compatible shell. Configure your own authenticated MCP endpoint before remote access.":"Linux 是主要测试环境。需要 Node.js 22.19+、pnpm 11.25.0、Git 和兼容 Bash 的 Shell。远程连接前需配置自己的认证 MCP 端点。",
-        "Read the trial guide ↗":"查看试用指南 ↗","Transparent about its maturity":"公开产品成熟度","Public preview, not a performance claim.":"公开预览，不夸大性能。",
-        "Synrex is actively used in a self-hosted Linux engineering environment, but broad third-party deployment, fault-injection coverage and controlled end-to-end comparisons are still in progress. Windows remains best effort. Try it, report reproducible issues and help sharpen the evidence.":"Synrex 已用于实际自托管 Linux 工程环境，但大规模第三方部署、故障注入覆盖以及严格的端到端基准仍在完善。Windows 当前尽力兼容。欢迎试用并反馈可复现问题。",
-        "Report an issue ↗":"反馈问题 ↗","Contribution guide ↗":"参与贡献 ↗",
-        "Synrex is an independently maintained derivative of ":"Synrex 基于 ","Waishnav/DevSpace":"Waishnav/DevSpace"," , preserving its MIT license and attribution. Not an official DevSpace release. · ":" 衍生并独立维护，保留 MIT 许可与原作者署名，非 DevSpace 官方发行版。· ","License":"许可证"
-      };
-      const nodes = [];
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      while (walker.nextNode()) {
-        const node = walker.currentNode, value = node.nodeValue.trim();
-        if (value && Object.prototype.hasOwnProperty.call(zh, value)) nodes.push([node, node.nodeValue, value]);
-      }
-      const button = document.getElementById("lang-switch");
-      function setLanguage(language) {
-        const chinese = language === "zh";
-        nodes.forEach(([node, original, key]) => { node.nodeValue = chinese ? original.replace(key, zh[key]) : original; });
-        document.documentElement.lang = chinese ? "zh-CN" : "en";
-        document.title = chinese ? "Synrex — 面向 AI 的可治理执行平台" : "Synrex — Governed execution for AI";
-        button.textContent = chinese ? "English" : "中文";
-        button.setAttribute("aria-label", chinese ? "Switch to English" : "切换到中文");
-        try { localStorage.setItem("synrex-language", language); } catch (_) {}
-      }
-      let saved;
-      try { saved = localStorage.getItem("synrex-language"); } catch (_) {}
-      setLanguage(saved === "zh" || saved === "en" ? saved : (navigator.language || "").toLowerCase().startsWith("zh") ? "zh" : "en");
-      button.addEventListener("click", () => setLanguage(document.documentElement.lang === "en" ? "zh" : "en"));
-    })();
-  </script>
-</body>
+        <div class="container legal-line"><span data-i18n="footerAttribution">Independently maintained derivative of Waishnav/DevSpace. MIT license and original attribution retained; not an official DevSpace release.</span> <a href="https://github.com/Waishnav/devspace" target="_blank" rel="noopener noreferrer">Waishnav/DevSpace ↗</a></div>
+      </footer>
+    </div>
+  </body>
 </html>
