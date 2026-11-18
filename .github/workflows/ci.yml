@@ -136,3 +136,48 @@ jobs:
           node "$prefix/bin/synrex.mjs" --version
           node deploy/portable-install.mjs --status --prefix "$prefix"
           node deploy/portable-service.mjs --plan --prefix "$prefix"
+      - name: Windows first-use and background task acceptance
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: |
+          $prefix = Join-Path $env:RUNNER_TEMP 'synrex-native-qa-install'
+          node deploy/portable-service.mjs --write --prefix "$prefix"
+          if ($LASTEXITCODE -ne 0) { throw 'Portable service file generation failed' }
+          foreach ($file in @('start-synrex-logged.ps1', 'register-synrex-task.ps1')) {
+            $path = Join-Path (Join-Path $prefix 'service') $file
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | Format-List; throw "Invalid generated PowerShell: $file" }
+          }
+          $cli = Join-Path $prefix 'bin\synrex.mjs'
+          $env:DEVSPACE_CONFIG_DIR = Join-Path $env:RUNNER_TEMP 'synrex-first-use'
+          $projects = Join-Path $env:RUNNER_TEMP 'Projects'
+          New-Item -ItemType Directory -Path $projects -Force | Out-Null
+          node $cli config roots add $projects
+          if ($LASTEXITCODE -ne 0) { throw 'Add project root failed' }
+          node $cli config roots list
+          if ($LASTEXITCODE -ne 0) { throw 'List project roots failed' }
+          # A scheduled task does not inherit this runner step's environment.
+          # Give the temporary Windows runner user an isolated local Owner state.
+          $ownerDir = Join-Path $env:USERPROFILE '.devspace'
+          New-Item -ItemType Directory -Path $ownerDir -Force | Out-Null
+          Copy-Item (Join-Path $env:DEVSPACE_CONFIG_DIR 'config.jsonc') (Join-Path $ownerDir 'config.jsonc') -Force
+          '{"ownerToken":"ci-native-isolated-owner-long-enough"}' | Set-Content (Join-Path $ownerDir 'auth.json') -Encoding UTF8
+          try {
+            & (Join-Path $prefix 'service\register-synrex-task.ps1')
+            $task = Get-ScheduledTask -TaskName Synrex.Portable -ErrorAction Stop
+            if ($task.Settings.RestartCount -ne 20) { throw 'Task restart policy not installed' }
+            if ($task.Actions.Count -ne 1) { throw 'Unexpected number of task actions' }
+            Start-ScheduledTask -TaskName Synrex.Portable
+            $healthy = $false
+            for ($i = 0; $i -lt 40; $i++) {
+              Start-Sleep -Milliseconds 500
+              $code = curl.exe -s -o NUL -w '%{http_code}' http://127.0.0.1:7676/mcp
+              if ($code -eq '401') { $healthy = $true; break }
+            }
+            if (-not $healthy) { throw 'Scheduled task did not start a protected MCP service' }
+            Stop-ScheduledTask -TaskName Synrex.Portable
+          } finally {
+            Unregister-ScheduledTask -TaskName Synrex.Portable -Confirm:$false -ErrorAction SilentlyContinue
+          }
