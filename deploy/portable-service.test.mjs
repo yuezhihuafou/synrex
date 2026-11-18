@@ -14,6 +14,10 @@ test("service definitions render for Linux/macOS/Windows without registering a s
   assert.match(mac["org.synrex.portable.plist"], /a &amp; b/);
   const win = renderServiceFiles("win32", "C:\\Users\\user\\Synrex", "C:\\Program Files\\nodejs\\node.exe");
   assert.match(win["register-synrex-task.ps1"], /Get-ScheduledTask/);
+  assert.match(win["register-synrex-task.ps1"], /wscript\.exe/);
+  assert.match(win["register-synrex-task.ps1"], /start-synrex-hidden\.vbs/);
+  assert.match(win["start-synrex-hidden.vbs"], /shell\.Run\(command, 0, True\)/);
+  assert.ok(win["start-synrex-hidden.vbs"].includes("C:\\Program Files\\nodejs\\node.exe"));
   assert.match(win["start-synrex.cmd"], /"C:\\Program Files\\nodejs\\node.exe"/);
   assert.throws(() => renderServiceFiles("freebsd", "/tmp/a"), /only/);
 });

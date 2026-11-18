@@ -113,7 +113,11 @@ It writes files under the portable prefix's `service/` directory and
 - **Windows:** inspect `register-synrex-task.ps1` and run it in a local
   PowerShell session; it refuses to overwrite an existing
   `Synrex.Portable` task. Start it explicitly with
-  `Start-ScheduledTask -TaskName Synrex.Portable`.
+  `Start-ScheduledTask -TaskName Synrex.Portable`. The generated
+  `start-synrex-hidden.vbs` launches the Node runtime without a visible
+  console. Existing tasks (including independently maintained
+  `Synrex.WinDirect` and `Synrex.SwyPublicMonitor`) are intentionally
+  not modified by the portable installer; migrate those separately.
 
 Do **not** enable a second Owner service on a host with an existing
 `devspace.service`. For an existing pinned single-owner production

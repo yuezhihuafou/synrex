@@ -47,16 +47,20 @@ WantedBy=default.target
   };
   if (os === "win32") {
     const start = join(prefix, "service", "start-synrex.cmd");
+    const hidden = join(prefix, "service", "start-synrex-hidden.vbs");
     // A script is generated for explicit user action; do not use -Force or
     // mutate the existing DevSpace.WinLaptop task.
     return {
       "start-synrex.cmd": `@echo off\r\n"${node}" "${launcher}" serve\r\n`,
+      // Task Scheduler's InteractiveToken can flash a console even for
+      // PowerShell -WindowStyle Hidden. WSH starts Node with SW_HIDE instead.
+      "start-synrex-hidden.vbs": `Option Explicit\r\nDim shell, command\r\nSet shell = CreateObject("WScript.Shell")\r\ncommand = Chr(34) & "${node.replaceAll('"', '""')}" & Chr(34) & " " & Chr(34) & "${launcher.replaceAll('"', '""')}" & Chr(34) & " serve"\r\nWScript.Quit shell.Run(command, 0, True)\r\n`,
       "register-synrex-task.ps1": `$ErrorActionPreference = 'Stop'
 $name = 'Synrex.Portable'
 if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
   throw 'Synrex.Portable already exists; inspect it rather than overwrite.'
 }
-$action = New-ScheduledTaskAction -Execute ${"'" + node.replaceAll("'", "''") + "'"} -Argument ${"'" + ('"' + launcher + '" serve').replaceAll("'", "''") + "'"}
+$action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ${"'" + ('//B //Nologo "' + hidden + '"').replaceAll("'", "''") + "'"}
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
 Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -ErrorAction Stop
