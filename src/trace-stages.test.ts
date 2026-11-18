@@ -4,11 +4,31 @@ import { mkdtemp, mkdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { runWithRequestLogContext } from "./logger.js";
-import { traceStage } from "./trace-stages.js";
+import { traceStage, errorCategory, transportErrorCode } from "./trace-stages.js";
 import { DiagnosticTrace, sanitizeDiagnostic, summarizeDiagnosticTrace, type DiagnosticEntry } from "./diagnostic-trace.js";
 import { diagnosticTimings, readRunTrace } from "./diagnostic-report.js";
 import { recordTaskTrace } from "./task-trace.js";
 import { NodeLinkHub } from "./multinode/link-hub.js";
+
+test("nested fetch connection errors retain safe network codes without persisting messages", () => {
+  const timeout = new TypeError("fetch failed: secret-proxy-host", {
+    cause: Object.assign(new Error("private-route-info"), { code: "ETIMEDOUT" }),
+  });
+  assert.equal(errorCategory(timeout), "timeout");
+  assert.equal(transportErrorCode(timeout), "ETIMEDOUT");
+  const details = sanitizeDiagnostic("node_transport", {
+    stage: "peer_poll", outcome: "error", errorCategory: errorCategory(timeout),
+    errorCode: transportErrorCode(timeout), token: "private", message: String(timeout),
+  });
+  assert.equal(details.stage, "peer_poll");
+  assert.equal(details.errorCategory, "timeout");
+  assert.equal(details.errorCode, "ETIMEDOUT");
+  assert.ok(!JSON.stringify(details).includes("secret-proxy-host"));
+  assert.equal(errorCategory(new TypeError("fetch failed", {
+    cause: Object.assign(new Error("DNS"), { code: "EAI_AGAIN" }),
+  })), "transport");
+  assert.equal(sanitizeDiagnostic("node_transport", { errorCode: "SECRET_VALUE" }).errorCode, undefined);
+});
 
 test("concurrent phase traces preserve request identity and redact arbitrary errors", async (t) => {
   const root = await mkdtemp(path.join(tmpdir(), "synrex-chain-"));

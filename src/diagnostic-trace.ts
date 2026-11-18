@@ -150,11 +150,11 @@ export function sanitizeDiagnostic(event: DiagnosticEvent, fields: Record<string
     otelSpanId: /^(?!0{16}$)[0-9a-f]{16}$/,
     otelParentSpanId: /^(?!0{16}$)[0-9a-f]{16}$/,
     revision: /^[a-f0-9]{40}$/,
-    stage: /^(body|auth|mcp_dispatch|routing|tool_handler|learning|mailbox|result_packaging|task_launch|task_initial_wait|peer_execute|peer_ack)$/,
+    stage: /^(body|auth|mcp_dispatch|routing|tool_handler|learning|mailbox|result_packaging|task_launch|task_initial_wait|peer_execute|peer_ack|peer_register|peer_poll|peer_complete|peer_heartbeat|peer_loop)$/,
     rpcMethod: /^(initialize|notifications\/initialized|notifications\/cancelled|tools\/call|tools\/list|resources\/list|resources\/read|resources\/templates\/list|prompts\/list|prompts\/get|ping|unknown|batch)$/,
     rpcIdHash: /^[a-f0-9]{24}$/, edgeRay: /^[a-fA-F0-9]{8,32}(?:-[A-Za-z]{3})?$/,
     errorCategory: /^(not_found|permission|timeout|invalid_input|indeterminate|transport|internal|tool_error|command_exit|cancelled|auth|protocol)$/,
-    errorCode: /^(ENOENT|EACCES|EPERM|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ABORT_ERR|EPIPE|ERR_STREAM_PREMATURE_CLOSE)$/,
+    errorCode: /^(ENOENT|EACCES|EPERM|ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR_CONNECT_TIMEOUT|ENETUNREACH|EHOSTUNREACH|ENOTFOUND|EAI_AGAIN|ABORT_ERR|EPIPE|ERR_STREAM_PREMATURE_CLOSE)$/,
     signal: /^SIG(?:TERM|KILL|INT|ABRT|SEGV|HUP|PIPE)$/,
     tunnelUnit: /^(?:devspace|cloudflared|synrex)[a-zA-Z0-9_.-]{0,100}\.service$|^unknown$/,
   };

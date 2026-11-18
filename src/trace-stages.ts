@@ -6,14 +6,30 @@ import { emitNativeSpan } from "./native-otel.js";
 
 export function errorCategory(error: unknown): string {
   const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
-  if (value?.code === "ENOENT") return "not_found";
-  if (value?.code === "EACCES" || value?.code === "EPERM") return "permission";
+  const code = transportErrorCode(error);
+  if (code === "ENOENT") return "not_found";
+  if (code === "EACCES" || code === "EPERM") return "permission";
   if (value?.name === "AbortError" || value?.name === "TimeoutError") return "timeout";
+  if (code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") return "timeout";
+  if (code && /^(ECONNREFUSED|ECONNRESET|EPIPE|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|ERR_STREAM_PREMATURE_CLOSE)$/.test(code)) return "transport";
   const message = typeof value?.message === "string" ? value.message : "";
   if (/^Invalid patch:/.test(message)) return "invalid_input";
   if (/indeterminate|interrupted after/i.test(message)) return "indeterminate";
   if (/offline|unavailable|did not complete request/i.test(message)) return "transport";
   return "internal";
+}
+
+/** Inspect nested fetch/Undici causes, but never persist arbitrary error text. */
+export function transportErrorCode(error: unknown): string | undefined {
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  for (let depth = 0; depth < 4 && current && typeof current === "object" && !seen.has(current); depth += 1) {
+    seen.add(current);
+    const value = current as { code?: unknown; cause?: unknown };
+    if (typeof value.code === "string" && /^(ENOENT|EACCES|EPERM|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EPIPE|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|UND_ERR_CONNECT_TIMEOUT|ERR_STREAM_PREMATURE_CLOSE)$/.test(value.code)) return value.code;
+    current = value.cause;
+  }
+  return undefined;
 }
 
 /** Metadata only. Diagnostics must not change the outcome of primary work. */

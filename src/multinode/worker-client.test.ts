@@ -6,6 +6,40 @@ import test from "node:test";
 import type { ToolInvoker } from "../tool-invoker.js";
 import type { NodeLinkRequest } from "./link-hub.js";
 import { NodeWorkerClient } from "./worker-client.js";
+import { sanitizeDiagnostic } from "../diagnostic-trace.js";
+
+test("worker logs which control RPC failed with a safe nested error code", async () => {
+  const diagnostics: ReturnType<typeof sanitizeDiagnostic>[] = [];
+  const worker = new NodeWorkerClient({
+    gatewayUrl: "https://controller.example",
+    node: {
+      id: "node_diagnostic", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 }, platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "private-token", pollWaitMs: 1_000, heartbeatMs: 15_000,
+    invoker: { call: async () => ({}) } as unknown as ToolInvoker,
+    fetchImpl: (async () => {
+      throw new TypeError("fetch failed: private-address", {
+        cause: Object.assign(new Error("sensitive network info"), { code: "ETIMEDOUT" }),
+      });
+    }) as typeof fetch,
+    onDiagnostic: (event, fields) => diagnostics.push(sanitizeDiagnostic(event, fields)),
+  });
+  const call = (worker as unknown as {
+    request(action: string, body: unknown, timeoutMs: number): Promise<unknown>;
+  }).request.bind(worker);
+  await assert.rejects(() => call("poll", {}, 1000), /fetch failed/);
+  assert.equal(diagnostics.length, 1);
+  assert.equal(diagnostics[0]?.event, "node_transport");
+  assert.equal(diagnostics[0]?.stage, "peer_poll");
+  assert.equal(diagnostics[0]?.errorCategory, "timeout");
+  assert.equal(diagnostics[0]?.errorCode, "ETIMEDOUT");
+  assert.equal(diagnostics[0]?.phase, 0);
+  assert.ok(!JSON.stringify(diagnostics).includes("private-address"));
+  assert.ok(!JSON.stringify(diagnostics).includes("private-token"));
+});
 
 test("worker uses secondary controller URL only for transport faults", async () => {
   const seen: string[] = [];

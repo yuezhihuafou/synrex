@@ -5,7 +5,7 @@ import type { ExecutionNode } from "./protocol.js";
 import type { NodeLinkRequest } from "./link-hub.js";
 import type { ToolInvoker } from "../tool-invoker.js";
 import { runWithRequestLogContext } from "../logger.js";
-import { traceEvent, traceStage, errorCategory } from "../trace-stages.js";
+import { traceEvent, traceStage, errorCategory, transportErrorCode } from "../trace-stages.js";
 import { newSpanId, validOtelContext } from "../otel-context.js";
 import type { DiagnosticEvent } from "../diagnostic-trace.js";
 
@@ -107,7 +107,10 @@ export class NodeWorkerClient {
         if (failed && failed.status === "rejected") throw failed.reason;
       } catch (error) {
         if (this.stopped) return;
-        try { this.options.onDiagnostic?.("node_transport", { nodeId: this.options.node.id, outcome: "error", errorCategory: errorCategory(error), queuedMs: backoffMs }); } catch { /* Observational. */ }
+        try { this.options.onDiagnostic?.("node_transport", {
+          nodeId: this.options.node.id, stage: "peer_loop", outcome: "error",
+          errorCategory: errorCategory(error), errorCode: transportErrorCode(error), queuedMs: backoffMs,
+        }); } catch { /* Observational. */ }
         await wait(backoffMs, undefined, { signal: this.stopController.signal }).catch(() => undefined);
         backoffMs = Math.min(10_000, backoffMs * 2);
       }
@@ -359,7 +362,16 @@ export class NodeWorkerClient {
         }
         return await response.json();
       } catch (error) {
-        if (nonRetryableHttpError || i === urls.length - 1 || this.stopped || controller.signal.aborted) throw error;
+        if (nonRetryableHttpError || i === urls.length - 1 || this.stopped || controller.signal.aborted) {
+          if (!this.stopped) {
+            try { this.options.onDiagnostic?.("node_transport", {
+              nodeId: this.options.node.id, stage: `peer_${action}`,
+              outcome: "error", errorCategory: errorCategory(error),
+              errorCode: transportErrorCode(error), phase: i,
+            }); } catch { /* Diagnostics must not change transport outcomes. */ }
+          }
+          throw error;
+        }
         this.options.onMetric?.("node_transport_fallback", {
           action, reason: error instanceof Error ? error.name : "unknown",
         });
