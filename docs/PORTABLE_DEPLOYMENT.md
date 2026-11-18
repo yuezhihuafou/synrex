@@ -29,9 +29,9 @@ Obtain this repository's `deploy/` scripts (for example with `git clone`).
 After the desired version is published, run from the repository root:
 
 ```sh
-node deploy/portable-install.mjs --plan --version 0.4.2
-node deploy/portable-install.mjs --stage --version 0.4.2
-node deploy/portable-install.mjs --activate --version 0.4.2
+node deploy/portable-install.mjs --plan --version 0.4.3
+node deploy/portable-install.mjs --stage --version 0.4.3
+node deploy/portable-install.mjs --activate --version 0.4.3
 node deploy/portable-install.mjs --status
 ```
 
@@ -80,11 +80,11 @@ multinode mode configure the single Owner and peer roles intentionally,
 not from guessed network locations.
 
 If your host cannot reach GitHub directly, download the official
-`synrex-0.4.2.tgz` on a connected machine and transfer it to that host.
+`synrex-0.4.3.tgz` on a connected machine and transfer it to that host.
 Then use:
 
 ```sh
-node deploy/portable-install.mjs --stage --version 0.4.2 --source ./synrex-0.4.2.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
+node deploy/portable-install.mjs --stage --version 0.4.3 --source ./synrex-0.4.3.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
 ```
 
 Dependencies and the exact pnpm bootstrap still need registry access or an already populated cache.

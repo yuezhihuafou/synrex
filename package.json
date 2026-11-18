@@ -1,6 +1,6 @@
 {
   "name": "synrex",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": true,
   "description": "Synrex: self-hosted, GPT-first coding and execution with durable tasks, compact context, multi-host workspaces, and architecture governance.",
   "repository": {
