@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   resolveOnboardingUsage,
+  updateAllowedRoots,
   updateOnboardingSubagentsConfig,
 } from "./onboarding.js";
 
@@ -12,6 +13,9 @@ for (const [selections, expected] of [
   assert.equal(resolveOnboardingUsage(selections), expected);
 }
 assert.throws(() => resolveOnboardingUsage([]), /Choose ChatGPT, Coding Agents, or both/);
+assert.deepEqual(updateAllowedRoots(["/a"], "add", ["/b", "/a"]), ["/a", "/b"]);
+assert.deepEqual(updateAllowedRoots(["/a", "/b"], "remove", ["/a"]), ["/b"]);
+assert.throws(() => updateAllowedRoots(["/a"], "remove", ["/a"]), /last allowed/);
 
 assert.deepEqual(
   updateOnboardingSubagentsConfig(

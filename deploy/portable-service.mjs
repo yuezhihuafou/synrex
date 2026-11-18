@@ -10,6 +10,13 @@ const xml = value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt
   .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 const quoteSystemd = value => '"' + String(value).replaceAll("%", "%%").replaceAll("\\", "\\\\")
   .replaceAll('"', '\\"') + '"';
+const quotePowerShell = value => "'" + String(value).replaceAll("'", "''") + "'";
+function encodeServiceFile(name, content) {
+  // Windows PowerShell 5.1 and Windows Script Host need BOMs for Unicode paths.
+  if (name.endsWith(".vbs")) return Buffer.from("\uFEFF" + content, "utf16le");
+  if (name.endsWith(".ps1")) return Buffer.from("\uFEFF" + content, "utf8");
+  return Buffer.from(content, "utf8");
+}
 
 export function renderServiceFiles(os, prefix, node = process.execPath) {
   const launcher = join(prefix, "bin", "synrex.mjs");
@@ -48,13 +55,31 @@ WantedBy=default.target
   if (os === "win32") {
     const start = join(prefix, "service", "start-synrex.cmd");
     const hidden = join(prefix, "service", "start-synrex-hidden.vbs");
+    const logged = join(prefix, "service", "start-synrex-logged.ps1");
+    const logDir = join(prefix, "service", "logs");
+    const psExe = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
     // A script is generated for explicit user action; do not use -Force or
     // mutate the existing DevSpace.WinLaptop task.
     return {
       "start-synrex.cmd": `@echo off\r\n"${node}" "${launcher}" serve\r\n`,
-      // Task Scheduler's InteractiveToken can flash a console even for
-      // PowerShell -WindowStyle Hidden. WSH starts Node with SW_HIDE instead.
-      "start-synrex-hidden.vbs": `Option Explicit\r\nDim shell, command\r\nSet shell = CreateObject("WScript.Shell")\r\ncommand = Chr(34) & "${node.replaceAll('"', '""')}" & Chr(34) & " " & Chr(34) & "${launcher.replaceAll('"', '""')}" & Chr(34) & " serve"\r\nWScript.Quit shell.Run(command, 0, True)\r\n`,
+      // WSH launches PowerShell hidden; the latter waits for Node, records
+      // stdout/stderr and forwards exit status so Task Scheduler can retry.
+      "start-synrex-hidden.vbs": `Option Explicit\r\nDim shell, command\r\nSet shell = CreateObject("WScript.Shell")\r\ncommand = Chr(34) & "${psExe.replaceAll('"', '""')}" & Chr(34) & " -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File " & Chr(34) & "${logged.replaceAll('"', '""')}" & Chr(34)\r\nWScript.Quit shell.Run(command, 0, True)\r\n`,
+      "start-synrex-logged.ps1": `$ErrorActionPreference = 'Stop'
+$node = ${quotePowerShell(node)}
+$cli = ${quotePowerShell(launcher)}
+$root = ${quotePowerShell(prefix)}
+$logDir = ${quotePowerShell(logDir)}
+New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+$runId = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
+$stdout = Join-Path $logDir ($runId + '.out.log')
+$stderr = Join-Path $logDir ($runId + '.err.log')
+Get-ChildItem -LiteralPath $logDir -File -Filter '*.log' |
+  Sort-Object LastWriteTime -Descending | Select-Object -Skip 120 |
+  Remove-Item -Force -ErrorAction SilentlyContinue
+$process = Start-Process -FilePath $node -ArgumentList ('"{0}" serve' -f $cli) -WorkingDirectory $root -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -Wait -PassThru
+exit $process.ExitCode
+`,
       "register-synrex-task.ps1": `$ErrorActionPreference = 'Stop'
 $name = 'Synrex.Portable'
 if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
@@ -63,7 +88,8 @@ if (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue) {
 $action = New-ScheduledTaskAction -Execute 'wscript.exe' -Argument ${"'" + ('//B //Nologo "' + hidden + '"').replaceAll("'", "''") + "'"}
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
 $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -ErrorAction Stop
+$settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -RestartCount 20 -RestartInterval (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName $name -Action $action -Trigger $trigger -Principal $principal -Settings $settings -ErrorAction Stop
 Write-Output 'Created Synrex.Portable (not started). Start-ScheduledTask Synrex.Portable after checking the configured role.'
 `,
       "start-path.txt": start + "\r\n",
@@ -81,12 +107,12 @@ export function writeServiceFiles(prefix, os = platform()) {
   mkdirSync(target, { recursive: true, mode: 0o700 });
   for (const [name, value] of Object.entries(files)) {
     const path = join(target, name);
-    if (existsSync(path) && readFileSync(path, "utf8") !== value)
+    if (existsSync(path) && !readFileSync(path).equals(encodeServiceFile(name, value)))
       throw new Error("Service definition changed; refusing to replace " + path);
   }
   for (const [name, value] of Object.entries(files)) {
     const path = join(target, name);
-    if (!existsSync(path)) writeFileSync(path, value, { flag: "wx", mode: 0o600 });
+    if (!existsSync(path)) writeFileSync(path, encodeServiceFile(name, value), { flag: "wx", mode: 0o600 });
   }
   return Object.keys(files).map(name => join(target, name));
 }

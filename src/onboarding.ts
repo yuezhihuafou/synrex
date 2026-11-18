@@ -29,6 +29,20 @@ export function usesCodingAgents(usage: OnboardingUsage): boolean {
   return usage === "coding-agents" || usage === "both";
 }
 
+/** Persist project roots without requiring first-time setup again. */
+export function updateAllowedRoots(
+  current: readonly string[],
+  action: "add" | "remove",
+  paths: readonly string[],
+): string[] {
+  if (!paths.length) throw new Error("Provide at least one project root.");
+  const unique = [...new Set(current)];
+  if (action === "add") return [...new Set([...unique, ...paths])];
+  const remaining = unique.filter((root) => !paths.includes(root));
+  if (!remaining.length) throw new Error("Cannot remove the last allowed project root.");
+  return remaining;
+}
+
 export function updateOnboardingSubagentsConfig(
   current: SubagentsConfig,
   selectedProviders: readonly LocalAgentProvider[],

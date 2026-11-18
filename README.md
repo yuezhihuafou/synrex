@@ -81,7 +81,7 @@ The `v0.4.0` source line closes verified historical feature gaps with
 workspace lifecycle, safe retention and release-aware observability. Check the actual
 GitHub release and live manifest before assuming a source change is shipped.
 Versioning is separate from upstream DevSpace's release numbering.
-The `v0.4.1` patch updates locked dependency security and release integrity;
+The `v0.4.4` candidate improves first-use setup, Windows background startup and connection diagnostics;
 its release archive and availability must be verified from GitHub Releases.
 
 For a reproducible demonstration, use the deliberately failing test fixture in
@@ -116,12 +116,12 @@ release under the current user's data directory and leaves existing services
 untouched. After obtaining the repository's deployment scripts:
 
 ```bash
-node deploy/portable-install.mjs --plan --version 0.4.1
-node deploy/portable-install.mjs --stage --version 0.4.1
-node deploy/portable-install.mjs --activate --version 0.4.1
+node deploy/portable-install.mjs --plan --version 0.4.4
+node deploy/portable-install.mjs --stage --version 0.4.4
+node deploy/portable-install.mjs --activate --version 0.4.4
 ```
 
-These commands require that `v0.4.1` has actually appeared in
+These commands require that `v0.4.4` has actually appeared in
 [GitHub Releases](https://github.com/yuezhihuafou/synrex/releases).
 For earlier releases, substitute the published version. See
 [`PORTABLE_DEPLOYMENT.md`](docs/PORTABLE_DEPLOYMENT.md) for user-local

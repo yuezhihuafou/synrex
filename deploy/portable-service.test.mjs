@@ -16,8 +16,13 @@ test("service definitions render for Linux/macOS/Windows without registering a s
   assert.match(win["register-synrex-task.ps1"], /Get-ScheduledTask/);
   assert.match(win["register-synrex-task.ps1"], /wscript\.exe/);
   assert.match(win["register-synrex-task.ps1"], /start-synrex-hidden\.vbs/);
+  assert.match(win["register-synrex-task.ps1"], /RestartCount 20/);
+  assert.match(win["register-synrex-task.ps1"], /MultipleInstances IgnoreNew/);
   assert.match(win["start-synrex-hidden.vbs"], /shell\.Run\(command, 0, True\)/);
-  assert.ok(win["start-synrex-hidden.vbs"].includes("C:\\Program Files\\nodejs\\node.exe"));
+  assert.match(win["start-synrex-hidden.vbs"], /start-synrex-logged\.ps1/);
+  assert.ok(win["start-synrex-logged.ps1"].includes("C:\\Program Files\\nodejs\\node.exe"));
+  assert.match(win["start-synrex-logged.ps1"], /RedirectStandardOutput/);
+  assert.match(win["start-synrex-logged.ps1"], /RedirectStandardError/);
   assert.match(win["start-synrex.cmd"], /"C:\\Program Files\\nodejs\\node.exe"/);
   assert.throws(() => renderServiceFiles("freebsd", "/tmp/a"), /only/);
 });
@@ -34,6 +39,13 @@ test("service definitions are additive and refuse overwriting unexpected changes
   const paths = writeServiceFiles(root, "linux");
   assert.equal(paths.length, 1);
   assert.deepEqual(writeServiceFiles(root, "linux"), paths);
+  const win = writeServiceFiles(root, "win32");
+  const vbs = win.find(path => path.endsWith(".vbs"));
+  const ps1 = win.find(path => path.endsWith(".ps1"));
+  assert.ok(vbs && ps1);
+  assert.deepEqual([...readFileSync(vbs).subarray(0, 2)], [0xff, 0xfe]);
+  assert.deepEqual([...readFileSync(ps1).subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  assert.deepEqual(writeServiceFiles(root, "win32"), win);
   writeFileSync(paths[0], "modified");
   assert.throws(() => writeServiceFiles(root, "linux"), /refusing to replace/);
   assert.equal(readFileSync(paths[0], "utf8"), "modified");

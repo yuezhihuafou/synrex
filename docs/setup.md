@@ -7,6 +7,13 @@ macOS and Windows, start with the
 [portable deployment guide](PORTABLE_DEPLOYMENT.md). The source-build steps
 below remain useful for development but are not a production-upgrade shortcut.
 
+**Windows PowerShell:** Node.js 24 does not always include Corepack. For a
+regular deployment use the portable installer (it bootstraps pinned pnpm via
+npx). If building source intentionally, use `npm.cmd install -g
+pnpm@11.25.0`, then `pnpm.cmd install --frozen-lockfile`,
+`pnpm.cmd build`, and `npm.cmd link`. Do not clone again if
+the source folder already exists.
+
 ## Requirements
 
 - Node `>=22.19 <27`
@@ -45,6 +52,10 @@ The setup flow asks one question at a time.
 
 First choose where you will use Synrex: ChatGPT, Coding Agents, or both.
 Synrex uses that answer to skip setup that does not apply to you.
+Use Up/Down and Enter to select the one usage mode. Only the optional
+Coding Agents provider selector uses **Space** to toggle multiple choices
+before Enter. `init` is for first-time setup; `init --force`
+reopens the wizard while retaining the existing Owner password.
 
 ### Project roots
 
@@ -69,6 +80,20 @@ A Coding Agents-only setup skips this question. Direct `devspace agents`
 commands use the current Git project, or the current directory outside a
 repository, with the authority of your local shell. MCP workspace operations
 remain limited to the roots configured for ChatGPT.
+
+On Windows, prefer `D:\Projects` over the installation directory
+on C:. The wizard offers D: as a default when present and asks before
+creating a missing directory. Projects inside an existing allowed root do
+not require another `init`. For additional roots:
+
+```powershell
+synrex.cmd config roots list
+synrex.cmd config roots add 'D:\Research'
+synrex.cmd config roots remove 'D:\OldProjects'
+```
+
+Restart Synrex after editing roots. Allowed roots restrict workspace entry;
+Shell commands still run with the Windows user's permissions.
 
 ### Coding Agents
 
@@ -147,6 +172,9 @@ synrex serve
 
 When ChatGPT, Claude, or another MCP client connects, Synrex shows an Owner
 password approval page. Enter the Owner password printed during setup.
+This is the password generated **on this machine**, not the domain owner's
+Cloudflare credentials or another Synrex installation's password. It persists
+across service restarts and ordinary configuration changes.
 
 The default config files are:
 
@@ -163,7 +191,14 @@ Run:
 
 ```bash
 synrex doctor
+synrex doctor --connect
 ```
+
+Run `--connect` after starting the server. An unauthenticated
+HTTP 401 with a Bearer challenge means Synrex is reachable and protecting
+the MCP endpoint. HTTP 502 suggests a broken origin forwarding path;
+failed hostname resolution suggests DNS or a missing published Tunnel route.
+A healthy Tunnel connector alone does not publish a public hostname.
 
 For a fresh persistent Linux install, `deploy/install-user-service.sh`
 installs a user service. It now **refuses** to overwrite an existing

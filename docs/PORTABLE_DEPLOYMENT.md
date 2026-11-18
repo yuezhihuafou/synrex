@@ -29,11 +29,47 @@ Obtain this repository's `deploy/` scripts (for example with `git clone`).
 After the desired version is published, run from the repository root:
 
 ```sh
-node deploy/portable-install.mjs --plan --version 0.4.3
-node deploy/portable-install.mjs --stage --version 0.4.3
-node deploy/portable-install.mjs --activate --version 0.4.3
+node deploy/portable-install.mjs --plan --version 0.4.4
+node deploy/portable-install.mjs --stage --version 0.4.4
+node deploy/portable-install.mjs --activate --version 0.4.4
 node deploy/portable-install.mjs --status
 ```
+
+### Windows PowerShell quick path (no WSL, no Corepack)
+
+On a Windows host with Node.js 22.19+ and Git for Windows, reuse an
+existing Synrex checkout rather than attempting `git clone` again.
+The portable installer provisions exactly pnpm 11.25.0 internally;
+the source checkout is **not** the project workspace.
+
+```powershell
+cd "$HOME\synrex"
+node deploy/portable-install.mjs --plan --version 0.4.4
+node deploy/portable-install.mjs --stage --version 0.4.4
+node deploy/portable-install.mjs --activate --version 0.4.4
+$synrex = Join-Path $env:LOCALAPPDATA 'Synrex\portable\bin\synrex.cmd'
+& $synrex init
+& $synrex doctor
+& $synrex serve
+```
+
+Use **arrows + Enter** at the first question; the separate multi-provider
+selector uses **Space + Enter** only if Coding Agents are selected. For a
+dedicated data drive, choose `D:\Projects` as the project root.
+Put future projects below that directory without rerunning init, or use
+`synrex config roots add` for a new permitted root. Keep the
+source checkout and OAuth state separate from project folders.
+
+After the server starts, check from a second PowerShell window:
+
+```powershell
+& (Join-Path $env:LOCALAPPDATA 'Synrex\portable\bin\synrex.cmd') doctor --connect
+```
+
+A 401 Bearer challenge is expected for an unauthenticated MCP request.
+Cloudflare **Healthy** confirms the Tunnel connector, not that a hostname
+route or DNS record was published. Do not create a second Tunnel or reset
+OAuth to fix DNS resolution.
 
 The first command is read-only. `--stage` verifies the GitHub Release
 tarball against the published `SHA256SUMS`, then installs its **locked pnpm dependencies**
@@ -80,11 +116,11 @@ multinode mode configure the single Owner and peer roles intentionally,
 not from guessed network locations.
 
 If your host cannot reach GitHub directly, download the official
-`synrex-0.4.3.tgz` on a connected machine and transfer it to that host.
+`synrex-0.4.4.tgz` on a connected machine and transfer it to that host.
 Then use:
 
 ```sh
-node deploy/portable-install.mjs --stage --version 0.4.3 --source ./synrex-0.4.3.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
+node deploy/portable-install.mjs --stage --version 0.4.4 --source ./synrex-0.4.4.tgz --sha256 THE_VERIFIED_64_CHAR_SHA256
 ```
 
 Dependencies and the exact pnpm bootstrap still need registry access or an already populated cache.
@@ -115,7 +151,9 @@ It writes files under the portable prefix's `service/` directory and
   `Synrex.Portable` task. Start it explicitly with
   `Start-ScheduledTask -TaskName Synrex.Portable`. The generated
   `start-synrex-hidden.vbs` launches the Node runtime without a visible
-  console. Existing tasks (including independently maintained
+  console, redirects stdout/stderr to `service\logs`, and forwards
+  the exit status to Task Scheduler for bounded retry. The task runs at
+  user sign-in, **not** before sign-in. Existing tasks (including independently maintained
   `Synrex.WinDirect` and `Synrex.SwyPublicMonitor`) are intentionally
   not modified by the portable installer; migrate those separately.
 

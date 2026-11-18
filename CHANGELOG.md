@@ -4,6 +4,23 @@ Synrex's version numbers are independent of the upstream DevSpace project.
 Only verified release artifacts, tags and running manifests identify deployed
 versions; a changelog entry alone does not prove that a release was published.
 
+## 0.4.4 — first-use and Windows service reliability candidate (2026-11-18)
+
+- First-run setup now uses a single Enter-confirmed usage choice. Coding
+  Agents are only configured when requested; project paths are trimmed before
+  resolution so empty comma fields cannot expand into the install directory.
+- Adds persistent project-root add/remove/list commands without reinitializing
+  the Owner password or OAuth database, and prompts to create missing roots.
+- Adds read-only local/public MCP and OAuth discovery diagnostics. An
+  unauthenticated 401 Bearer challenge is correctly treated as healthy.
+- Extends existing Windows portable Task Scheduler generation with hidden
+  logging, bounded restart policy and Unicode-safe launcher encoding.
+- Adds native Windows scheduled-task and setup acceptance to the existing
+  release gate without adding another service manager or modifying Cloudflare.
+
+This entry describes source-level changes, not proof of published artifacts or
+an upgrade to any running instance.
+
 ## 0.4.2 — Windows portable installer repair (2026-11-17)
 
 - Fixed pnpm Junction links becoming invalid when an already installed Windows

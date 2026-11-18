@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from "node:module";
+import { existsSync, mkdirSync, statSync } from "node:fs";
 import { stdin as input, stdout as output } from "node:process";
 import { resolve } from "node:path";
 import type { Result as BetterResult } from "better-result";
@@ -7,6 +8,7 @@ import * as prompts from "@clack/prompts";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
+import { diagnoseMcpConnections } from "./connect-diagnostics.js";
 import type { ServerConfig } from "./config.js";
 import { resolveCoreListenPort } from "./server-bind.js";
 import { resolveCliWorkspaceContext } from "./cli-workspace.js";
@@ -43,6 +45,7 @@ import {
   type OnboardingDestination,
   SUBAGENT_SKILL_INSTALL_COMMAND,
   resolveOnboardingUsage,
+  updateAllowedRoots,
   updateOnboardingSubagentsConfig,
   usesChatGpt,
   usesCodingAgents,
@@ -106,7 +109,7 @@ async function main(argv: string[]): Promise<void> {
       await runInit({ force: args.includes("--force") });
       return;
     case "doctor":
-      await runDoctor(args.includes("--auth"));
+      await runDoctor(args.includes("--auth"), args.includes("--connect"));
       return;
     case "oauth":
       runOAuthCommand(args);
@@ -233,8 +236,9 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
   try {
     prompts.intro("Synrex setup");
 
-    const destinationAnswer = await prompts.multiselect({
-      message: "Where will you use Synrex?",
+    prompts.log.info("Use Up/Down arrows and Enter to choose. Multi-select uses Space to toggle.");
+    const destinationAnswer = await prompts.select({
+      message: "Where will you use Synrex? (arrows + Enter)",
       options: [
         {
           value: "chatgpt",
@@ -246,28 +250,51 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
           label: "Coding Agents",
           hint: "Use Synrex from Codex, Claude Code, OpenCode, Pi, and similar tools.",
         },
+        {
+          value: "both",
+          label: "Both ChatGPT and Coding Agents",
+          hint: "Configure both integrations.",
+        },
       ],
-      initialValues: files.config.server.publicBaseUrl ? ["chatgpt"] : ["coding-agents"],
-      required: true,
+      initialValue: "chatgpt",
     });
     if (prompts.isCancel(destinationAnswer)) throw new SetupCancelledError();
-    const usage = resolveOnboardingUsage(destinationAnswer as OnboardingDestination[]);
+    const usage = destinationAnswer === "both"
+      ? resolveOnboardingUsage(["chatgpt", "coding-agents"])
+      : resolveOnboardingUsage([destinationAnswer as OnboardingDestination]);
     const useChatGpt = usesChatGpt(usage);
     const useCodingAgents = usesCodingAgents(usage);
 
     let allowedRoots: string[] | undefined;
     if (useChatGpt) {
-      const defaultRoots = files.config.workspaces.allowedRoots.join(", ") || process.cwd();
+      const defaultRoots = files.config.workspaces.allowedRoots.join(", ")
+        || (process.platform === "win32" ? (existsSync("D:\\") ? "D:\\Projects" : "") : process.cwd());
       const rootsAnswer = await textPrompt({
-        message: `Which project folders can Synrex access? Press Enter to use ${defaultRoots}`,
-        placeholder: defaultRoots,
+        message: defaultRoots
+          ? "Project folders for ChatGPT (comma-separated; Enter keeps " + defaultRoots + ")"
+          : "Project folders for ChatGPT (comma-separated, not the Synrex install directory)",
+        placeholder: defaultRoots || "D:\\Projects",
         defaultValue: defaultRoots,
         validate: (value) => value?.trim() ? undefined : "Enter at least one project root.",
       });
       allowedRoots = rootsAnswer
         .split(",")
-        .map((root) => resolve(expandHomePath(root.trim())))
-        .filter(Boolean);
+        .map((root) => root.trim())
+        .filter(Boolean)
+        .map((root) => resolve(expandHomePath(root)));
+      for (const root of allowedRoots) {
+        if (existsSync(root)) {
+          if (!statSync(root).isDirectory()) throw new Error("Not a project directory: " + root);
+          continue;
+        }
+        const create = await prompts.confirm({
+          message: "Project folder does not exist. Create " + root + "?",
+          initialValue: true,
+        });
+        if (prompts.isCancel(create)) throw new SetupCancelledError();
+        if (!create) throw new Error("Select an existing folder or allow Synrex to create it: " + root);
+        mkdirSync(root, { recursive: true });
+      }
     }
 
     const port = files.config.server.port;
@@ -294,33 +321,29 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     }
 
     const currentSubagents = files.config.subagents;
-    const availability = getLocalAgentProviderAvailabilitySnapshot(process.env, currentSubagents);
-    const configuredProviders = currentSubagents.providers
-      .filter((provider) => provider.enabled)
-      .map((provider) => provider.id);
-    const initialValues = configuredProviders.length > 0
-      ? configuredProviders
-      : availability
-          .filter((provider) => provider.available)
-          .map((provider) => provider.name);
-    const providerAnswer = await prompts.multiselect({
-      message: "Which Coding Agents should be available?",
-      options: availability.map((provider) => ({
-        value: provider.name,
-        label: provider.name,
-        hint: provider.available
-          ? provider.note ?? "available"
-          : `unavailable: ${provider.reason ?? "provider preflight failed"}`,
-      })),
-      initialValues,
-      required: true,
-    });
-    if (prompts.isCancel(providerAnswer)) throw new SetupCancelledError();
-    const selectedProviders = providerAnswer as LocalAgentProvider[];
-    const subagents = updateOnboardingSubagentsConfig(
-      currentSubagents,
-      selectedProviders,
-    );
+    let selectedProviders: LocalAgentProvider[] = currentSubagents.providers
+      .filter((provider) => provider.enabled).map((provider) => provider.id);
+    let subagents = currentSubagents;
+    if (useCodingAgents) {
+      const availability = getLocalAgentProviderAvailabilitySnapshot(process.env, currentSubagents);
+      const initialValues = selectedProviders.length > 0 ? selectedProviders
+        : availability.filter((provider) => provider.available).map((provider) => provider.name);
+      prompts.log.info("Select Coding Agents with Space, then press Enter.");
+      const providerAnswer = await prompts.multiselect({
+        message: "Which Coding Agents should be available? (Space + Enter)",
+        options: availability.map((provider) => ({
+          value: provider.name,
+          label: provider.name,
+          hint: provider.available ? provider.note ?? "available"
+            : "unavailable: " + (provider.reason ?? "provider preflight failed"),
+        })),
+        initialValues,
+        required: true,
+      });
+      if (prompts.isCancel(providerAnswer)) throw new SetupCancelledError();
+      selectedProviders = providerAnswer as LocalAgentProvider[];
+      subagents = updateOnboardingSubagentsConfig(currentSubagents, selectedProviders);
+    }
 
     const auth = {
       ownerToken: files.auth.ownerToken ?? generateOwnerToken(),
@@ -334,13 +357,13 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
       ...(allowedRoots
         ? [{ path: ["workspaces", "allowedRoots"], value: allowedRoots }]
         : []),
-      { path: ["subagents"], value: subagents },
+      ...(useCodingAgents ? [{ path: ["subagents"], value: subagents }] : []),
     ]);
     writeDevspaceAuth(auth);
 
     const lines = [
       ...(allowedRoots ? [`Project folders: ${allowedRoots.join(", ")}`] : []),
-      `Coding Agents: ${selectedProviders.join(", ")}`,
+      ...(useCodingAgents ? ["Coding Agents: " + selectedProviders.join(", ")] : []),
       ...(publicBaseUrl ? [`ChatGPT connection URL: ${publicBaseUrl}/mcp`] : []),
     ];
     prompts.note(lines.join("\n"), "Synrex is ready");
@@ -490,7 +513,7 @@ async function runStartupMetadataCleanup(config: ServerConfig): Promise<void> {
   }
 }
 
-async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
+async function runDoctor(includeAuthDiagnostics = false, checkConnection = false): Promise<void> {
   const files = loadDevspaceFiles();
   console.log(`Config dir: ${files.dir}`);
   console.log(`Config file: ${files.configExists ? files.configPath : "missing"}`);
@@ -507,6 +530,15 @@ async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
     console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
     console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
+    for (const root of config.allowedRoots) {
+      if (!existsSync(root)) {
+        console.warn("Project root missing: " + root + " (create it or use synrex config roots remove)");
+        if (checkConnection) process.exitCode = 1;
+      } else if (!statSync(root).isDirectory()) {
+        console.warn("Project root is not a directory: " + root);
+        if (checkConnection) process.exitCode = 1;
+      }
+    }
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
     console.log(`Cluster role: ${config.cluster.role}`);
     if (config.cluster.gatewayUrl) console.log(`Cluster gateway: ${config.cluster.gatewayUrl}`);
@@ -546,8 +578,15 @@ async function runDoctor(includeAuthDiagnostics = false): Promise<void> {
     );
     console.log(`Subagents: ${config.subagents.enabled ? "enabled" : "disabled"}`);
     console.log(`Subagent providers: ${formatLocalAgentProviderStatusSummary(providers)}`);
+    if (checkConnection) {
+      console.log("Connection checks (HTTP 401 Bearer is expected without a token):");
+      const checks = await diagnoseMcpConnections(config.host, config.port, config.publicBaseUrl);
+      for (const check of checks) console.log("  " + (check.ok ? "PASS" : "FAIL") + " " + check.name + ": " + check.detail);
+      if (checks.some((check) => !check.ok)) process.exitCode = 1;
+    }
   } catch (error) {
     console.log(`Config status: ${error instanceof Error ? error.message : String(error)}`);
+    if (checkConnection) process.exitCode = 1;
   }
 }
 
@@ -587,12 +626,27 @@ function runConfigCommand(args: string[]): void {
     console.log(JSON.stringify(files.config, null, 2));
     return;
   }
+  if (subcommand === "roots") {
+    if (!key || key === "list") {
+      for (const root of files.config.workspaces.allowedRoots) console.log(root);
+      return;
+    }
+    if (key !== "add" && key !== "remove") {
+      throw new Error("Usage: synrex config roots [list|add <path>...|remove <path>...]");
+    }
+    const paths = rest.map((path) => path.trim()).filter(Boolean)
+      .map((path) => resolve(expandHomePath(path)));
+    const roots = updateAllowedRoots(files.config.workspaces.allowedRoots, key, paths);
+    setDevspaceConfigValue(["workspaces", "allowedRoots"], roots);
+    console.log("Updated project roots in " + files.configPath + ". Restart Synrex to apply.");
+    return;
+  }
 
   if (subcommand !== "set") {
     throw new Error(`Unknown config command: ${subcommand}`);
   }
   if (key !== "publicBaseUrl") {
-    throw new Error("Only `synrex config set publicBaseUrl <url|null>` is supported right now.");
+    throw new Error("Supported: synrex config set publicBaseUrl <url|null>; synrex config roots list|add|remove.");
   }
 
   const value = rest.join(" ").trim();
@@ -654,14 +708,15 @@ function printHelp(): void {
       "Usage:",
       "  devspace                 Run first-time setup if needed, then start the server",
       "  synrex serve           Start the server",
-      "  synrex init            Create or update ~/.devspace/config.jsonc and auth.json",
-      "  synrex doctor          Show config, runtime, and native dependency status",
+      "  synrex init [--force]  First-time setup; --force reopens the wizard",
+      "  synrex doctor [--connect]  Show configuration and optionally test MCP + OAuth reachability",
       "  synrex doctor --auth   Show OAuth state and new-client enrollment status",
       "  synrex oauth lock      Deny new OAuth clients and grants; keep existing tokens",
       "  synrex oauth window 10 Temporarily allow owner-authorized new connections (1-15 min)",
       "  synrex oauth status    Show current OAuth enrollment policy",
       "  synrex config get      Print persisted config",
       "  synrex config set publicBaseUrl <url|null>",
+      "  synrex config roots list|add <path>...|remove <path>...  Manage projects without init",
       "  synrex worktrees prune [--dry-run | --execute]  Preview by default; execute only workflow-complete, Git-safe cleanup",
       "  synrex show-changes <review-ref> [--json]",
       "  synrex workflow list [--workspace <path>]  List resumable GPT coding workflows",
