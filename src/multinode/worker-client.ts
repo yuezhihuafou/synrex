@@ -1,6 +1,7 @@
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { setTimeout as wait } from "node:timers/promises";
+import { EnvHttpProxyAgent, fetch as undiciFetch } from "undici";
 import type { ExecutionNode } from "./protocol.js";
 import type { NodeLinkRequest } from "./link-hub.js";
 import type { ToolInvoker } from "../tool-invoker.js";
@@ -41,18 +42,48 @@ interface NodeRequestReceipt {
 
 export class NodeWorkerClient {
   private readonly fetchImpl: typeof fetch;
+  private readonly proxyAgent?: EnvHttpProxyAgent;
   private stopped = false;
   private loopPromise?: Promise<void>;
   private heartbeatTimer?: NodeJS.Timeout;
   private readonly activeRequests = new Set<AbortController>();
   private readonly receipts = new Map<string, NodeRequestReceipt>();
+  private readonly inFlightExecutions = new Map<string, Promise<void>>();
   private stopController = new AbortController();
   private heartbeatPending = false;
   private pollEpoch = 0;
   private readonly workspaceGates = new Map<string, { tail: Promise<void>; reads: Set<Promise<void>>; pending: number }>();
 
   constructor(private readonly options: NodeWorkerClientOptions) {
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    if (options.fetchImpl) {
+      this.fetchImpl = options.fetchImpl;
+      return;
+    }
+    // Node 22's global fetch does not use HTTP(S)_PROXY unless its startup
+    // flag was explicitly enabled. Apply proxy settings at the HTTP client
+    // boundary so portable/Windows/systemd peers behave consistently.
+    const httpProxy = process.env.HTTP_PROXY || process.env.http_proxy || process.env.ALL_PROXY || process.env.all_proxy;
+    const httpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || process.env.ALL_PROXY || process.env.all_proxy;
+    if (!httpProxy && !httpsProxy) {
+      this.fetchImpl = fetch;
+      return;
+    }
+    const noProxy = [
+      process.env.NO_PROXY || process.env.no_proxy || "",
+      "localhost", "127.0.0.1", "::1", "[::1]",
+    ].filter(Boolean).join(",");
+    const dispatcher = new EnvHttpProxyAgent({ httpProxy, httpsProxy, noProxy });
+    this.proxyAgent = dispatcher;
+    // Node's DOM BodyInit/Headers types are not identical to Undici's.
+    // Control RPCs always use string JSON bodies and string-only headers.
+    this.fetchImpl = ((input: string | URL | Request, init?: RequestInit) =>
+      undiciFetch(String(input), {
+        method: init?.method,
+        headers: init?.headers as Record<string, string> | undefined,
+        body: typeof init?.body === "string" ? init.body : undefined,
+        signal: init?.signal ?? undefined,
+        dispatcher,
+      }) as unknown as Promise<Response>) as typeof fetch;
   }
 
   start(): void {
@@ -76,6 +107,7 @@ export class NodeWorkerClient {
     this.heartbeatTimer = undefined;
     for (const controller of this.activeRequests) controller.abort();
     await this.loopPromise?.catch(() => undefined);
+    await this.proxyAgent?.close();
   }
 
   async register(): Promise<void> {
@@ -97,12 +129,24 @@ export class NodeWorkerClient {
         await this.register();
         backoffMs = 500;
         const epoch = ++this.pollEpoch;
+        const pollAbort = new AbortController();
         const count = Math.max(1, Math.min(4, this.options.maxConcurrentCalls ?? 4));
-        const pollers = Array.from({ length: count }, () => this.pollLoop(epoch).catch((error: unknown) => {
-          if (epoch === this.pollEpoch) this.pollEpoch += 1;
-          throw error;
-        }));
-        const results = await Promise.allSettled(pollers);
+        const pollers = Array.from({ length: count }, () => this.pollLoop(epoch, pollAbort.signal));
+        // Waiting for every poller before reconnecting can strand the worker
+        // behind a long-running tool call even after the control link fails.
+        // Abort outstanding *polls*, never active tool execution/receipts.
+        const firstFailure = new Promise<never>((_resolve, reject) => {
+          for (const poller of pollers) {
+            void poller.catch((error: unknown) => {
+              if (epoch !== this.pollEpoch || this.stopped) return;
+              this.pollEpoch += 1;
+              pollAbort.abort();
+              reject(error);
+            });
+          }
+        });
+        const results = await Promise.race([Promise.allSettled(pollers), firstFailure]);
+        pollAbort.abort();
         const failed = results.find((result) => result.status === "rejected");
         if (failed && failed.status === "rejected") throw failed.reason;
       } catch (error) {
@@ -117,17 +161,17 @@ export class NodeWorkerClient {
     }
   }
 
-  private async pollLoop(epoch: number): Promise<void> {
+  private async pollLoop(epoch: number, pollAbort?: AbortSignal): Promise<void> {
     while (!this.stopped && epoch === this.pollEpoch) {
       const response = await this.request("poll", {
         nodeId: this.options.node.id,
         waitMs: this.options.pollWaitMs,
-      }, this.options.pollWaitMs + 10_000) as { request?: NodeLinkRequest | null };
+      }, this.options.pollWaitMs + 10_000, pollAbort) as { request?: NodeLinkRequest | null };
       if (!response.request) continue;
       try {
         await this.schedule(response.request);
       } catch (error) {
-        this.options.onMetric?.("node_execution_error", {
+        this.emitMetric("node_execution_error", {
           tool: response.request.call.name,
           error: error instanceof Error ? error.name : "unknown",
         });
@@ -138,7 +182,25 @@ export class NodeWorkerClient {
 
   // Reads may overlap, while all non-read operations execute exclusively for
   // their workspace. Preserve delivery order without serializing other projects.
-  private async schedule(request: NodeLinkRequest): Promise<void> {
+  private schedule(request: NodeLinkRequest): Promise<void> {
+    // A delivery lease may expire while a legitimate tool call is still
+    // running. Multiple long pollers can receive the SAME request ID. Never
+    // let the second delivery misclassify an active write as interrupted.
+    const active = this.inFlightExecutions.get(request.id);
+    if (active) {
+      this.emitMetric("node_duplicate_delivery_suppressed", { tool: request.call.name });
+      return Promise.resolve();
+    }
+    const execution = this.scheduleOnce(request);
+    this.inFlightExecutions.set(request.id, execution);
+    void execution.then(
+      () => { if (this.inFlightExecutions.get(request.id) === execution) this.inFlightExecutions.delete(request.id); },
+      () => { if (this.inFlightExecutions.get(request.id) === execution) this.inFlightExecutions.delete(request.id); },
+    );
+    return execution;
+  }
+
+  private async scheduleOnce(request: NodeLinkRequest): Promise<void> {
     const receivedAt = performance.now();
     const fields = { requestId: request.id, nodeRequestId: request.id, traceId: request.call.meta?.["devspace/traceId"],
       otelTraceId: request.call.meta?.["devspace/otelTraceId"], nodeId: this.options.node.id, tool: request.call.name };
@@ -191,7 +253,7 @@ export class NodeWorkerClient {
         emitDiagnostic: this.options.onDiagnostic,
       }, () => traceStage("peer_execute", () => this.executeWithReceipt(request), { nodeId: this.options.node.id, tool: request.call.name }));
     } finally {
-      this.options.onMetric?.("node_execution", {
+      this.emitMetric("node_execution", {
         tool: request.call.name,
         elapsedMs: Math.round(performance.now() - startedAt),
       });
@@ -328,7 +390,22 @@ export class NodeWorkerClient {
     }
   }
 
-  private async request(action: string, body: unknown, timeoutMs: number): Promise<unknown> {
+  private emitMetric(event: string, fields: Record<string, string | number | boolean>): void {
+    try { this.options.onMetric?.(event, fields); }
+    catch { /* Telemetry must not interrupt peer control or tool execution. */ }
+  }
+
+  private recordTransportError(action: string, error: unknown, phase: number, status?: number): void {
+    try {
+      this.options.onDiagnostic?.("node_transport", {
+        nodeId: this.options.node.id, stage: `peer_${action}`, outcome: "error",
+        errorCategory: errorCategory(error), errorCode: transportErrorCode(error),
+        phase, status,
+      });
+    } catch { /* Diagnostics must not affect control-plane outcomes. */ }
+  }
+
+  private async request(action: string, body: unknown, timeoutMs: number, pollAbort?: AbortSignal): Promise<unknown> {
     const urls = [this.options.gatewayUrl];
     if (this.options.gatewayFallbackUrl && this.options.gatewayFallbackUrl !== this.options.gatewayUrl) {
       urls.push(this.options.gatewayFallbackUrl);
@@ -336,6 +413,9 @@ export class NodeWorkerClient {
     for (let i = 0; i < urls.length; i += 1) {
       const controller = new AbortController();
       this.activeRequests.add(controller);
+      const stopPolling = () => controller.abort();
+      pollAbort?.addEventListener("abort", stopPolling, { once: true });
+      if (pollAbort?.aborted) controller.abort();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       timeout.unref?.();
       let nonRetryableHttpError = false;
@@ -351,33 +431,40 @@ export class NodeWorkerClient {
         });
         if (!response.ok) {
           const detail = await response.text().catch(() => "");
-          const failure = new Error(`Gateway node API ${action} failed (${response.status}): ${detail.slice(0, 500)}`);
+          const failure = Object.assign(
+            new Error(`Gateway node API ${action} failed (${response.status}): ${detail.slice(0, 500)}`),
+            { status: response.status },
+          );
           // Permission or schema errors must not be hidden by switching transport.
           if (i === urls.length - 1 || ![502, 503, 504].includes(response.status)) {
             nonRetryableHttpError = true;
             throw failure;
           }
-          this.options.onMetric?.("node_transport_fallback", { action, status: response.status });
+          this.recordTransportError(action, failure, i, response.status);
+          this.emitMetric("node_transport_fallback", { action, status: response.status });
           continue;
         }
         return await response.json();
       } catch (error) {
-        if (nonRetryableHttpError || i === urls.length - 1 || this.stopped || controller.signal.aborted) {
-          if (!this.stopped) {
-            try { this.options.onDiagnostic?.("node_transport", {
-              nodeId: this.options.node.id, stage: `peer_${action}`,
-              outcome: "error", errorCategory: errorCategory(error),
-              errorCode: transportErrorCode(error), phase: i,
-            }); } catch { /* Diagnostics must not change transport outcomes. */ }
+        // The controller may have aborted because this attempt timed out.
+        // A timed-out primary is a transport failure eligible for the
+        // configured backup URL. Shutdown (this.stopped) is not.
+        if (nonRetryableHttpError || i === urls.length - 1 || this.stopped || pollAbort?.aborted) {
+          if (!this.stopped && !pollAbort?.aborted) {
+            this.recordTransportError(action, error, i,
+              typeof (error as { status?: unknown } | null)?.status === "number"
+                ? (error as { status: number }).status : undefined);
           }
           throw error;
         }
-        this.options.onMetric?.("node_transport_fallback", {
+        this.recordTransportError(action, error, i);
+        this.emitMetric("node_transport_fallback", {
           action, reason: error instanceof Error ? error.name : "unknown",
         });
       } finally {
         clearTimeout(timeout);
         this.activeRequests.delete(controller);
+        pollAbort?.removeEventListener("abort", stopPolling);
       }
     }
     throw new Error(`No available node transport for ${action}.`);

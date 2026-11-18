@@ -17,6 +17,7 @@ interface PendingDispatch {
     reject: (error: Error) => void;
   }>;
   timeout: NodeJS.Timeout;
+  dispatchTimeout?: NodeJS.Timeout;
   delivered: boolean;
   deliveredAt?: number;
 }
@@ -38,6 +39,7 @@ export class NodeLinkHub implements NodeTransport {
     private readonly requestTimeoutMs: number,
     private readonly deliveryLeaseMs = Math.min(30_000, Math.max(1_000, Math.floor(requestTimeoutMs / 3))),
     private readonly onEvent?: (event: DiagnosticEvent, fields: Record<string, unknown>) => void,
+    private readonly maxUndeliveredWaitMs = Math.min(30_000, requestTimeoutMs),
   ) {}
 
   call(nodeId: string, input: NodeToolCall): Promise<NodeToolResult> {
@@ -64,17 +66,15 @@ export class NodeLinkHub implements NodeTransport {
         request,
         waiters: [{ resolve, reject }],
         delivered: false,
-        timeout: setTimeout(() => {
-          this.removePending(nodeId, request.id);
-          const outcome = pending.delivered ? "indeterminate_after_dispatch" : "not_dispatched";
-          if (pending.delivered) this.rememberTimeout(nodeId, request.id, fields);
-          this.emitEvent("node_request_timeout", { ...fields, outcome });
-          const error = new Error(`Node ${nodeId} did not complete request ${request.id} within ${this.requestTimeoutMs}ms (${outcome}).`
-            + (pending.delivered ? " The remote operation may still be running or completed. Inspect its owner before retrying; do not replay a mutating operation." : " The request was never delivered."));
-          for (const waiter of pending.waiters) waiter.reject(error);
-        }, this.requestTimeoutMs),
+        timeout: setTimeout(() => this.expirePending(pending, fields, this.requestTimeoutMs), this.requestTimeoutMs),
       };
       pending.timeout.unref?.();
+      // A disconnected peer must not hold an MCP request until the longer
+      // execution deadline (which can exceed the host's response timeout).
+      pending.dispatchTimeout = setTimeout(() => {
+        if (!pending.delivered) this.expirePending(pending, fields, this.maxUndeliveredWaitMs);
+      }, this.maxUndeliveredWaitMs);
+      pending.dispatchTimeout.unref?.();
       this.pendingById.set(request.id, pending);
       const waiters = this.pollWaiters.get(nodeId);
       const waiter = waiters?.values().next().value;
@@ -83,6 +83,7 @@ export class NodeLinkHub implements NodeTransport {
         clearTimeout(waiter.timeout);
         pending.delivered = true;
         pending.deliveredAt = Date.now();
+        clearTimeout(pending.dispatchTimeout);
         this.emitEvent("node_delivered", { ...fields, queuedMs: Date.now() - Date.parse(request.createdAt) });
         waiter.resolve(request);
         return;
@@ -157,6 +158,7 @@ export class NodeLinkHub implements NodeTransport {
     this.pollWaiters.clear();
     for (const pending of this.pendingById.values()) {
       clearTimeout(pending.timeout);
+      clearTimeout(pending.dispatchTimeout);
       const error = new Error("Node link hub closed before the request completed.");
       for (const waiter of pending.waiters) waiter.reject(error);
     }
@@ -237,6 +239,7 @@ export class NodeLinkHub implements NodeTransport {
       if (!this.pendingById.has(pending.request.id)) continue;
       pending.delivered = true;
       pending.deliveredAt = Date.now();
+      clearTimeout(pending.dispatchTimeout);
       this.emitEvent("node_delivered", { ...this.requestFields(pending), queuedMs: Date.now() - Date.parse(pending.request.createdAt) });
       if (queue.length === 0) this.queues.delete(nodeId);
       return pending;
@@ -265,12 +268,27 @@ export class NodeLinkHub implements NodeTransport {
     const pending = this.pendingById.get(requestId);
     if (!pending) return;
     clearTimeout(pending.timeout);
+    clearTimeout(pending.dispatchTimeout);
     this.pendingById.delete(requestId);
     const queue = this.queues.get(nodeId);
     if (!queue) return;
     const next = queue.filter((candidate) => candidate.request.id !== requestId);
     if (next.length > 0) this.queues.set(nodeId, next);
     else this.queues.delete(nodeId);
+  }
+
+  private expirePending(pending: PendingDispatch, fields: Record<string, unknown>, limitMs: number): void {
+    const nodeId = pending.nodeId;
+    const requestId = pending.request.id;
+    if (this.pendingById.get(requestId) !== pending) return;
+    const outcome = pending.delivered ? "indeterminate_after_dispatch" : "not_dispatched";
+    this.removePending(nodeId, requestId);
+    if (pending.delivered) this.rememberTimeout(nodeId, requestId, fields);
+    const queuedMs = Date.now() - Date.parse(pending.request.createdAt);
+    this.emitEvent("node_request_timeout", { ...fields, outcome, queuedMs });
+    const error = new Error(`Node ${nodeId} did not complete request ${requestId} within ${limitMs}ms (${outcome}).`
+      + (pending.delivered ? " The remote operation may still be running or completed. Inspect its owner before retrying; do not replay a mutating operation." : " The request was never delivered."));
+    for (const waiter of pending.waiters) waiter.reject(error);
   }
 
   private belongsToNode(nodeId: string, pending: PendingDispatch): boolean {

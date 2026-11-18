@@ -125,7 +125,7 @@
           ]
         },
         "requestTimeoutMs": {
-          "default": 180000,
+          "default": 100000,
           "type": "integer",
           "minimum": 5000,
           "maximum": 1800000

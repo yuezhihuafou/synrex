@@ -27,7 +27,15 @@ test("nested fetch connection errors retain safe network codes without persistin
   assert.equal(errorCategory(new TypeError("fetch failed", {
     cause: Object.assign(new Error("DNS"), { code: "EAI_AGAIN" }),
   })), "transport");
+  assert.equal(errorCategory(new TypeError("fetch failed", {
+    cause: new AggregateError([
+      Object.assign(new Error("private IPv6 route"), { code: "ETIMEDOUT" }),
+      Object.assign(new Error("private IPv4 route"), { code: "ENETUNREACH" }),
+    ], "sensitive addresses"),
+  })), "timeout");
   assert.equal(sanitizeDiagnostic("node_transport", { errorCode: "SECRET_VALUE" }).errorCode, undefined);
+  assert.equal(errorCategory(Object.assign(new Error("unauthorized"), { status: 401 })), "auth");
+  assert.equal(errorCategory(Object.assign(new Error("upstream gateway unavailable"), { status: 503 })), "transport");
 });
 
 test("concurrent phase traces preserve request identity and redact arbitrary errors", async (t) => {

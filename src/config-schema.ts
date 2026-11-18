@@ -33,7 +33,10 @@ const clusterConfigSchema = z.object({
   role: z.enum(["standalone", "coordinator", "peer", "gateway", "worker"]).default("standalone"),
   gatewayUrl: z.string().url().nullable().default(null),
   gatewayFallbackUrl: z.string().url().nullable().default(null),
-  requestTimeoutMs: z.number().int().min(5_000).max(30 * 60_000).default(180_000),
+  // Ordinary ChatGPT MCP clients may close a tool HTTP request at ~120s.
+  // Default below that boundary; callers with longer-lived transports may
+  // explicitly opt into a larger deadline. Undelivered requests fail sooner.
+  requestTimeoutMs: z.number().int().min(5_000).max(30 * 60_000).default(100_000),
   pollWaitMs: z.number().int().min(1_000).max(30_000).default(25_000),
   heartbeatMs: z.number().int().min(1_000).max(60_000).default(15_000),
   suspectAfterMs: z.number().int().min(5_000).max(10 * 60_000).default(45_000),

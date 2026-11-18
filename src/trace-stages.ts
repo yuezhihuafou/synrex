@@ -5,7 +5,11 @@ import { runWithRequestLogContext } from "./logger.js";
 import { emitNativeSpan } from "./native-otel.js";
 
 export function errorCategory(error: unknown): string {
-  const value = error as { code?: unknown; name?: unknown; message?: unknown } | null;
+  const value = error as { code?: unknown; name?: unknown; message?: unknown; status?: unknown } | null;
+  if (value?.status === 401 || value?.status === 403) return "auth";
+  if (value?.status === 408 || value?.status === 504) return "timeout";
+  if (value?.status === 429 || value?.status === 502 || value?.status === 503) return "transport";
+  if (value?.status === 400 || value?.status === 404 || value?.status === 409 || value?.status === 422) return "protocol";
   const code = transportErrorCode(error);
   if (code === "ENOENT") return "not_found";
   if (code === "EACCES" || code === "EPERM") return "permission";
@@ -19,15 +23,18 @@ export function errorCategory(error: unknown): string {
   return "internal";
 }
 
-/** Inspect nested fetch/Undici causes, but never persist arbitrary error text. */
+/** Inspect nested fetch/Undici/dual-stack aggregate causes without recording error text. */
 export function transportErrorCode(error: unknown): string | undefined {
   const seen = new Set<unknown>();
-  let current: unknown = error;
-  for (let depth = 0; depth < 4 && current && typeof current === "object" && !seen.has(current); depth += 1) {
+  const queue: unknown[] = [error];
+  for (let visited = 0; queue.length > 0 && visited < 16; visited += 1) {
+    const current = queue.shift();
+    if (!current || typeof current !== "object" || seen.has(current)) continue;
     seen.add(current);
-    const value = current as { code?: unknown; cause?: unknown };
+    const value = current as { code?: unknown; cause?: unknown; errors?: unknown };
     if (typeof value.code === "string" && /^(ENOENT|EACCES|EPERM|ETIMEDOUT|ECONNREFUSED|ECONNRESET|EPIPE|EHOSTUNREACH|ENETUNREACH|ENOTFOUND|EAI_AGAIN|UND_ERR_CONNECT_TIMEOUT|ERR_STREAM_PREMATURE_CLOSE)$/.test(value.code)) return value.code;
-    current = value.cause;
+    if (value.cause) queue.push(value.cause);
+    if (Array.isArray(value.errors)) queue.push(...value.errors.slice(0, 8));
   }
   return undefined;
 }

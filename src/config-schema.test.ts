@@ -10,6 +10,13 @@ assert.throws(
   /Unrecognized key/,
 );
 
+const shortHostDeadline = devspaceConfigSchema.parse({ configVersion: 1 });
+assert.equal(shortHostDeadline.cluster.requestTimeoutMs, 100_000,
+  "default RPC deadline should return before the observed host transport cutoff");
+assert.equal(devspaceConfigSchema.parse({
+  configVersion: 1, cluster: { requestTimeoutMs: 240_000 },
+}).cluster.requestTimeoutMs, 240_000, "explicit long-lived host transports retain an override");
+
 for (const url of [
   "https://tunnel.example.com/v1/mcp/tunnel_123",
   "http://localhost:7676/mcp",

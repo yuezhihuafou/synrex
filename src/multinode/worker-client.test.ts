@@ -2,11 +2,71 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:http";
 import test from "node:test";
 import type { ToolInvoker } from "../tool-invoker.js";
 import type { NodeLinkRequest } from "./link-hub.js";
 import { NodeWorkerClient } from "./worker-client.js";
 import { sanitizeDiagnostic } from "../diagnostic-trace.js";
+
+test("peer control HTTP honors proxy variables without Node startup flags and bypasses loopback", async (t) => {
+  const saved = Object.fromEntries([
+    "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy",
+    "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY",
+  ].map((key) => [key, process.env[key]]));
+  const proxyRequests: string[] = [];
+  const proxy = createServer((request, response) => {
+    proxyRequests.push(request.url ?? "");
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ ok: true }));
+  });
+  const local = createServer((_request, response) => {
+    response.setHeader("content-type", "application/json");
+    response.end(JSON.stringify({ local: true }));
+  });
+  await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  await new Promise<void>((resolve) => local.listen(0, "127.0.0.1", resolve));
+  t.after(async () => {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await Promise.all([new Promise<void>((resolve) => proxy.close(() => resolve())),
+      new Promise<void>((resolve) => local.close(() => resolve()))]);
+  });
+  const proxyPort = (proxy.address() as { port: number }).port;
+  const localPort = (local.address() as { port: number }).port;
+  process.env.HTTP_PROXY = `http://127.0.0.1:${proxyPort}`;
+  process.env.HTTPS_PROXY = `http://127.0.0.1:${proxyPort}`;
+  process.env.NO_PROXY = "";
+  delete process.env.NODE_USE_ENV_PROXY;
+  delete process.env.http_proxy;
+  delete process.env.https_proxy;
+  delete process.env.all_proxy;
+  delete process.env.ALL_PROXY;
+  delete process.env.no_proxy;
+  const createWorker = (gatewayUrl: string) => new NodeWorkerClient({
+    gatewayUrl,
+    node: {
+      id: "node_proxy", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 }, platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "secret", pollWaitMs: 1_000, heartbeatMs: 15_000,
+    invoker: { call: async () => ({}) } as unknown as ToolInvoker,
+  });
+  const remote = createWorker("http://unresolvable-controller.invalid");
+  const direct = createWorker(`http://127.0.0.1:${localPort}`);
+  t.after(async () => { await remote.close(); await direct.close(); });
+  const request = (worker: NodeWorkerClient) => (worker as unknown as {
+    request(action: string, body: unknown, timeoutMs: number): Promise<unknown>;
+  }).request("heartbeat", {}, 1000);
+  assert.deepEqual(await request(remote), { ok: true });
+  assert.deepEqual(proxyRequests, ["http://unresolvable-controller.invalid/_devspace/node/v1/heartbeat"]);
+  assert.deepEqual(await request(direct), { local: true });
+  assert.equal(proxyRequests.length, 1, "loopback traffic must not be proxied");
+});
 
 test("worker logs which control RPC failed with a safe nested error code", async () => {
   const diagnostics: ReturnType<typeof sanitizeDiagnostic>[] = [];
@@ -77,6 +137,162 @@ test("worker uses secondary controller URL only for transport faults", async () 
   primaryStatus = 401;
   await assert.rejects(() => call("heartbeat", {}, 2000), /401/);
   assert.equal(seen.length, 3, "401 must not fall back to a different address");
+});
+
+test("failed primary is diagnosable after fallback and telemetry errors do not break requests", async () => {
+  const events: ReturnType<typeof sanitizeDiagnostic>[] = [];
+  const client = new NodeWorkerClient({
+    gatewayUrl: "https://first.example", gatewayFallbackUrl: "https://second.example",
+    node: {
+      id: "node_metrics", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 }, platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "private", pollWaitMs: 1_000, heartbeatMs: 15_000,
+    invoker: { call: async () => ({}) } as unknown as ToolInvoker,
+    fetchImpl: (async (url: string | URL | Request) => String(url).includes("first.example")
+      ? new Response("private gateway error text", { status: 503 })
+      : new Response(JSON.stringify({ ok: true }), {
+        status: 200, headers: { "content-type": "application/json" },
+      })) as typeof fetch,
+    onMetric: () => { throw new Error("observability exporter failed"); },
+    onDiagnostic: (event, fields) => events.push(sanitizeDiagnostic(event, fields)),
+  });
+  const call = (client as unknown as {
+    request(action: string, body: unknown, timeoutMs: number): Promise<unknown>;
+  }).request.bind(client);
+  assert.deepEqual(await call("heartbeat", {}, 1000), { ok: true });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.stage, "peer_heartbeat");
+  assert.equal(events[0]?.errorCategory, "transport");
+  assert.equal(events[0]?.status, 503);
+  assert.ok(!JSON.stringify(events).includes("private gateway error text"));
+});
+
+test("timeout of the primary control URL attempts the secondary URL", async () => {
+  const seen: string[] = [];
+  const client = new NodeWorkerClient({
+    gatewayUrl: "http://127.0.0.1:7678", gatewayFallbackUrl: "https://backup.example",
+    node: {
+      id: "node_timeout", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 }, platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "private-token", pollWaitMs: 1_000, heartbeatMs: 15_000,
+    invoker: { call: async () => ({}) } as unknown as ToolInvoker,
+    fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(url));
+      if (String(url).includes("127.0.0.1")) return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("deadline", "AbortError")), { once: true });
+      });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch,
+  });
+  const call = (client as unknown as {
+    request(action: string, body: unknown, timeoutMs: number): Promise<unknown>;
+  }).request.bind(client);
+  const timeout = new Promise<never>((_resolve, reject) => {
+    setTimeout(() => reject(new Error("backup URL was not tried")), 500);
+  });
+  assert.deepEqual(await Promise.race([call("heartbeat", {}, 25), timeout]), { ok: true });
+  assert.equal(seen.length, 2);
+  assert.ok(seen[1]?.startsWith("https://backup.example"));
+});
+
+test("redelivery of a still-active write does not report an indeterminate outcome", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "synrex-inflight-delivery-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let releaseWrite!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let writes = 0;
+  let completed = 0;
+  const worker = new NodeWorkerClient({
+    gatewayUrl: "https://controller.example",
+    node: {
+      id: "node_inflight", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 }, platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "token", pollWaitMs: 1_000, heartbeatMs: 15_000,
+    stateDir: root,
+    invoker: { async call() { writes += 1; await blocked; return { structuredContent: { ok: true } }; } } as unknown as ToolInvoker,
+    fetchImpl: (async () => {
+      completed += 1;
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch,
+  });
+  const schedule = (worker as unknown as {
+    schedule(request: NodeLinkRequest): Promise<void>;
+  }).schedule.bind(worker);
+  const request: NodeLinkRequest = {
+    id: "nrq_inflight-write", createdAt: new Date().toISOString(),
+    call: { name: "apply_patch", arguments: { workspaceId: "ws_project", patch: "write once" } },
+  };
+  const first = schedule(request);
+  for (let i = 0; i < 40 && writes < 1; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(writes, 1);
+  await schedule(request);
+  assert.equal(writes, 1);
+  assert.equal(completed, 0, "duplicate must not acknowledge while original is running");
+  releaseWrite();
+  await first;
+  assert.equal(writes, 1);
+  assert.equal(completed, 1);
+});
+
+test("failed peer poll reconnects without waiting for an unrelated active tool", async (t) => {
+  let started!: () => void;
+  const toolStarted = new Promise<void>((resolve) => { started = resolve; });
+  let release!: () => void;
+  const toolFinished = new Promise<void>((resolve) => { release = resolve; });
+  let registers = 0;
+  let polls = 0;
+  let executed = 0;
+  const request: NodeLinkRequest = {
+    id: "nrq_ongoing-write", createdAt: new Date().toISOString(),
+    call: { name: "apply_patch", arguments: { workspaceId: "ws_same", patch: "test" } },
+  };
+  const json = (data: unknown) => new Response(JSON.stringify(data), {
+    status: 200, headers: { "content-type": "application/json" },
+  });
+  const client = new NodeWorkerClient({
+    gatewayUrl: "https://coordinator.example",
+    node: {
+      id: "node_reconnect", kind: "local", health: "online",
+      protocol: { major: 1, minor: 0 }, platform: { os: "linux", arch: "x64" },
+      capabilities: { toolMode: "codex", features: [], labels: {} },
+      createdAt: new Date().toISOString(), lastSeenAt: new Date().toISOString(),
+    },
+    nodeToken: "token", pollWaitMs: 1_000, heartbeatMs: 60_000,
+    maxConcurrentCalls: 2,
+    invoker: { async call() { executed += 1; started(); await toolFinished; return { structuredContent: { ok: true } }; } } as unknown as ToolInvoker,
+    fetchImpl: (async (url: string | URL | Request, init?: RequestInit) => {
+      const action = String(url).split("/").at(-1);
+      if (action === "register") { registers += 1; return json({ ok: true }); }
+      if (action === "complete") return json({ ok: true });
+      if (action !== "poll") throw new Error("Unexpected control API action");
+      polls += 1;
+      if (polls === 1) return json({ ok: true, request });
+      if (polls === 2) {
+        await toolStarted;
+        throw Object.assign(new Error("control link disconnected"), { code: "ECONNRESET" });
+      }
+      return await new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true });
+      });
+    }) as typeof fetch,
+  });
+  t.after(async () => { release(); await client.close(); });
+  client.start();
+  for (let i = 0; i < 150 && registers < 2; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(executed, 1);
+  assert.ok(registers >= 2, "control loop should re-register even while another poller executes a write");
+  release();
 });
 
 test("worker runs parallel reads but preserves per-workspace write ordering", async () => {

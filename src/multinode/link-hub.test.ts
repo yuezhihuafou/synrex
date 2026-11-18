@@ -166,6 +166,39 @@ test("timeout before dispatch is never classified as an executed mutation", asyn
   } finally { hub.close(); }
 });
 
+test("disconnected peer fails queued calls before the longer execution deadline", async () => {
+  const events: Array<{ event: string; outcome?: string; queuedMs?: number }> = [];
+  const hub = new NodeLinkHub(1_000, 100, (event, fields) => {
+    events.push({ event, outcome: String(fields.outcome ?? ""), queuedMs: Number(fields.queuedMs ?? 0) });
+  }, 25);
+  try {
+    const call = hub.call("offline_peer", { name: "exec_command", arguments: { cmd: "must-not-run" } });
+    const rejected = assert.rejects(call, /within 25ms \(not_dispatched\).*never delivered/);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    await rejected;
+    assert.ok(events.some((entry) => entry.event === "node_request_timeout"
+      && entry.outcome === "not_dispatched" && (entry.queuedMs ?? 0) >= 20));
+    assert.equal((hub as unknown as { pendingById: Map<string, unknown> }).pendingById.size, 0,
+      "the undelivered call must be removed rather than replayed on reconnect");
+  } finally {
+    hub.close();
+  }
+});
+
+test("delivery cancels the short queue deadline while keeping execution timeout", async () => {
+  const hub = new NodeLinkHub(200, 50, undefined, 20);
+  try {
+    const call = hub.call("busy_peer", { name: "exec_command", arguments: {} });
+    const request = await hub.poll("busy_peer", 5);
+    assert.ok(request);
+    await new Promise((resolve) => setTimeout(resolve, 45));
+    hub.complete("busy_peer", request.id, { ok: true });
+    assert.deepEqual(await call, { ok: true });
+  } finally {
+    hub.close();
+  }
+});
+
 test("a failing observability callback cannot strand a timed-out RPC", async () => {
   const hub = new NodeLinkHub(20, 10, () => { throw new Error("diagnostic output failed"); });
   try {

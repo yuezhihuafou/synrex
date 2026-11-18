@@ -48,6 +48,13 @@ if test -n "$(git status --porcelain=v1)"; then
   echo 'PROMOTION_BLOCKED source checkout has uncommitted or untracked changes' >&2
   exit 75
 fi
+# A worktree used for local QA may link node_modules to a mutable source
+# checkout. Never package that symlink as an "immutable" release dependency
+# tree, even when all source and dist hashes are otherwise valid.
+if test -L node_modules || { test -e node_modules && test "$(realpath node_modules)" != "$source_repo/node_modules"; }; then
+  echo 'PROMOTION_BLOCKED node_modules is an external dependency symlink; install dependencies locally in the clean release checkout' >&2
+  exit 75
+fi
 source_sha=$(git rev-parse --verify HEAD)
 if ! [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
   echo 'PROMOTION_BLOCKED invalid source revision' >&2
@@ -115,6 +122,10 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
 {
   echo '--- clean source / typecheck / build ---'
   pnpm install --frozen-lockfile
+  if test -L node_modules || test "$(realpath node_modules)" != "$source_repo/node_modules"; then
+    echo 'PROMOTION_BLOCKED package dependencies did not materialize inside the release checkout' >&2
+    exit 75
+  fi
   # Worktrees may have been created with --ignore-scripts. A present JS
   # package is not proof its native PTY addon is loadable. Rebuild and smoke
   # before packaging node_modules into an immutable release.
