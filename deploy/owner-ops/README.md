@@ -81,6 +81,40 @@ and the common owner guard; do not switch swy1's public OAuth authority as
 part of PC onboarding. The PC standalone switcher is not safe for swy1's
 live coordinator because it does not pause and drain the stable ingress.
 
+### Lightweight, manual release from tested `main`
+
+Run these commands on **swy1**, from a clean checkout at the exact published
+`origin/main` revision (not an active dirty development checkout):
+
+```bash
+bash deploy/promote-main.sh --status
+bash deploy/promote-main.sh --check
+bash deploy/promote-main.sh --deploy
+```
+
+- `--status` is read-only: compares local, public main and the actual pinned
+  production revision, checks ancestry and requires the **latest exact-commit
+  GitHub push CI** to have completed successfully. Missing, pending, failed,
+  or inaccessible CI blocks release; `gh` CLI authentication is required.
+- `--check` revalidates the same CI result, runs the existing full local QA
+  and isolated authenticated ingress smoke, and packages a verified immutable
+  candidate **without activating it**.
+- `--deploy` runs the same guarded build/QA/backup/switch transaction in an
+  independent user systemd unit, so an MCP disconnect cannot interrupt the
+  deployment worker. The dispatch message is **not** proof of activation.
+  Inspect `journalctl --user -u <unit>` and the private
+  `release-receipt.json` before reporting completion. Activation already
+  has health checks and automatic rollback to the previous pinned build.
+
+GitHub Pages deploys from `main` independently. No release tag, production
+auto-updater, new service, or cross-node rollout controller is created.
+
+On constrained Linux kernels the Pi sandbox integration test explicitly
+checks that sandbox command execution **fails closed** when nested userns
+creation is denied. That is not proof of successful filesystem isolation on
+a kernel where sandbox execution is supported; test both paths before
+claiming cross-kernel coverage.
+
 ## Recovery limits
 
 Online snapshots and verified release switches protect recoverable state, not

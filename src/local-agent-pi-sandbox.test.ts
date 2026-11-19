@@ -56,9 +56,25 @@ if (SandboxManager.isSupportedPlatform() && dependencies.errors.length === 0 && 
       const message = String(error);
       const restrictedUserns = /apply-seccomp: write \/proc\/self\/setgroups|nested userns is capability-restricted/.test(message)
         && /Permission denied|CAP_SYS_ADMIN/.test(message);
-      if (restrictedUserns && process.env.DEVSPACE_REQUIRE_PI_SANDBOX !== "1") {
-        t.diagnostic(`Pi sandbox kernel capability unavailable: ${message.slice(0, 250)}`);
-        t.skip("nested apply-seccomp user namespace requires unavailable host privileges");
+      if (restrictedUserns) {
+        // A GitHub-hosted runner can permit bwrap but deny the nested userns
+        // used by apply-seccomp. That environment must fail closed: no shell
+        // command may execute outside (or inside) the protected workspace.
+        // This is a separate security assertion, NOT a successful test of
+        // filesystem isolation on a capable kernel.
+        await assert.rejects(
+          bash.execute("pi-sandbox-restricted-kernel-no-fallback", {
+            command: `touch '${outside}'`,
+          }),
+          (nextError: unknown) => {
+            const next = String(nextError);
+            return /apply-seccomp: write \/proc\/self\/setgroups|nested userns is capability-restricted/.test(next)
+              && /Permission denied|CAP_SYS_ADMIN/.test(next);
+          },
+          "restricted kernel must not execute the command without the sandbox",
+        );
+        assert.equal(existsSync(outside), false, "denied sandbox must not execute the write");
+        t.diagnostic("Pi sandbox: nested userns unavailable; fail-closed verified, filesystem isolation requires a capable host");
         return;
       }
       throw error;

@@ -8,12 +8,44 @@
 set -euo pipefail
 mode=${1:---check}
 source_repo=${2:-$(pwd)}
-if test "$mode" != --check && test "$mode" != --deploy; then
-  echo "Usage: promote-main.sh --check|--deploy [clean-source-checkout]" >&2
+if test "$mode" != --status && test "$mode" != --check && test "$mode" != --deploy; then
+  echo "Usage: promote-main.sh --status|--check|--deploy [clean-source-checkout]" >&2
   exit 64
 fi
 source_repo=$(realpath "$source_repo")
 cd "$source_repo"
+# Read-only fast path for a developer deciding whether to build/promote.
+# This does not create releases, touch state, or restart the running owner.
+if test "$mode" = --status; then
+  if test "$(git remote get-url origin)" != 'https://github.com/yuezhihuafou/synrex.git'; then
+    echo 'PROMOTION_BLOCKED non-canonical Git origin' >&2
+    exit 75
+  fi
+  if test -n "$(git status --porcelain=v1)"; then
+    echo 'PROMOTION_BLOCKED source checkout is dirty' >&2
+    exit 75
+  fi
+  source_sha=$(git rev-parse --verify HEAD)
+  main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk '$2=="refs/heads/main"{print $1}')
+  active_path=$(systemctl --user show devspace.service -p ExecStart | grep -oE '/home/swy/services/devspace/releases/[^ ;]+/dist/cli.js' | head -1)
+  if test -z "$active_path" || test -z "$main_sha"; then
+    echo 'PROMOTION_BLOCKED missing pinned owner or canonical main' >&2
+    exit 75
+  fi
+  active_release=${active_path%/dist/cli.js}
+  active_sha=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["sourceRevision"])' "$active_release/release-manifest.json")
+  printf 'PROMOTION_STATUS source=%s main=%s active=%s\n' "$source_sha" "$main_sha" "$active_sha"
+  if test "$source_sha" != "$main_sha"; then
+    echo 'PROMOTION_BLOCKED checkout is not published origin/main' >&2
+    exit 75
+  fi
+  if ! git merge-base --is-ancestor "$active_sha" "$source_sha"; then
+    echo 'PROMOTION_BLOCKED owner source is not an ancestor of main' >&2
+    exit 75
+  fi
+  python3 deploy/check-main-ci.py "$source_sha"
+  exit $?
+fi
 if test "$mode" = --deploy && test "${SYNREX_PROMOTION_WORKER:-}" != 1; then
   # Dispatch BEFORE taking the transaction lock. The systemd worker owns it
   # until activation (or rollback) completes, even if the MCP caller drops.
@@ -68,6 +100,12 @@ fi
 main_sha=$(git ls-remote --exit-code origin refs/heads/main | awk '$2=="refs/heads/main"{print $1}')
 if test "$source_sha" != "$main_sha"; then
   echo "PROMOTION_BLOCKED this source is not the current main: local=${source_sha:0:12} remote=${main_sha:0:12}" >&2
+  exit 75
+fi
+# Never turn a red, pending or missing GitHub CI run into a production build.
+# The host's full local QA and isolated OAuth smoke remain independent gates.
+if ! python3 deploy/check-main-ci.py "$source_sha"; then
+  echo 'PROMOTION_BLOCKED public main CI is not successful' >&2
   exit 75
 fi
 active_path=$(systemctl --user show devspace.service -p ExecStart | grep -oE '/home/swy/services/devspace/releases/[^ ;]+/dist/cli.js' | head -1)
@@ -153,6 +191,7 @@ echo "PROMOTION_BUILDING candidate=$release_id current=${active_sha:0:12}"
   fi
   python3 -m unittest discover -s tests -p 'test_*p0.py'
   python3 -m unittest discover -s tests -p 'test_release_provenance.py'
+  python3 -m unittest discover -s tests -p 'test_check_main_ci.py'
   python3 -m unittest discover -s tests -p 'test_activate_owner_release.py'
   python3 -m unittest discover -s tests -p 'test_migrate_stable_ingress.py'
   "$node" --test scripts/ingress-gate.test.mjs
