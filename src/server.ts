@@ -456,16 +456,14 @@ function registerMcpSurface(
     },
   );
 
-  registerAppTool(
-    registrationTarget,
+  registrationTarget.registerTool(
     "open_host",
     {
       title: "Open host management session",
-      description: "Select an explicitly named online execution node for host-level administration without guessing a project directory. Returns a normal workspaceId anchored to an advertised root; subsequent exec_command uses existing authenticated execution and task tracking. Does not relax workspace file access rules.",
+      description: "Open a host session on an explicitly named node; then use exec_command with the returned workspaceId. Existing file-root limits remain enforced.",
       inputSchema: {
-        node: z.string().trim().min(1).describe("Required execution node alias or ID; never guess or silently fall back."),
+        node: z.string().trim().min(1).describe("Explicit node alias or ID."),
       },
-      ...workspaceAppDescriptorMeta(config),
       annotations: { readOnlyHint: true },
     },
     async () => {

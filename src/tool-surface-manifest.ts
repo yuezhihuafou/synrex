@@ -4,6 +4,7 @@ import type { ToolMode } from "./config.js";
 const TOOL_NAMES: Record<ToolMode, readonly string[]> = {
   claude: [
     "open_workspace",
+    "open_host",
     "read",
     "project",
     "write",
@@ -16,6 +17,7 @@ const TOOL_NAMES: Record<ToolMode, readonly string[]> = {
   ],
   codex: [
     "open_workspace",
+    "open_host",
     "read",
     "project",
     "apply_patch",

@@ -675,8 +675,9 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
     0,
   );
   // Explicit workflow IDs, observed goal evidence and the continuity UI add
-  // bounded optional fields; keep the entire surface below 22.5 KiB.
-  assert.ok(totalBytes <= 22_500, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
+  // bounded optional fields and the explicit host-management entrypoint;
+  // keep the entire surface below 23 KiB.
+  assert.ok(totalBytes <= 23_000, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
   const opened = structuredContent(await callOpen(context.client, context.project));
   const semanticResponse = await context.client.callTool({
     name: "semantic_code",
