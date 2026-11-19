@@ -466,7 +466,12 @@ function registerMcpSurface(
       },
       annotations: { readOnlyHint: true },
     },
-    async () => {
+    async ({ node }) => {
+      // Without the multi-node wrapper, do not silently execute on this host
+      // when the caller requested an unrecognized node.
+      if (node !== undefined && node !== config.node.alias) {
+        throw new Error(`Execution node ${node} is not the configured local node.`);
+      }
       const root = config.allowedRoots[0];
       if (!root) throw new Error("No allowed root configured for host management session.");
       const opened = await workspaces.openWorkspace({ path: root, mode: "checkout" });

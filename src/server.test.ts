@@ -242,6 +242,15 @@ test("tool modes expose the expected host-facing tool surface", async (t) => {
   }
 });
 
+test("standalone open_host refuses a nonlocal node instead of falling back", async (t) => {
+  const context = await fixture(t, { toolMode: "codex", uiEnabled: false });
+  const response = await context.client.callTool({
+    name: "open_host", arguments: { node: "unrecognized-remote-node" },
+  });
+  assert.equal(response.isError, true);
+  assert.match(contentText(response), /not the configured local node/);
+});
+
 test("GPT coding workflow checkpoints are resumable through MCP after a new workspace opening", async (t) => {
   const context = await fixture(t, { toolMode: "codex", git: true });
   const opened = structuredContent(await callOpen(context.client, context.project));
