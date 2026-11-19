@@ -186,6 +186,7 @@ function cardFields(record: Record<string, unknown> | undefined): Partial<ToolRe
 
   return definedFields({
     workspaceId: stringField(record.workspaceId),
+    reviewRef: stringField(record.reviewRef),
     path: stringField(record.path),
     root: stringField(record.root),
     workspaceReused: booleanField(record.workspaceReused),

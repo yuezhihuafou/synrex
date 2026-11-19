@@ -59,6 +59,7 @@ import {
 import { DurableTaskManager } from "./durable-tasks.js";
 import { ProcessSessionManager } from "./process-sessions.js";
 import { createReviewCheckpointManager } from "./review-checkpoints.js";
+import { reviewCardPayload } from "./review-card-payload.js";
 import {
   conversationScopeIdFromRequestMeta,
   conversationTitleFromRequestMeta,
@@ -1004,14 +1005,7 @@ function registerMcpSurface(
         content,
         ...(architectureErrors.length > 0 ? { isError: true } : {}),
         _meta: {
-          card: {
-            workspaceId,
-            summary: review.summary,
-            files: review.files,
-            payload: {
-              patch: review.patch,
-            },
-          },
+          card: { workspaceId, ...reviewCardPayload(review) },
         },
         structuredContent: {
           workspaceId,

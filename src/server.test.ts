@@ -1240,6 +1240,36 @@ test("show_changes can reopen a historical review without advancing the checkpoi
   );
 });
 
+test("show_changes keeps large Git reviews out of the inline MCP payload", async (t) => {
+  const context = await fixture(t, { git: true });
+  const workspaceId = structuredContent(await callOpen(context.client, context.project, "large-review")).workspaceId;
+  assert.equal(typeof workspaceId, "string");
+  await Promise.all(Array.from({ length: 163 }, (_, i) =>
+    writeFile(join(context.project, `review-${i}.txt`), `${"x".repeat(1000)}\n`),
+  ));
+
+  const response = await context.client.callTool({
+    name: "show_changes",
+    arguments: { workspaceId },
+  });
+  const card = responseCard(response);
+  const structured = structuredContent(response);
+  assert.equal((card.summary as { files: number }).files, 163);
+  assert.equal((card.summary as { patchOmitted: boolean }).patchOmitted, true);
+  assert.equal((card.payload as { patch: string }).patch, "");
+  assert.equal((card.files as unknown[]).length, 163);
+  assert.match(String(structured.reviewRef), /^[a-f0-9]{40,64}$/);
+  assert.ok(Buffer.byteLength(JSON.stringify(response)) < 90_000);
+
+  const replay = await context.client.callTool({
+    name: "show_changes",
+    arguments: { workspaceId },
+    _meta: { "devspace/reviewRef": structured.reviewRef },
+  } as Parameters<Client["callTool"]>[0]);
+  assert.equal((responseCard(replay).payload as { patch: string }).patch, "");
+  assert.equal(structuredContent(replay).reviewRef, structured.reviewRef);
+});
+
 test("open_workspace keeps lifecycle flags out of model output and preserves complete card metadata", async (t) => {
   const providerNote = "available";
   const context = await fixture(t, {

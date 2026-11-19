@@ -20,6 +20,7 @@ export interface ToolResultCard {
   workflowRemaining?: string[];
   workflowBlockers?: string[];
   workspaceId?: string;
+  reviewRef?: string;
   path?: string;
   root?: string;
   workspaceReused?: boolean;

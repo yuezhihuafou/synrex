@@ -57,6 +57,22 @@ function ReviewPayload({
   const [openFiles, setOpenFiles] = useState(() => new Set<string>());
 
   if (errorMessage) return <StatusLine message={errorMessage} tone="error" />;
+  if (!patch && card.summary?.patchOmitted === true) {
+    const reference = card.reviewRef;
+    return <div className="review-diff">
+      <StatusLine message="Large diff omitted from the chat response to keep transport bounded. File statistics remain available below." />
+      {reference && <p>Full patch: <code>synrex review {reference}</code> (run on the workspace host).</p>}
+      <div className="review-diff-files">
+        {(card.files ?? []).slice(0, visibleFileCount).map((file, index) => <div className="review-diff-file" key={`${file.path ?? ""}-${index}`}>
+          <div className="review-diff-file-header">
+            <span className="review-file-name">{file.path}</span>
+            <span className="review-diff-file-stats"><span className="add">+{file.additions ?? 0}</span><span className="remove">-{file.removals ?? 0}</span></span>
+          </div>
+        </div>)}
+      </div>
+      {Number(card.summary?.omittedFileCount ?? 0) > 0 && <p>More file entries are available in the full review.</p>}
+    </div>;
+  }
   if (!patch) return <StatusLine message="Diff payload is not available." />;
   if (files.length === 0) return <StatusLine message="No diff hunks to review." />;
 
