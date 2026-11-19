@@ -133,6 +133,10 @@ test("nonzero command is a completed task with an error tool result", async () =
       command: `${node} -e "process.exit(7)"`,
     }, 250);
     assert.ok(snapshot.taskId);
+    // A busy CI runner may not finish the child within the start yield.
+    // Assert the terminal result only after the owned runner actually exits.
+    assert.ok(runner);
+    assert.equal(await runner, 7);
     const task = await manager.get(process.cwd(), snapshot.taskId);
     assert.equal(task.status, "completed");
     assert.equal(task.result?.isError, true);
