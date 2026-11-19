@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { parse } from "jsonc-parser";
+import { expectedToolNames } from "../src/tool-surface-manifest.js";
 
 const release = resolve(process.argv[2] ?? "");
 if (!process.argv[2]) throw new Error("Usage: tsx scripts/probe-reliable-release.ts <pinned-release-directory>");
@@ -97,7 +98,7 @@ async function runAuthenticatedProbe(env: NodeJS.ProcessEnv, resumeId?: string) 
     qaMailboxDelivered?: boolean;
     qaFinalBarrierVerified?: boolean;
   };
-  assert.equal(result.toolCount, 17);
+  assert.equal(result.toolCount, expectedToolNames("codex").length);
   if (!resumeId) {
     assert.equal(result.qaMailboxDelivered, true, "Normal tool reply must carry completion mailbox event");
     assert.equal(result.qaFinalBarrierVerified, true, "Legacy final barrier must complete over HTTP");
