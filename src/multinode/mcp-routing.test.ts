@@ -8,6 +8,48 @@ import { MultiNodeRouter, type NodeTransport } from "./router.js";
 import { withMultiNodeRouting } from "./mcp-routing.js";
 import { SqliteControlPlaneStore } from "./store.js";
 
+test("open_host selects an explicit online node without a caller-supplied workspace path", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "synrex-open-host-"));
+  const store = new SqliteControlPlaneStore(dir);
+  t.after(async () => { store.close(); await rm(dir, { recursive: true, force: true }); });
+  const local = store.ensureLocalNode({
+    alias: "local", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {}, workspaceRoots: ["/home/local"] },
+  });
+  const remote = store.registerRemoteNode({
+    id: "node_gpu_host", alias: "gpu", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {}, workspaceRoots: ["/home/gpu/work"],
+      toolContracts: { open_workspace: 1, exec_command: 1 } },
+  });
+  const calls: Array<{ nodeId: string; name: string; args: Record<string, unknown> }> = [];
+  const router = new MultiNodeRouter(store, { async call(nodeId, call) {
+    calls.push({ nodeId, name: call.name, args: call.arguments });
+    return call.name === "open_workspace"
+      ? { structuredContent: { workspaceId: "ws_remote_host", root: "/home/gpu/work" } }
+      : { structuredContent: { result: "remote-host-ok" } };
+  } }, local.id);
+  const handlers = new Map<string, (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown>();
+  const target: McpRegistrationTarget = {
+    registerTool: ((name: string, _def: unknown, handler: (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown) => {
+      handlers.set(name, handler); return {};
+    }) as McpRegistrationTarget["registerTool"],
+    registerResource: (() => ({})) as unknown as McpRegistrationTarget["registerResource"],
+  };
+  const surface = withMultiNodeRouting(target, { router, store, localNodeId: local.id });
+  for (const name of ["open_host", "exec_command"]) {
+    (surface.registerTool as unknown as (name: string, def: unknown, handler: (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown) => unknown)(
+      name, {}, async (input) => ({ structuredContent: { workspaceId: "ws_local_host", root: input.path } }),
+    );
+  }
+  await assert.rejects(() => Promise.resolve(handlers.get("open_host")!({ node: "unknown" }, {})), /Unknown execution node/);
+  const opened = await handlers.get("open_host")!({ node: "gpu" }, {}) as Record<string, unknown>;
+  const id = (opened.structuredContent as Record<string, unknown>).workspaceId as string;
+  assert.equal(store.resolveWorkspace(id)?.nodeId, remote.id);
+  await handlers.get("exec_command")!({ workspaceId: id, cmd: "hostname" }, {});
+  assert.deepEqual(calls.map((c) => [c.nodeId, c.name]), [[remote.id, "open_workspace"], [remote.id, "exec_command"]]);
+  assert.deepEqual(calls[0]?.args, { path: "/home/gpu/work", mode: "checkout" });
+});
+
 test("MCP routing sends selected workspace to a remote node and keeps later tools sticky", async (t) => {
   const stateDir = await mkdtemp(join(tmpdir(), "devspace-mcp-routing-"));
   const store = new SqliteControlPlaneStore(stateDir);

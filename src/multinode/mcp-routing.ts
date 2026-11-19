@@ -29,6 +29,27 @@ export function withMultiNodeRouting(
       name,
       definition,
       async (input: Record<string, unknown>, extra: Record<string, unknown>) => {
+        if (name === "open_host") {
+          const selector = typeof input.node === "string" ? input.node.trim() : "";
+          if (!selector) throw new Error("open_host requires an explicit execution node.");
+          const selected = options.store.findNode(selector);
+          if (!selected) throw new Error(`Unknown execution node: ${selector}.`);
+          if (selected.health !== "online") throw new Error(`Execution node ${selector} is ${selected.health}.`);
+          const root = selected.capabilities.workspaceRoots?.[0];
+          if (!root) throw new Error(`Execution node ${selector} has no advertised workspace roots.`);
+          if (selected.id !== options.localNodeId) {
+            const result = await options.router.openWorkspace({
+              node: selected.id,
+              arguments: { path: root, mode: "checkout" },
+              meta: asMeta(extra._meta),
+            });
+            return decorateNodeResult(result, selected, options.store);
+          }
+          const result = await Promise.resolve(handler({ path: root }, extra)) as Record<string, unknown>;
+          const workspaceId = structuredString(result, "workspaceId");
+          if (workspaceId) options.store.bindWorkspace({ workspaceId, nodeId: selected.id, localWorkspaceId: workspaceId });
+          return decorateNodeResult(result, selected, options.store);
+        }
         if (name === "open_workspace") {
           const selector = typeof input.node === "string" ? input.node : undefined;
           const path = typeof input.path === "string" ? input.path : "";

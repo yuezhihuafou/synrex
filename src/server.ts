@@ -458,6 +458,34 @@ function registerMcpSurface(
 
   registerAppTool(
     registrationTarget,
+    "open_host",
+    {
+      title: "Open host management session",
+      description: "Select an explicitly named online execution node for host-level administration without guessing a project directory. Returns a normal workspaceId anchored to an advertised root; subsequent exec_command uses existing authenticated execution and task tracking. Does not relax workspace file access rules.",
+      inputSchema: {
+        node: z.string().trim().min(1).describe("Required execution node alias or ID; never guess or silently fall back."),
+      },
+      ...workspaceAppDescriptorMeta(config),
+      annotations: { readOnlyHint: true },
+    },
+    async () => {
+      const root = config.allowedRoots[0];
+      if (!root) throw new Error("No allowed root configured for host management session.");
+      const opened = await workspaces.openWorkspace({ path: root, mode: "checkout" });
+      return {
+        content: [{ type: "text" as const, text: `Host session opened at ${opened.workspace.root}. Use exec_command with workspaceId ${opened.workspace.id}; commands are not sandboxed.` }],
+        structuredContent: {
+          workspaceId: opened.workspace.id,
+          root: opened.workspace.root,
+          mode: "checkout" as const,
+          instruction: "Host management session: use exec_command with this workspaceId. Structured file edits remain subject to workspace root checks.",
+        },
+      };
+    },
+  );
+
+  registerAppTool(
+    registrationTarget,
     "open_workspace",
     {
       title: "Open workspace",
