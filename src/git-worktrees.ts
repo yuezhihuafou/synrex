@@ -136,6 +136,11 @@ export async function createManagedWorktree(input: {
   };
 }
 
+/** Roll back a newly created, not-yet-returned worktree on bootstrap failure. */
+export async function rollbackNewManagedWorktree(worktree: ManagedWorktree): Promise<void> {
+  await git(["worktree", "remove", "--force", worktree.path], worktree.sourceRoot);
+}
+
 export async function cleanupManagedWorktrees(input: {
   store: WorkspaceStore;
   worktreeRoot: string;

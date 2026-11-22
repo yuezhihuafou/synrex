@@ -1587,7 +1587,7 @@ export function createServer(
         await nodeWorker?.close();
         healthMonitor?.stop();
         linkHub?.close();
-        processSessions.shutdown();
+        await processSessions.shutdown();
         await semantic.close();
         controlPlaneStore.close();
         usageRecorder.close();

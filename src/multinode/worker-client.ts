@@ -52,6 +52,9 @@ export class NodeWorkerClient {
   private stopController = new AbortController();
   private heartbeatPending = false;
   private pollEpoch = 0;
+  // Reconnected pollers share this budget with still-running older epochs.
+  private executionSlots = 0;
+  private readonly executionWaiters: Array<() => void> = [];
   private readonly workspaceGates = new Map<string, { tail: Promise<void>; reads: Set<Promise<void>>; pending: number }>();
 
   constructor(private readonly options: NodeWorkerClientOptions) {
@@ -205,10 +208,10 @@ export class NodeWorkerClient {
     const fields = { requestId: request.id, nodeRequestId: request.id, traceId: request.call.meta?.["devspace/traceId"],
       otelTraceId: request.call.meta?.["devspace/otelTraceId"], nodeId: this.options.node.id, tool: request.call.name };
     try { this.options.onDiagnostic?.("node_peer_received", fields); } catch { /* Observational. */ }
-    const execute = () => {
+    const execute = () => this.withExecutionSlot(() => {
       try { this.options.onDiagnostic?.("node_peer_started", { ...fields, queuedMs: Math.round(performance.now() - receivedAt) }); } catch { /* Observational. */ }
       return this.execute(request);
-    };
+    });
     const workspaceId = request.call.arguments.workspaceId;
     const key = typeof workspaceId === "string"
       ? await this.options.resolveWorkspaceRoot?.(workspaceId).catch(() => undefined) ?? `workspace:${workspaceId}`
@@ -237,6 +240,23 @@ export class NodeWorkerClient {
         this.workspaceGates.delete(key);
       }
     });
+  }
+
+  private async withExecutionSlot<T>(run: () => Promise<T>): Promise<T> {
+    const limit = Math.max(1, Math.min(4, this.options.maxConcurrentCalls ?? 4));
+    if (this.executionSlots >= limit) {
+      // A releasing operation transfers its slot to exactly one waiter.
+      await new Promise<void>((resolve) => this.executionWaiters.push(resolve));
+    } else {
+      this.executionSlots += 1;
+    }
+    try {
+      return await run();
+    } finally {
+      const next = this.executionWaiters.shift();
+      if (next) next();
+      else this.executionSlots -= 1;
+    }
   }
 
   private async execute(request: NodeLinkRequest): Promise<void> {

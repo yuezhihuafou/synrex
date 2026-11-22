@@ -1,5 +1,8 @@
 /** Conservative worktree lifecycle view and GC. A workflow, not a chat, owns the workspace. */
-import { statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import path from "node:path";
+import { runStoreRoot } from "./compact-runtime/run-store.js";
 import { readFile, readlink, readdir } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -108,6 +111,18 @@ export async function inspectWorktreeLifecycle(stateDir: string, workspaceId: st
   return { ...row, diskBytes, processes, processScan };
 }
 
+/** A detached durable command outlives its MCP tool invocation and workflow. */
+function hasActiveDurableTaskMarker(root: string): boolean {
+  const key = createHash("sha256").update(path.resolve(root)).digest("hex").slice(0, 32);
+  const directory = path.join(runStoreRoot(), ".task-active", key);
+  try {
+    // A stale marker is deliberately conservative: task reconciliation can clear it.
+    return readdirSync(directory).some((name) => name.endsWith(".json"));
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
 /** Never use the legacy force-capable cleanup path for automatic reclamation. */
 export async function pruneCompletedWorktrees(config: ServerConfig, now = new Date(), dryRun = true) {
   return withWorkspaceLifecycleLock(config.stateDir, () => pruneCompletedWorktreesLocked(config, now, dryRun));
@@ -135,6 +150,7 @@ async function pruneCompletedWorktreesLocked(config: ServerConfig, now: Date, dr
                 activeLeases: workflows.activeLeaseCount(session.id, now), now,
               });
               if (classified.status !== "reclaimable") continue;
+              if (hasActiveDurableTaskMarker(session.root)) continue;
               if (!dryRun) {
                 // Atomically prevent a resumed session from touching this tree
                 // after the GC decision. If it was touched since our read,

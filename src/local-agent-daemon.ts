@@ -92,6 +92,10 @@ export class LocalAgentDaemon {
   private idleTimer?: NodeJS.Timeout;
   private idleSince?: number;
   private closePromise?: Promise<void>;
+  private startPromise?: Promise<LocalAgentDaemonStatus>;
+  private readonly requestReceipts = new Map<string, {
+    signature: string; promise: Promise<unknown>; settled: boolean; completedAt: number;
+  }>();
   private startedAt?: string;
   private accepting = false;
   private stopping = false;
@@ -121,9 +125,17 @@ export class LocalAgentDaemon {
   }
 
   async start(): Promise<LocalAgentDaemonStatus> {
-    if (this.server) return this.status();
+    if (this.startPromise) return this.startPromise;
+    if (this.closePromise || this.stopping) throw new Error("Local agent daemon has been stopped.");
+    if (this.server && this.startedAt) return this.status();
+    this.startPromise = this.startInternal().finally(() => { this.startPromise = undefined; });
+    return this.startPromise;
+  }
+
+  private async startInternal(): Promise<LocalAgentDaemonStatus> {
     ensureLocalAgentDaemonStateDir(this.paths.stateDir);
     let lockAcquired = false;
+    let createdServer: NetServer | undefined;
     try {
       this.lock.acquire();
       lockAcquired = true;
@@ -132,6 +144,7 @@ export class LocalAgentDaemon {
       await this.onLockAcquired?.();
       if (process.platform !== "win32") rmSync(this.paths.socketPath, { force: true });
       const server = createServer((socket) => this.handleConnection(socket));
+      createdServer = server;
       this.server = server;
       await listen(server, this.paths.endpoint);
       if (process.platform !== "win32") chmodSync(this.paths.socketPath, 0o600);
@@ -149,6 +162,7 @@ export class LocalAgentDaemon {
       writeLocalAgentDaemonLog(this.paths, "info", "daemon_started", { pid: process.pid });
       return this.status();
     } catch (error) {
+      if (createdServer) await closeServer(createdServer).catch(() => undefined);
       this.server = undefined;
       this.authToken = undefined;
       if (lockAcquired) {
@@ -176,6 +190,7 @@ export class LocalAgentDaemon {
   }
 
   async close(): Promise<void> {
+    if (this.startPromise) await this.startPromise.catch(() => undefined);
     if (this.closePromise) return this.closePromise;
     if (!this.ownsLock && !this.server) return;
     this.accepting = false;
@@ -207,6 +222,8 @@ export class LocalAgentDaemon {
       writeLocalAgentDaemonLog(this.paths, "info", "daemon_stopped", {});
       this.server = undefined;
       this.authToken = undefined;
+      this.startedAt = undefined;
+      this.requestReceipts.clear();
       this.onClosed?.();
     })();
     return this.closePromise;
@@ -265,7 +282,7 @@ export class LocalAgentDaemon {
       }
       requestId = readRequestId(parsed);
       const request = decodeLocalAgentDaemonRequest(parsed);
-      const response = await this.dispatch(request);
+      const response = await this.dispatchIdempotent(request);
       socket.end(encodeLocalAgentDaemonResponse({
         requestId: request.requestId,
         protocolVersion: LOCAL_AGENT_DAEMON_PROTOCOL_VERSION,
@@ -276,6 +293,36 @@ export class LocalAgentDaemon {
     } catch (error) {
       this.writeError(socket, requestId, daemonErrorPayload(error));
     }
+  }
+
+  private dispatchIdempotent(request: LocalAgentDaemonRequest): Promise<unknown> {
+    // The requester must reuse its requestId on retry; a new logical command
+    // intentionally receives a new ID and is never guessed to be a duplicate.
+    this.assertAuthenticated(request.authToken);
+    if (request.method !== "agent.start" && request.method !== "agent.continue") {
+      return this.dispatch(request);
+    }
+    const signature = JSON.stringify([request.method, request.params]);
+    const existing = this.requestReceipts.get(request.requestId);
+    if (existing) {
+      if (existing.signature !== signature) {
+        throw new LocalAgentDaemonProtocolError("INVALID_REQUEST", "A daemon request ID was reused for different arguments.");
+      }
+      return existing.promise;
+    }
+    // Retain settled receipts for five minutes to survive client timeouts.
+    const now = this.now();
+    for (const [id, receipt] of this.requestReceipts) {
+      if (receipt.settled && now - receipt.completedAt > 300_000) this.requestReceipts.delete(id);
+    }
+    const promise = this.dispatch(request);
+    const receipt = { signature, promise, settled: false, completedAt: 0 };
+    this.requestReceipts.set(request.requestId, receipt);
+    void promise.then(
+      () => { receipt.settled = true; receipt.completedAt = this.now(); },
+      () => { receipt.settled = true; receipt.completedAt = this.now(); },
+    );
+    return promise;
   }
 
   private async dispatch(request: LocalAgentDaemonRequest): Promise<unknown> {

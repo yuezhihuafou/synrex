@@ -13,6 +13,7 @@ import { loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import type { ServerConfig } from "./config.js";
 import {
   createManagedWorktree,
+  rollbackNewManagedWorktree,
   discardRestoredManagedWorktree,
   ManagedWorktreeError,
   restoreManagedWorktree,
@@ -530,12 +531,22 @@ export class WorkspaceRegistry {
       config: this.config,
     });
 
-    return this.createWorkspaceContext({
-      root: worktree.path,
-      mode: "worktree",
-      sourceRoot: worktree.sourceRoot,
-      worktree,
-    });
+    try {
+      return await this.createWorkspaceContext({
+        root: worktree.path,
+        mode: "worktree",
+        sourceRoot: worktree.sourceRoot,
+        worktree,
+      });
+    } catch (error) {
+      // Context validation must not strand Git's worktree registration.
+      try {
+        await rollbackNewManagedWorktree(worktree);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "Workspace bootstrap and rollback both failed");
+      }
+      throw error;
+    }
   }
 
   private async createWorkspaceContext(input: {
@@ -554,6 +565,11 @@ export class WorkspaceRegistry {
       agentProfiles: await loadLocalAgentProfiles(this.config, input.root),
     };
 
+    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
+    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
+    const fingerprint = bootstrapFingerprint(workspace, agentsFiles, availableAgentsFiles);
+
+    // Persist only fully bootstrapped sessions; early failures remain rollback-safe.
     this.store?.createSession({
       id: workspace.id,
       root: workspace.root,
@@ -564,12 +580,7 @@ export class WorkspaceRegistry {
       managed: workspace.worktree?.managed,
     });
     this.rememberWorkspace(workspace);
-    const agentsFiles = await this.loadInitialAgentsFiles(workspace.root);
-    const availableAgentsFiles = await this.findAvailableAgentsFiles(workspace.root, agentsFiles);
-    this.workspaceBootstrapFingerprints.set(
-      workspace.id,
-      bootstrapFingerprint(workspace, agentsFiles, availableAgentsFiles),
-    );
+    this.workspaceBootstrapFingerprints.set(workspace.id, fingerprint);
 
     return {
       workspace,

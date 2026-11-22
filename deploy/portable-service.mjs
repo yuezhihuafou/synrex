@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Generate user-level autostart definitions. Never registers or starts them.
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -98,21 +98,49 @@ Write-Output 'Created Synrex.Portable (not started). Start-ScheduledTask Synrex.
   throw new Error("Portable service generation is supported on Linux, macOS and Windows only.");
 }
 
-export function writeServiceFiles(prefix, os = platform()) {
+export function writeServiceFiles(prefix, os = platform(), options = {}) {
   const current = readCurrent(prefix);
   if (!current) throw new Error("Activate a verified release before generating service files.");
   verifyRelease(releasePath(prefix, current.version), current.version);
   const files = renderServiceFiles(os, prefix);
   const target = join(prefix, "service");
   mkdirSync(target, { recursive: true, mode: 0o700 });
-  for (const [name, value] of Object.entries(files)) {
+  const changed = Object.entries(files).filter(([name, value]) => {
     const path = join(target, name);
-    if (existsSync(path) && !readFileSync(path).equals(encodeServiceFile(name, value)))
-      throw new Error("Service definition changed; refusing to replace " + path);
-  }
-  for (const [name, value] of Object.entries(files)) {
-    const path = join(target, name);
-    if (!existsSync(path)) writeFileSync(path, encodeServiceFile(name, value), { flag: "wx", mode: 0o600 });
+    return existsSync(path) && !readFileSync(path).equals(encodeServiceFile(name, value));
+  });
+  if (changed.length && !options.upgrade)
+    throw new Error("Service definition changed; refusing to replace without --upgrade (backups will be created).");
+  const backups = new Map();
+  const touched = [];
+  try {
+    if (changed.length) {
+      const backupDir = join(target, "backups", new Date().toISOString().replaceAll(":", "-"));
+      mkdirSync(backupDir, { recursive: true, mode: 0o700 });
+      for (const [name] of changed) {
+        const original = join(target, name);
+        const backup = join(backupDir, name);
+        copyFileSync(original, backup);
+        backups.set(original, backup);
+      }
+    }
+    for (const [name, value] of Object.entries(files)) {
+      const path = join(target, name);
+      const encoded = encodeServiceFile(name, value);
+      if (existsSync(path) && readFileSync(path).equals(encoded)) continue;
+      const temporary = path + "." + process.pid + ".new";
+      writeFileSync(temporary, encoded, { flag: "wx", mode: 0o600 });
+      try { renameSync(temporary, path); } finally { rmSync(temporary, { force: true }); }
+      touched.push(path);
+    }
+  } catch (error) {
+    // A failed multi-file service refresh must leave the previous launchers.
+    for (const path of touched.reverse()) {
+      const backup = backups.get(path);
+      if (backup) copyFileSync(backup, path);
+      else rmSync(path, { force: true });
+    }
+    throw error;
   }
   return Object.keys(files).map(name => join(target, name));
 }
@@ -125,7 +153,8 @@ function main(args) {
   const os = platformAt >= 0 && args[platformAt + 1] ? args[platformAt + 1] : platform();
   if (action === "write" && os !== platform()) throw new Error("Cannot register a foreign-platform service.");
   const files = action === "write"
-    ? writeServiceFiles(prefix, os) : Object.keys(renderServiceFiles(os, prefix)).map(x => join(prefix, "service", x));
+    ? writeServiceFiles(prefix, os, { upgrade: args.includes("--upgrade") })
+    : Object.keys(renderServiceFiles(os, prefix)).map(x => join(prefix, "service", x));
   console.log(JSON.stringify({ action, platform: os, files, registered: false, started: false, existingServiceModified: false }, null, 2));
 }
 

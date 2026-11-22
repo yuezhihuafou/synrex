@@ -91,6 +91,7 @@ export class AcpRuntime implements LocalAgentRuntime {
   private readonly grokCompletionRegistry?: GrokPromptCompletionRegistry;
   private readonly promptCompletionTimeoutMs: number;
   private readonly activeSessions = new Set<string>();
+  private readonly openingSessions = new Set<string>();
   private promptSequence = 0;
   private alive = true;
   private closed = false;
@@ -137,7 +138,18 @@ export class AcpRuntime implements LocalAgentRuntime {
             message: `${this.provider} ACP runtime is not running.`,
           });
         }
-        const sessionId = await this.openSession(input, callbacks);
+        const requestedSessionId = input.providerSessionId;
+        if (requestedSessionId && (this.activeSessions.has(requestedSessionId)
+          || this.openingSessions.has(requestedSessionId))) {
+          throw new TypeError(this.provider + " ACP session " + requestedSessionId + " already has an active turn.");
+        }
+        if (requestedSessionId) this.openingSessions.add(requestedSessionId);
+        let sessionId: string;
+        try {
+          sessionId = await this.openSession(input, callbacks);
+        } finally {
+          if (requestedSessionId) this.openingSessions.delete(requestedSessionId);
+        }
         if (this.activeSessions.has(sessionId)) {
           throw new TypeError(`${this.provider} ACP session ${sessionId} already has an active turn.`);
         }
@@ -222,6 +234,7 @@ export class AcpRuntime implements LocalAgentRuntime {
     this.sessionWriteModes.clear();
     this.sessionMetadata.clear();
     this.activeSessions.clear();
+    this.openingSessions.clear();
     this.grokCompletionRegistry?.rejectAll(new Error(`${this.provider} ACP runtime closed.`));
     this.connection.close(new Error(`${this.provider} ACP runtime closed.`));
     if (this.child && this.child.exitCode === null) {

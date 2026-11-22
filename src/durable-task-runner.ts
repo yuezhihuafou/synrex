@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createWriteStream, existsSync } from "node:fs";
 import { readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -6,6 +6,7 @@ import path from "node:path";
 import { resolveShellCommand } from "./process-platform.js";
 import { pruneRunStore } from "./compact-runtime/retention.js";
 import type { DurableTaskState, DurableTaskStatus } from "./durable-task-model.js";
+import { commitDurableTaskState } from "./durable-task-state.js";
 import { recordTaskTrace, type TaskTraceContext } from "./task-trace.js";
 import { errorCategory } from "./trace-stages.js";
 
@@ -38,7 +39,7 @@ export interface DurableTaskRunnerOptions {
 }
 
 async function writeJsonAtomic(path: string, value: unknown): Promise<void> {
-  const temporary = `${path}.tmp-${process.pid}`;
+  const temporary = path + ".tmp-" + process.pid + "-" + randomUUID();
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, path);
 }
@@ -48,13 +49,16 @@ async function writeCompletionNotification(
   status: "completed" | "cancelled" | "failed",
   statusMessage: string,
 ): Promise<void> {
+  const latest = JSON.parse(await readFile(request.taskPath, "utf8")) as DurableTaskState;
+  const authoritativeStatus = ["completed", "failed", "cancelled"].includes(latest.status)
+    ? latest.status as "completed" | "failed" | "cancelled" : status;
   await writeJsonAtomic(request.notificationPath, {
     schemaVersion: 1,
     taskId: request.taskId,
     root: request.root,
     runId: request.runId,
-    status,
-    statusMessage,
+    status: authoritativeStatus,
+    statusMessage: latest.statusMessage ?? statusMessage,
     lastUpdatedAt: new Date().toISOString(),
   });
 }
@@ -121,7 +125,10 @@ export async function runDurableTask(
       outputLines: bytes === 0 ? 0 : newlines + (lastByte === 0x0a ? 0 : 1),
       ...extra,
     } satisfies DurableTaskState;
-    const writeTaskState = options.writeTaskState ?? writeJsonAtomic;
+    const writeTaskState = options.writeTaskState
+      ?? (async (taskPath: string, next: DurableTaskState): Promise<void> => {
+        await commitDurableTaskState(taskPath, next);
+      });
     const writeAttempt = stateWriteChain
       .catch(() => undefined)
       .then(() => writeTaskState(request.taskPath, value));
@@ -162,8 +169,7 @@ export async function runDurableTask(
     return digest;
   };
 
-  try {
-    if (existsSync(cancelPath)) {
+  const cancelBeforeLaunch = async (): Promise<number> => {
       await endOutput();
       const finishedAtMs = Date.now();
       const finishedAt = new Date(finishedAtMs).toISOString();
@@ -201,10 +207,16 @@ export async function runDurableTask(
       trace("task_finished", { outcome: "error", errorCategory: "cancelled", signal: "SIGTERM", outputBytes: 0 });
       await unlink(request.activePath).catch(() => undefined);
       return 143;
-    }
+  };
+
+  try {
+    if (existsSync(cancelPath)) return cancelBeforeLaunch();
     await state("working", { statusMessage: "Starting command." });
     const shell = resolveShellCommand(request.command, process.platform, request.env);
     const { spawn } = await import("node:child_process");
+    // The manager may request cancellation while the initial state write awaits I/O.
+    // Keep the final check immediately adjacent to the synchronous spawn.
+    if (existsSync(cancelPath)) return cancelBeforeLaunch();
     const child = spawn(shell.executable, shell.args, {
       cwd: request.cwd,
       env: request.env,

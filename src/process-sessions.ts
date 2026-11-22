@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { setTimeout as delay } from "node:timers/promises";
 import { ProcessRunLogger } from "./compact-runtime/process-run-store.js";
 import { resolveShellCommand, terminateProcessTree } from "./process-platform.js";
 
@@ -89,6 +90,7 @@ interface ProcessSession {
   exitPromise: Promise<void>;
   resolveExit: () => void;
   cleanupTimer?: NodeJS.Timeout;
+  writeTail?: Promise<void>;
 }
 
 interface ProcessSessionManagerOptions {
@@ -264,6 +266,18 @@ export class ProcessSessionManager {
 
   async write(input: WriteStdinInput): Promise<ProcessSnapshot> {
     const session = this.getOwnedSession(input.workspaceId, input.sessionId);
+    const previous = session.writeTail ?? Promise.resolve();
+    let release!: () => void;
+    session.writeTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await this.writeSerial(session, input);
+    } finally {
+      release();
+    }
+  }
+
+  private async writeSerial(session: ProcessSession, input: WriteStdinInput): Promise<ProcessSnapshot> {
     const chars = input.chars ?? "";
     const interactionRequested = chars.length > 0 || input.columns !== undefined || input.rows !== undefined;
     if (input.columns !== undefined || input.rows !== undefined) {
@@ -313,11 +327,18 @@ export class ProcessSessionManager {
     if (session.running) session.process?.kill("SIGTERM");
   }
 
-  shutdown(): void {
-    for (const session of this.sessions.values()) {
+  async shutdown(): Promise<void> {
+    const sessions = [...this.sessions.values()];
+    for (const session of sessions) {
       if (session.cleanupTimer) clearTimeout(session.cleanupTimer);
       if (session.running) session.process?.kill("SIGTERM");
     }
+    const exited = () => Promise.allSettled(sessions.map((session) => session.exitPromise));
+    await Promise.race([exited(), delay(1_500, undefined, { ref: false })]);
+    for (const session of sessions) {
+      if (session.running) session.process?.kill("SIGKILL");
+    }
+    await Promise.race([exited(), delay(1_000, undefined, { ref: false })]);
     this.sessions.clear();
   }
 

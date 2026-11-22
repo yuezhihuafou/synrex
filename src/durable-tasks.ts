@@ -10,6 +10,7 @@ import { currentRequestLogContext } from "./logger.js";
 import { traceEvent, traceStage } from "./trace-stages.js";
 import { recordTaskTrace } from "./task-trace.js";
 import type { DurableTaskRequest } from "./durable-task-runner.js";
+import { commitDurableTaskState } from "./durable-task-state.js";
 import {
   durableTaskView,
   taskPollIntervalMs,
@@ -80,7 +81,7 @@ function taskEnvironment(input: StartCommandInput): Record<string, string> {
 }
 
 async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> {
-  const temporary = `${filePath}.tmp-${process.pid}`;
+  const temporary = filePath + ".tmp-" + process.pid + "-" + randomUUID();
   await writeFile(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   await rename(temporary, filePath);
 }
@@ -350,7 +351,8 @@ export class DurableTaskManager {
           data: { runId },
         },
       } satisfies DurableTaskState;
-      await writeJsonAtomic(taskPath, failed);
+      const committed = await commitDurableTaskState(taskPath, failed);
+      if (committed.status !== "failed") return this.snapshot(committed);
       await writeJsonAtomic(notificationPath, {
         schemaVersion: 1,
         taskId,
@@ -504,17 +506,20 @@ export class DurableTaskManager {
         // back to the detached runner. Continue with PID cancellation.
       }
     }
-    if (state.runnerPid) {
+    // The runner may publish its PID while the marker is being written.
+    const latest = await this.findTask(taskId);
+    if (latest.status !== "working" && latest.status !== "input_required") return;
+    if (latest.runnerPid) {
       if (process.platform !== "win32") {
         try {
-          this.killProcess(-state.runnerPid, "SIGTERM");
+          this.killProcess(-latest.runnerPid, "SIGTERM");
           return;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
         }
       }
       try {
-        this.killProcess(state.runnerPid, "SIGTERM");
+        this.killProcess(latest.runnerPid, "SIGTERM");
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
       }
@@ -557,9 +562,28 @@ export class DurableTaskManager {
           input.requestPath,
         ], { timeout: 5_000, windowsHide: true });
         return;
-      } catch {
-        // Fall through to a detached runner. This keeps Synrex functional on
-        // systems without a usable user systemd manager.
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+          let unitInactive = false;
+          try {
+            const { stdout } = await execFileAsync("systemctl", [
+              "--user", "show", input.unitName, "--property=ActiveState", "--value",
+            ], { timeout: 1_500, windowsHide: true });
+            const activeState = stdout.trim();
+            if (["active", "activating", "reloading", "deactivating"].includes(activeState)) return;
+            unitInactive = activeState === "inactive" || activeState === "failed";
+          } catch {
+            // Unknown unit state must not cause a second launch.
+          }
+          const taskPath = path.join(path.dirname(input.requestPath), "task.json");
+          const current = await readState(taskPath).catch(() => undefined);
+          if (current?.runnerPid || current?.status === "completed" || current?.status === "cancelled") return;
+          if (!existsSync(input.requestPath)) return;
+          if (!unitInactive) {
+            throw new Error("systemd-run outcome unknown; detached fallback blocked to avoid double execution");
+          }
+        }
+        // Confirmed the unit was not accepted or systemd-run was unavailable.
       }
     }
 
@@ -636,7 +660,7 @@ export class DurableTaskManager {
       lastUpdatedAt: new Date().toISOString(),
     } satisfies DurableTaskState;
     const taskPath = await this.findTaskPath(state.taskId);
-    await writeJsonAtomic(taskPath, next);
+    await commitDurableTaskState(taskPath, next, state);
   }
 
   private async reconcileActiveTasks(workspaceRoot: string): Promise<void> {
@@ -747,7 +771,8 @@ export class DurableTaskManager {
             },
           }),
     } satisfies DurableTaskState;
-    await writeJsonAtomic(taskPath, terminal);
+    const committed = await commitDurableTaskState(taskPath, terminal, state);
+    if (committed !== terminal) return committed;
     const notificationPath = this.notificationPath(state.root, state.taskId);
     await mkdir(path.dirname(notificationPath), { recursive: true, mode: 0o700 });
     await writeJsonAtomic(notificationPath, {
@@ -801,7 +826,11 @@ export class DurableTaskManager {
       return true;
     }
 
-    if (unitKnownInactive) return false;
+    // An accepted launch can look inactive before its runner publishes a PID.
+    if (unitKnownInactive) {
+      const updatedAt = Date.parse(state.lastUpdatedAt);
+      return Number.isFinite(updatedAt) && Date.now() - updatedAt <= TASK_HEARTBEAT_STALE_MS;
+    }
 
     const updatedAt = Date.parse(state.lastUpdatedAt);
     return !Number.isFinite(updatedAt) || Date.now() - updatedAt <= TASK_HEARTBEAT_STALE_MS;

@@ -57,6 +57,8 @@ try {
   const oldRun = await makeRun("2026-09-01", "run_20260901010000_eeeeeeee", 10);
   const oldActive = await makeRun("2026-09-01", "run_20260901020000_ffffffff", 10, false);
   const taskRun = await makeRun("2026-09-01", "run_20260901030000_gggggggg", 10);
+  const finalizingRun = await makeRun("2026-09-01", "run_20260901040000_hhhhhhhh", 10);
+  await writeFile(path.join(finalizingRun, "task.json"), '{"status":"working"}\n');
   const taskId = "task_00000000-0000-4000-8000-000000000001";
   const workspaceRoot = path.join(root, "project");
   const workspaceHash = createHash("sha256").update(path.resolve(workspaceRoot)).digest("hex").slice(0, 32);
@@ -66,7 +68,7 @@ try {
   await mkdir(path.dirname(taskIndex), { recursive: true });
   await mkdir(path.dirname(taskNotification), { recursive: true });
   await mkdir(path.dirname(taskActive), { recursive: true });
-  await writeFile(path.join(taskRun, "task.json"), `${JSON.stringify({ taskId, root: workspaceRoot })}\n`);
+  await writeFile(path.join(taskRun, "task.json"), `${JSON.stringify({ taskId, root: workspaceRoot, status: "completed" })}\n`);
   await writeFile(taskIndex, "{}\n");
   await writeFile(taskNotification, "{}\n");
   await writeFile(taskActive, "{}\n");
@@ -78,6 +80,7 @@ try {
   assert.equal(await exists(oldRun), false);
   assert.equal(await exists(oldActive), true);
   assert.equal(await exists(taskRun), false);
+  assert.equal(await exists(finalizingRun), true);
   assert.equal(await exists(taskIndex), false);
   assert.equal(await exists(taskNotification), false);
   assert.equal(await exists(taskActive), false);

@@ -426,7 +426,7 @@ export class CodingWorkflowStore {
     this.db.prepare(`update coding_workflow_bindings set expires_at=?
       where workspace_id=? and conversation_scope=? and expires_at<?`)
       .run(new Date(Date.now() + 12 * 60 * 60_000).toISOString(), workspaceId, scopeHash,
-        new Date(Date.now() + 60 * 60_000).toISOString());
+        new Date(Date.now() + 11 * 60 * 60_000).toISOString());
     return this.getRequired(row.workflow_id, root);
   }
 

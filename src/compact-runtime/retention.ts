@@ -44,6 +44,10 @@ async function removeRun(root: string, run: StoredRun): Promise<void> {
   } catch {
     // Runs created before durable tasks may not have task metadata.
   }
+  if (task?.taskId) {
+    const current = JSON.parse(await readFile(path.join(run.path, "task.json"), "utf8")) as { status?: string };
+    if (!["completed", "failed", "cancelled"].includes(current.status ?? "")) return;
+  }
   await rm(run.path, { recursive: true, force: true });
   if (!task?.taskId) return;
   await rm(path.join(root, ".task-index", `${task.taskId}.json`), { force: true });
@@ -76,12 +80,21 @@ async function listRuns(root: string): Promise<StoredRun[]> {
       if (!entry.isDirectory() || !/^run_[A-Za-z0-9_]+$/.test(entry.name)) continue;
       const runPath = path.join(dayPath, entry.name);
       const runEntries = await readdir(runPath);
+      let completed = runEntries.includes("meta.json");
+      if (completed && runEntries.includes("task.json")) {
+        try {
+          const task = JSON.parse(await readFile(path.join(runPath, "task.json"), "utf8")) as { status?: string };
+          completed = ["completed", "failed", "cancelled"].includes(task.status ?? "");
+        } catch {
+          completed = false;
+        }
+      }
       runs.push({
         day,
         runId: entry.name,
         path: runPath,
         bytes: await directoryBytes(runPath),
-        completed: runEntries.includes("meta.json"),
+        completed,
       });
     }
   }
