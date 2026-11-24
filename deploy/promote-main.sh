@@ -54,6 +54,7 @@ if test "$mode" = --deploy && test "${SYNREX_PROMOTION_WORKER:-}" != 1; then
   systemd-run --user --collect --unit="$unit" \
     --description="Synrex single-owner release transaction" \
     --property=Type=exec --setenv="SYNREX_PROMOTION_WORKER=1" \
+    --setenv="SYNREX_RELEASE_REPO=$source_repo" \
     --setenv="PATH=$PATH" \
     /bin/bash "$source_repo/deploy/promote-main.sh" --deploy "$source_repo"
   echo "PROMOTION_DISPATCHED unit=$unit source=$source_repo; check journalctl --user -u $unit and the release receipt"
@@ -134,8 +135,11 @@ dispatch() {
     --destination "$backup" --keep 30 >"$backup/backup-receipt.txt"
   # The worker inherits FD 8, so the rollback-safe activation retains the
   # SAME lock rather than opening a second descriptor and deadlocking itself.
-  SYNREX_INHERITED_RELEASE_LOCK_FD=8 /bin/bash \
-    "$target/deploy/activate-owner-release.sh" "$target" "$backup"
+  if ! SYNREX_RELEASE_REPO="$source_repo" SYNREX_INHERITED_RELEASE_LOCK_FD=8 /bin/bash \
+    "$target/deploy/activate-owner-release.sh" "$target" "$backup"; then
+    echo "PROMOTION_BLOCKED owner activation failed; inspect $backup/release-receipt.json and the promotion journal" >&2
+    return 1
+  fi
   echo "PROMOTION_RECEIPT=$backup/release-receipt.json"
 }
 mkdir -p "$backup"
@@ -151,7 +155,11 @@ if test -d "$target"; then
     test -f "$target/dist-console/monitor-app.html"
     test -f "$target/dist-console-server/console-monitor.js"
   fi
-  if test "$mode" = --deploy; then dispatch; else echo "PROMOTION_READY_NOT_ACTIVATED source=$source_sha"; fi
+  if test "$mode" = --deploy; then
+    dispatch || exit $?
+  else
+    echo "PROMOTION_READY_NOT_ACTIVATED source=$source_sha"
+  fi
   exit 0
 fi
 stage=$(mktemp -d "$release_root/.staging-$release_id-XXXXXXXX")

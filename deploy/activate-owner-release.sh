@@ -4,6 +4,7 @@
 set -euo pipefail
 candidate=${1:?Usage: activate-owner-release.sh <pinned-release> <backups-dir>}
 backup_root=${2:?Usage: activate-owner-release.sh <pinned-release> <backups-dir>}
+release_repo=${SYNREX_RELEASE_REPO:-/home/swy/DevSpace}
 service=devspace.service
 dropdir="$HOME/.config/systemd/user/$service.d"
 dropin="$dropdir/90-owner-pinned-release.conf"
@@ -47,7 +48,7 @@ test -f "$candidate/scripts/synrex-release-provenance.py"
 # worktree. The candidate must equal the remote canonical main at cutover,
 # contain the CURRENT pinned release, and have verified immutable build bytes.
 if ! python3 "$candidate/scripts/synrex-release-provenance.py" \
-  --candidate "$candidate" >"$backup_root/provenance-preflight.json"; then
+  --repo "$release_repo" --candidate "$candidate" >"$backup_root/provenance-preflight.json"; then
   echo "OWNER_RELEASE_BLOCKED candidate is stale or not on canonical main; inspect $backup_root/provenance-preflight.json" >&2
   exit 75
 fi
@@ -181,7 +182,7 @@ fi
 # Recheck immediately before the switch: another conversation may publish a
 # newer main while requests are draining. No version is ever silently skipped.
 if ! python3 "$candidate/scripts/synrex-release-provenance.py" \
-  --candidate "$candidate" >"$backup_root/provenance-cutover.json"; then
+  --repo "$release_repo" --candidate "$candidate" >"$backup_root/provenance-cutover.json"; then
   echo 'OWNER_RELEASE_BLOCKED main advanced during drain; restarting would be stale' >&2
   exit 75
 fi

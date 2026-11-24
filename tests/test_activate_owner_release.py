@@ -21,6 +21,9 @@ class ActivationTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.calls = self.root / "systemctl.calls"
+        self.provenance_args = self.root / "provenance.args"
+        self.repo = self.root / "source-repo"
+        self.repo.mkdir()
         self.release = self.root / "release"
         for part in ["dist", "scripts", "config/ops"]:
             (self.release / part).mkdir(parents=True)
@@ -32,6 +35,7 @@ class ActivationTests(unittest.TestCase):
             "sys.exit(2 if os.getenv('FAKE_BUSY') else 0)\n")
         (self.release / "scripts/synrex-release-provenance.py").write_text(
             "import os,sys,json\n"
+            "open(os.environ['FAKE_PROVENANCE_ARGS'],'a').write(json.dumps(sys.argv[1:])+'\\n')\n"
             "print(json.dumps({'ready': not os.getenv('FAKE_STALE')}))\n"
             "sys.exit(75 if os.getenv('FAKE_STALE') else 0)\n")
         (self.bin / "systemctl").write_text(
@@ -50,6 +54,8 @@ class ActivationTests(unittest.TestCase):
             **os.environ, "HOME": str(self.home),
             "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
             "FAKE_SYSTEMD_CALLS": str(self.calls),
+            "FAKE_PROVENANCE_ARGS": str(self.provenance_args),
+            "SYNREX_RELEASE_REPO": str(self.repo),
         }
 
     def activate(self, **changes):
@@ -82,6 +88,11 @@ class ActivationTests(unittest.TestCase):
         receipt = json.loads((self.backup / "release-receipt.json").read_text())
         self.assertEqual(receipt["status"], "activated")
         self.assertEqual(receipt["sourceRevision"], "a" * 40)
+        provenance_calls = [json.loads(line) for line in self.provenance_args.read_text().splitlines()]
+        self.assertEqual(len(provenance_calls), 2)
+        for args in provenance_calls:
+            self.assertIn("--repo", args)
+            self.assertEqual(args[args.index("--repo") + 1], str(self.repo))
 
     def test_rejects_concurrent_activation_without_touching_release(self):
         directory = self.home / ".local/state/synrex"

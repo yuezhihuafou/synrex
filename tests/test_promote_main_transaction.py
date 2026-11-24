@@ -47,6 +47,7 @@ class PromotionTransactionTests(unittest.TestCase):
         args = self.calls.read_text().splitlines()
         self.assertIn("--property=Type=exec", args)
         self.assertIn("--setenv=SYNREX_PROMOTION_WORKER=1", args)
+        self.assertIn(f"--setenv=SYNREX_RELEASE_REPO={self.repo}", args)
         self.assertTrue(any(x.startswith("--unit=synrex-promotion-") for x in args))
         self.assertEqual(args[-4:], ["/bin/bash", str(self.repo / "deploy/promote-main.sh"),
                                      "--deploy", str(self.repo)])
