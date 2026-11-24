@@ -11,6 +11,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { checkResourceAllowed, resourceUrlFromServerUrl } from "@modelcontextprotocol/sdk/shared/auth-utils.js";
 import {
+  isGoogleConnectedAppRedirectUri,
   SqliteOAuthClientsStore,
   SqliteOAuthStore,
   type PersistedAuthorizationCodeRecord,
@@ -219,6 +220,32 @@ export class SingleUserOAuthProvider implements OAuthServerProvider {
     const redirectUrl = new URL(params.redirectUri);
     redirectUrl.searchParams.set("code", code);
     if (params.state !== undefined) redirectUrl.searchParams.set("state", params.state);
+    if (isGoogleConnectedAppRedirectUri(params.redirectUri)) {
+      // Gemini's Google callback is a relay that performs another redirect
+      // back into Gemini. Returning 302 directly from an HTML form POST can
+      // cause browsers to apply form-action policy to the entire redirect
+      // chain. A 200 document with a top-level meta refresh avoids that
+      // form-submission redirect chain while preserving the exact code/state.
+      const target = htmlEscape(redirectUrl.href);
+      res.status(200)
+        .setHeader("Content-Type", "text/html; charset=utf-8")
+        .setHeader("Cache-Control", "no-store")
+        .setHeader("Referrer-Policy", "no-referrer")
+        .send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="refresh" content="0;url=${target}" />
+    <title>Continue to Google</title>
+  </head>
+  <body>
+    <p>Continue to Google to finish connecting Synrex.</p>
+    <a href="${target}">Continue</a>
+  </body>
+</html>`);
+      return;
+    }
     res.redirect(302, redirectUrl.href);
   }
 

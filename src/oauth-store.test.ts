@@ -28,6 +28,7 @@ try {
   testExpiredTokenCleanup(join(root, "expiration"));
   testTransactionalTokenRotation(join(root, "rotation"));
   await testAuthorizationCodeSurvivesRestart(join(root, "authorization-code-restart"));
+  await testGoogleConnectedAppsCompatibility(join(root, "google-connected-apps"));
   await testProviderRestartRotationAndRevocation(join(root, "provider"));
   await testRefreshReplayRecovery(join(root, "refresh-replay-recovery"));
   await testRefreshResourcePolicy(join(root, "refresh-policy"));
@@ -243,6 +244,98 @@ async function testAuthorizationCodeSurvivesRestart(stateDir: string): Promise<v
     assert.equal(database.sqlite.prepare("select count(*) from oauth_authorization_codes").pluck().get(), 0);
   } finally {
     database.close();
+  }
+}
+
+async function testGoogleConnectedAppsCompatibility(stateDir: string): Promise<void> {
+  const googleHosts = [
+    "oauth-redirect.googleusercontent.com",
+    "oauth-redirect-sandbox.googleusercontent.com",
+    "oauth-redirect-test.googleusercontent.com",
+  ];
+  const appId = "user_bound_custom-mcp-test-app-123";
+  const redirectUris = googleHosts.flatMap((host) => [
+    `https://${host}/r/${appId}`,
+    `https://${host}/a/${appId}`,
+  ]);
+  const googleConfig = {
+    ...oauthConfig,
+    allowedRedirectHosts: [...oauthConfig.allowedRedirectHosts, ...googleHosts],
+  };
+  const provider = new SingleUserOAuthProvider(googleConfig, mcpUrl, stateDir);
+  try {
+    const registration = {
+      client_name: "Google",
+      redirect_uris: redirectUris,
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "client_secret_post",
+      client_secret: "first-generated-secret",
+    };
+    const first = await provider.clientsStore.registerClient?.(registration);
+    assert.ok(first);
+    const repeated = await provider.clientsStore.registerClient?.({
+      ...registration,
+      client_secret: "second-generated-secret",
+    });
+    assert.ok(repeated);
+    assert.equal(repeated.client_id, first.client_id, "repeated DCR for one Google app reuses its stable client ID");
+    assert.equal(repeated.client_secret, first.client_secret, "the stable registration returns the original client secret");
+
+    const ordinaryFirst = await provider.clientsStore.registerClient?.({
+      client_name: "Other MCP host",
+      redirect_uris: [redirectUri],
+    });
+    const ordinarySecond = await provider.clientsStore.registerClient?.({
+      client_name: "Other MCP host",
+      redirect_uris: [redirectUri],
+    });
+    assert.ok(ordinaryFirst && ordinarySecond);
+    assert.notEqual(ordinaryFirst.client_id, ordinarySecond.client_id,
+      "non-Google DCR clients retain normal per-registration identities");
+
+    const verifier = "google-connected-apps-verifier-01234567890123456789";
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    let responseStatus = 0;
+    let redirectStatus = 0;
+    let redirectLocation = "";
+    let html = "";
+    const headers: Record<string, string> = {};
+    const response = {
+      req: { method: "POST", body: { owner_token: googleConfig.ownerToken } },
+      status(status: number) { responseStatus = status; return this; },
+      setHeader(name: string, value: string) { headers[name.toLowerCase()] = value; return this; },
+      send(body: string) { html = body; return this; },
+      redirect(status: number, location: string) { redirectStatus = status; redirectLocation = location; return this; },
+    } as unknown as Response;
+    await provider.authorize(first, {
+      redirectUri: redirectUris[0]!,
+      codeChallenge: challenge,
+      scopes: ["devspace"],
+      state: "google-state-value",
+      resource: mcpUrl,
+    }, response);
+
+    assert.equal(responseStatus, 200, "Google callback uses an intermediate HTML navigation response");
+    assert.equal(headers["content-type"], "text/html; charset=utf-8");
+    assert.equal(headers["cache-control"], "no-store");
+    assert.equal(headers["referrer-policy"], "no-referrer");
+    assert.match(html, /<meta http-equiv="refresh"/);
+    assert.equal(redirectStatus, 0, "Google callback does not use a form POST 302 redirect");
+
+    const targetMatch = html.match(/<meta http-equiv="refresh" content="0;url=([^"]+)"/);
+    assert.ok(targetMatch?.[1]);
+    const target = new URL(targetMatch[1].replaceAll("&amp;", "&"));
+    const code = target.searchParams.get("code");
+    assert.ok(code);
+    assert.equal(target.searchParams.get("state"), "google-state-value");
+    assert.equal(await provider.challengeForAuthorizationCode(repeated, code), challenge,
+      "authorization code remains bound to the stable Google client after repeated registration");
+    const tokens = await provider.exchangeAuthorizationCode(repeated, code, verifier, redirectUris[0], mcpUrl);
+    assert.ok(tokens.access_token);
+    assert.equal((await provider.verifyAccessToken(tokens.access_token)).clientId, first.client_id);
+  } finally {
+    provider.close();
   }
 }
 

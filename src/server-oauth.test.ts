@@ -288,3 +288,134 @@ test("HTTP authorization code exchange and refresh survive a service restart", a
   assert.equal(replayed.access_token, rotated.access_token);
   assert.equal(replayed.refresh_token, rotated.refresh_token);
 });
+
+test("Google Connected Apps DCR stays stable and completes the callback/token/MCP flow", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-google-connected-apps-"));
+  const publicBaseUrl = "https://google-oauth.example.test";
+  const resource = `${publicBaseUrl}/mcp`;
+  const ownerToken = "google-oauth-owner-token-for-http-test";
+  const googleHosts = [
+    "oauth-redirect.googleusercontent.com",
+    "oauth-redirect-sandbox.googleusercontent.com",
+    "oauth-redirect-test.googleusercontent.com",
+  ];
+  const appId = "user_bound_custom-mcp-test-app-123";
+  const redirectUris = googleHosts.flatMap((host) => [
+    `https://${host}/r/${appId}`,
+    `https://${host}/a/${appId}`,
+  ]);
+  const redirectUri = redirectUris[0]!;
+  const verifier = "google-connected-apps-http-verifier-01234567890123456789";
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  const config = loadConfig(writeTestDevspaceConfig(join(root, "config"), {
+    server: { publicBaseUrl },
+    storage: { stateDir: join(root, "state") },
+    workspaces: { allowedRoots: [root] },
+    oauth: { allowedRedirectHosts: googleHosts },
+    logging: { level: "silent" },
+  }));
+
+  const running = createServer({ ...config, oauth: { ...config.oauth, ownerToken } });
+  const listener = running.app.listen(0, "127.0.0.1");
+  t.after(async () => {
+    await running.close();
+    listener.closeAllConnections();
+    await new Promise<void>((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+    await rm(root, { recursive: true, force: true });
+  });
+  await once(listener, "listening");
+  const address = listener.address();
+  assert.ok(address && typeof address !== "string");
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  const registrationBody = {
+    client_name: "Google",
+    redirect_uris: redirectUris,
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "client_secret_post",
+  };
+  const register = async () => {
+    const response = await fetch(`${baseUrl}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(registrationBody),
+    });
+    assert.equal(response.status, 201, await response.clone().text());
+    return await response.json() as { client_id: string; client_secret: string };
+  };
+  const firstClient = await register();
+  const repeatedClient = await register();
+  assert.equal(repeatedClient.client_id, firstClient.client_id);
+  assert.equal(repeatedClient.client_secret, firstClient.client_secret);
+
+  const authorizationParams = new URLSearchParams({
+    client_id: firstClient.client_id,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    scope: "devspace",
+    state: "google-connected-apps-state",
+    resource,
+  });
+  const authorizationPage = await fetch(`${baseUrl}/authorize?${authorizationParams}`, {
+    redirect: "manual",
+  });
+  assert.equal(authorizationPage.status, 200, await authorizationPage.clone().text());
+  assert.match(await authorizationPage.text(), /<form method="post">/);
+
+  const approval = await fetch(`${baseUrl}/authorize`, {
+    method: "POST",
+    redirect: "manual",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      ...Object.fromEntries(authorizationParams),
+      owner_token: ownerToken,
+    }),
+  });
+  assert.equal(approval.status, 200, await approval.clone().text());
+  assert.equal(approval.headers.get("cache-control"), "no-store");
+  const approvalHtml = await approval.text();
+  const targetMatch = approvalHtml.match(/<meta http-equiv="refresh" content="0;url=([^"]+)"/);
+  assert.ok(targetMatch?.[1], "Google receives an intermediate top-level navigation document");
+  const callback = new URL(targetMatch[1].replaceAll("&amp;", "&"));
+  assert.equal(callback.origin, new URL(redirectUri).origin);
+  assert.equal(callback.pathname, new URL(redirectUri).pathname);
+  assert.equal(callback.searchParams.get("state"), "google-connected-apps-state");
+  const code = callback.searchParams.get("code");
+  assert.ok(code);
+
+  const exchange = await fetch(`${baseUrl}/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "authorization_code",
+      client_id: repeatedClient.client_id,
+      client_secret: repeatedClient.client_secret,
+      code,
+      code_verifier: verifier,
+      redirect_uri: redirectUri,
+      resource,
+    }),
+  });
+  assert.equal(exchange.status, 200, await exchange.clone().text());
+  const tokens = await exchange.json() as { access_token: string; refresh_token: string };
+  assert.ok(tokens.access_token);
+  assert.ok(tokens.refresh_token);
+
+  const initialize = await fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${tokens.access_token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "Google Connected Apps", version: "1" } },
+    }),
+  });
+  assert.equal(initialize.status, 200, await initialize.clone().text());
+  assert.match(await initialize.text(), /"serverInfo"/);
+});

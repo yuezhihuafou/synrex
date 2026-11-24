@@ -51,6 +51,70 @@ export interface RefreshRotationTokens {
 }
 
 const REPLAY_KEY_FILENAME = "oauth-replay.key";
+const GOOGLE_CONNECTED_APP_REDIRECT_HOSTS = new Set([
+  "oauth-redirect.googleusercontent.com",
+  "oauth-redirect-sandbox.googleusercontent.com",
+  "oauth-redirect-test.googleusercontent.com",
+]);
+
+/** Google Connected Apps uses app-specific redirect URIs across three environments. */
+export function isGoogleConnectedAppRedirectUri(redirectUri: string): boolean {
+  try {
+    const url = new URL(redirectUri);
+    return url.protocol === "https:"
+      && !url.username && !url.password && !url.port
+      && GOOGLE_CONNECTED_APP_REDIRECT_HOSTS.has(url.hostname)
+      && /^\/(?:r|a)\/user_bound_custom-mcp-[a-z0-9_-]+$/i.test(url.pathname)
+      && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
+}
+
+function googleConnectedAppRegistrationId(
+  client: Pick<OAuthClientInformationFull, "redirect_uris">,
+): string | undefined {
+  if (client.redirect_uris.length === 0) return undefined;
+  const appIds = new Set<string>();
+  for (const redirectUri of client.redirect_uris) {
+    if (!isGoogleConnectedAppRedirectUri(String(redirectUri))) return undefined;
+    const url = new URL(String(redirectUri));
+    const match = url.pathname.match(/^\/(?:r|a)\/(user_bound_custom-mcp-[a-z0-9_-]+)$/i);
+    if (!match?.[1]) return undefined;
+    appIds.add(match[1].toLowerCase());
+  }
+  return appIds.size === 1 ? appIds.values().next().value as string : undefined;
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right));
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function clientRegistrationFingerprint(
+  client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
+): string {
+  const metadata = { ...client } as Record<string, unknown>;
+  // These values are generated for each DCR response, not stable app metadata.
+  delete metadata.client_id;
+  delete metadata.client_id_issued_at;
+  delete metadata.client_secret;
+  delete metadata.client_secret_expires_at;
+  if (Array.isArray(metadata.redirect_uris)) {
+    metadata.redirect_uris = [...metadata.redirect_uris].map(String).sort();
+  }
+  if (Array.isArray(metadata.grant_types)) metadata.grant_types = [...metadata.grant_types].sort();
+  else metadata.grant_types = ["authorization_code", "refresh_token"];
+  if (Array.isArray(metadata.response_types)) metadata.response_types = [...metadata.response_types].sort();
+  else metadata.response_types = ["code"];
+  metadata.token_endpoint_auth_method ??= "none";
+  return canonicalJson(metadata);
+}
 
 function redirectHostAllowed(redirectUri: string, allowedHosts: string[]): boolean {
   let parsed: URL;
@@ -89,6 +153,34 @@ export class SqliteOAuthStore {
     if (!client.redirect_uris.every((uri) => redirectHostAllowed(String(uri), allowedRedirectHosts))) {
       throw new InvalidRequestError("Client redirect_uri is not allowed for this Synrex server");
     }
+
+    // Gemini's Connected Apps flow can register the same app more than once
+    // during one account-linking attempt. Keep one stable OAuth identity for
+    // that exact Google app so its authorize and token requests cannot bind
+    // the same code to different DCR client IDs. Other MCP clients retain the
+    // normal RFC 7591 one-registration/one-client behavior.
+    if (googleConnectedAppRegistrationId(client)) {
+      const registerGoogleClient = this.database.sqlite.transaction(() => {
+        const fingerprint = clientRegistrationFingerprint(client);
+        const rows = this.database.sqlite
+          .prepare("select client_json from oauth_clients order by issued_at desc")
+          .all() as { client_json: string }[];
+        for (const row of rows) {
+          const existing = JSON.parse(row.client_json) as OAuthClientInformationFull;
+          if (!googleConnectedAppRegistrationId(existing)) continue;
+          if (clientRegistrationFingerprint(existing) === fingerprint) return existing;
+        }
+        return this.insertRegisteredClient(client);
+      });
+      return registerGoogleClient.immediate();
+    }
+
+    return this.insertRegisteredClient(client);
+  }
+
+  private insertRegisteredClient(
+    client: Omit<OAuthClientInformationFull, "client_id" | "client_id_issued_at">,
+  ): OAuthClientInformationFull {
 
     const now = Math.floor(Date.now() / 1000);
     const registered: OAuthClientInformationFull = {
