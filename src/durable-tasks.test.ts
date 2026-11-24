@@ -149,12 +149,13 @@ test("nonzero command is a completed task with an error tool result", async () =
 
 test("task ownership is enforced", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "devspace-durable-owner-"));
+  let runner: Promise<number> | undefined;
   try {
     const manager = new DurableTaskManager({
       runRoot: root,
       runnerPath: "test-runner",
       launchTask: async ({ requestPath }) => {
-        void runDurableTask(requestPath);
+        runner = runDurableTask(requestPath);
       },
     });
     const snapshot = await manager.start({
@@ -168,12 +169,11 @@ test("task ownership is enforced", async () => {
       manager.get(path.join(process.cwd(), "different-root"), snapshot.taskId),
       /does not belong to workspace/,
     );
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      const task = await manager.get(process.cwd(), snapshot.taskId);
-      if (task.status !== "working") break;
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
+    assert.ok(runner);
+    await runner;
+    assert.equal((await manager.get(process.cwd(), snapshot.taskId)).status, "completed");
   } finally {
+    await runner?.catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });

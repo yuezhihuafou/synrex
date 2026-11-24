@@ -11,6 +11,7 @@ import { createMcpServer } from "../src/server.js";
 import { createReviewCheckpointManager } from "../src/review-checkpoints.js";
 import { ProcessSessionManager } from "../src/process-sessions.js";
 import { SerenaSemanticManager } from "../src/serena-semantic.js";
+import { McpMountManager } from "../src/mcp-mount-manager.js";
 import { SqliteWorkspaceStore } from "../src/workspace-store.js";
 import { WorkspaceRegistry } from "../src/workspaces.js";
 import { expectedToolNames, toolSchemaFingerprint } from "../src/tool-surface-manifest.js";
@@ -412,6 +413,7 @@ async function compiledToolSurface(): Promise<unknown[]> {
   };
   const store = new SqliteWorkspaceStore(stateDir);
   const semantic = new SerenaSemanticManager({ available: false });
+  const mcpMountManager = new McpMountManager(probeConfig.mcp.servers);
   const processSessions = new ProcessSessionManager({ runRoot: join(root, "runs") });
   const server = createMcpServer(
     probeConfig,
@@ -423,6 +425,7 @@ async function compiledToolSurface(): Promise<unknown[]> {
     undefined,
     undefined,
     semantic,
+    mcpMountManager,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-compiled-schema-probe", version: "1" });
@@ -435,6 +438,7 @@ async function compiledToolSurface(): Promise<unknown[]> {
     await server.close().catch(() => undefined);
     processSessions.shutdown();
     await semantic.close();
+    await mcpMountManager.close();
     store.close();
     await rm(root, { recursive: true, force: true });
   }
