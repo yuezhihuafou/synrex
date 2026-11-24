@@ -15,6 +15,7 @@ type SectionOverrides = {
   subagents?: DevspaceConfig["subagents"];
   logging?: Partial<DevspaceConfig["logging"]>;
   oauth?: Partial<DevspaceConfig["oauth"]>;
+  mcp?: Partial<DevspaceConfig["mcp"]>;
 };
 
 export function writeTestDevspaceConfig(
@@ -35,6 +36,7 @@ export function writeTestDevspaceConfig(
     subagents: overrides.subagents ?? defaults.subagents,
     logging: { ...defaults.logging, ...overrides.logging },
     oauth: { ...defaults.oauth, ...overrides.oauth },
+    mcp: { ...defaults.mcp, ...overrides.mcp },
   }, env);
   return {
     ...env,

@@ -20,6 +20,7 @@ import { DiagnosticTrace } from "./diagnostic-trace.js";
 import { LearningStore } from "./learning-store.js";
 import { runDurableTask } from "./durable-task-runner.js";
 import { SerenaSemanticManager } from "./serena-semantic.js";
+import { McpMountManager } from "./mcp-mount-manager.js";
 import { createMcpServer, createServer } from "./server.js";
 import { SqliteWorkspaceStore } from "./workspace-store.js";
 import { WorkspaceRegistry } from "./workspaces.js";
@@ -685,8 +686,9 @@ test("codex tool surface stays compact without dropping capabilities", async (t)
   );
   // Explicit workflow IDs, observed goal evidence and the continuity UI add
   // bounded optional fields and the explicit host-management entrypoint;
-  // keep the entire surface below 23 KiB.
-  assert.ok(totalBytes <= 23_000, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
+  // Keep the surface compact while allowing one bounded external-MCP proxy
+  // entry point without flattening every remote tool into the host schema.
+  assert.ok(totalBytes <= 23_500, `Codex+Serena+workflow tool schema grew to ${totalBytes} bytes`);
   const opened = structuredContent(await callOpen(context.client, context.project));
   const semanticResponse = await context.client.callTool({
     name: "semantic_code",
@@ -1825,6 +1827,7 @@ async function fixture(
         },
       })
     : undefined;
+  const mcpMountManager = new McpMountManager(config.mcp.servers);
   const server = createMcpServer(
     config,
     workspaces,
@@ -1835,6 +1838,7 @@ async function fixture(
     undefined,
     durableTasks,
     options.semantic,
+    mcpMountManager,
   );
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   const client = new Client({ name: "devspace-test-client", version: "1.0.0" });
@@ -1849,6 +1853,7 @@ async function fixture(
     closed = true;
     await client.close();
     await server.close();
+    await mcpMountManager.close();
     await Promise.allSettled([...durableRunners]);
     store.close();
   };

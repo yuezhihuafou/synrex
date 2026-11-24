@@ -34,15 +34,17 @@
   },
   "annotations": [
     {
-      "target": "src/db",
-      "summary": "Persistence primitives and schema migrations; lower-level code must not depend on host/server presentation layers.",
+      "target": "src/architecture-model.ts",
+      "summary": "Observed project structure and deterministic architecture-conformance engine.",
       "contracts": [
         {
           "kind": "note",
-          "text": "Keep persistence independent from MCP and tool-surface orchestration."
+          "text": "Observed facts remain separate from the versioned intended architecture."
         }
       ],
-      "tags": ["core", "persistence"]
+      "tags": [
+        "governance"
+      ]
     },
     {
       "target": "src/compact-runtime",
@@ -53,29 +55,68 @@
           "text": "Compact runtime is infrastructure and must remain usable without importing the MCP server layer."
         }
       ],
-      "tags": ["core", "runtime"]
+      "tags": [
+        "core",
+        "runtime"
+      ]
     },
     {
-      "target": "src/tool-surfaces",
-      "summary": "Host-facing adapters that translate stable DevSpace capabilities into model-facing tools.",
+      "target": "src/config-schema.ts",
+      "summary": "Strict versioned schema for owner-controlled Synrex runtime configuration, including external MCP server definitions.",
       "contracts": [
         {
           "kind": "note",
-          "text": "Keep host/model presentation decisions at this edge rather than leaking them into domain state."
+          "text": "External MCP command, arguments, environment and credentials are owner configuration only; never accept server definitions from model tool arguments or echo secrets in diagnostics."
         }
       ],
-      "tags": ["adapter"]
+      "tags": [
+        "config",
+        "security",
+        "mcp"
+      ]
+    },
+    {
+      "target": "src/db",
+      "summary": "Persistence primitives and schema migrations; lower-level code must not depend on host/server presentation layers.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "Keep persistence independent from MCP and tool-surface orchestration."
+        }
+      ],
+      "tags": [
+        "core",
+        "persistence"
+      ]
     },
     {
       "target": "src/server.ts",
-      "summary": "Composition root for MCP resources, tools, HTTP transport, and service lifecycle.",
+      "summary": "Composition root for MCP ingress, tool registration, local MCP mount manager lifecycle, and multi-node routing.",
       "contracts": [
         {
           "kind": "note",
-          "text": "Server composes lower-level capabilities; lower-level modules should not depend back on server.ts."
+          "text": "Compose and own the local MCP mount manager here; register the same workspace-scoped MCP tools in the host-facing surface and peer ToolInvoker so existing routing remains authoritative."
         }
       ],
-      "tags": ["composition-root"]
+      "tags": [
+        "composition-root",
+        "mcp",
+        "routing"
+      ]
+    },
+    {
+      "target": "src/tool-surfaces",
+      "summary": "Host-facing adapters that expose stable execution capabilities as MCP tools.",
+      "contracts": [
+        {
+          "kind": "note",
+          "text": "MCP mount tools discover and invoke owner-configured external servers using workspace identity; they do not own transport processes or implement their own cross-node routing."
+        }
+      ],
+      "tags": [
+        "adapter",
+        "mcp"
+      ]
     },
     {
       "target": "src/workspaces.ts",
@@ -86,18 +127,10 @@
           "text": "Workspace state is a domain boundary and must not depend on the MCP server composition root."
         }
       ],
-      "tags": ["core", "workspace"]
-    },
-    {
-      "target": "src/architecture-model.ts",
-      "summary": "Observed project structure and deterministic architecture-conformance engine.",
-      "contracts": [
-        {
-          "kind": "note",
-          "text": "Observed facts remain separate from the versioned intended architecture."
-        }
-      ],
-      "tags": ["governance"]
+      "tags": [
+        "core",
+        "workspace"
+      ]
     }
   ]
 }

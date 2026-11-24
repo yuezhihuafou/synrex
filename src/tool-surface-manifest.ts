@@ -38,7 +38,7 @@ const TOOL_NAMES: Record<ToolMode, readonly string[]> = {
 };
 
 export function expectedToolNames(mode: ToolMode): string[] {
-  return [...TOOL_NAMES[mode]].sort();
+  return [...TOOL_NAMES[mode], "mcp_mount"].sort();
 }
 
 export function toolSchemaFingerprint(tools: unknown[]): string {

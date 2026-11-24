@@ -352,3 +352,73 @@ test("migrated coordinator preserves global workspace/task IDs while executing l
   store.bindWorkspace({ workspaceId: "ws_other", nodeId: local.id, localWorkspaceId: "ws_other_local" });
   await assert.rejects(async () => handlers.get("task_get")!({ workspaceId: "ws_other", taskId: globalTaskId }, {}), /does not belong/);
 });
+
+test("MCP mount proxy calls are routed to the node that owns the workspace", async (t) => {
+  const stateDir = await mkdtemp(join(tmpdir(), "synrex-mcp-mount-route-"));
+  const store = new SqliteControlPlaneStore(stateDir);
+  t.after(async () => { store.close(); await rm(stateDir, { recursive: true, force: true }); });
+  const local = store.ensureLocalNode({
+    alias: "swy1", platform: { os: "linux", arch: "x64" },
+    capabilities: { toolMode: "codex", features: [], labels: {}, workspaceRoots: ["/local"] },
+  });
+  const remote = store.registerRemoteNode({
+    id: "node_gateway", alias: "gateway", platform: { os: "linux", arch: "x64" },
+    capabilities: {
+      toolMode: "codex", features: ["mcp.mount"], labels: {}, workspaceRoots: ["/gateway"],
+      toolContracts: { open_workspace: 1, mcp_mount: 1 },
+    },
+  });
+  const calls: Array<{ nodeId: string; name: string; args: Record<string, unknown> }> = [];
+  const router = new MultiNodeRouter(store, { async call(nodeId, call) {
+    calls.push({ nodeId, name: call.name, args: call.arguments });
+    if (call.name === "open_workspace") {
+      return { structuredContent: { workspaceId: "ws_gateway_local", root: "/gateway/project" } };
+    }
+    return {
+      content: [{ type: "text", text: `remote:${call.name}` }],
+      structuredContent: {
+        server: typeof call.arguments.request === "string"
+          ? (JSON.parse(call.arguments.request) as Record<string, unknown>).server
+          : undefined,
+        tool: typeof call.arguments.request === "string"
+          ? (JSON.parse(call.arguments.request) as Record<string, unknown>).tool
+          : undefined,
+        workspaceId: call.arguments.workspaceId,
+      },
+    };
+  } }, local.id);
+  const handlers = new Map<string, (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown>();
+  const target: McpRegistrationTarget = {
+    registerTool: ((name: string, _definition: unknown, handler: (input: Record<string, unknown>, extra: Record<string, unknown>) => unknown) => {
+      handlers.set(name, handler);
+      return {};
+    }) as McpRegistrationTarget["registerTool"],
+    registerResource: (() => ({})) as unknown as McpRegistrationTarget["registerResource"],
+  };
+  const routed = withMultiNodeRouting(target, { router, store, localNodeId: local.id });
+  (routed.registerTool as unknown as (name: string, definition: unknown, handler: (input: Record<string, unknown>) => unknown) => unknown)(
+    "open_workspace", {}, async () => ({ structuredContent: { workspaceId: "ws_local" } }),
+  );
+  for (const name of ["mcp_mount"]) {
+    (routed.registerTool as unknown as (name: string, definition: unknown, handler: (input: Record<string, unknown>) => unknown) => unknown)(
+      name, {}, async () => ({ structuredContent: { local: true } }),
+    );
+  }
+
+  const opened = await handlers.get("open_workspace")!({ path: "/gateway/project", node: "gateway" }, {});
+  const workspaceId = (opened as { structuredContent: { workspaceId: string } }).structuredContent.workspaceId;
+  const args = { workspaceId, request: JSON.stringify({ server: "agent-desktop", tool: "desktop_snapshot", arguments: { app: "Files" } }) };
+  const result = await handlers.get("mcp_mount")!(args, {}) as {
+    structuredContent: { workspaceId: string; server: string; tool: string };
+  };
+
+  assert.equal(result.structuredContent.workspaceId, workspaceId);
+  assert.equal(result.structuredContent.server, "agent-desktop");
+  assert.equal(result.structuredContent.tool, "desktop_snapshot");
+  assert.deepEqual(calls.map((call) => [call.nodeId, call.name]), [
+    [remote.id, "open_workspace"],
+    [remote.id, "mcp_mount"],
+  ]);
+  assert.equal(calls[1]?.args.workspaceId, "ws_gateway_local");
+  assert.equal(calls[1]?.args.request, args.request);
+});

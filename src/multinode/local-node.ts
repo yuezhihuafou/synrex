@@ -10,6 +10,11 @@ import type { NodeRegistration } from "./protocol.js";
 
 const RUNTIME_FINGERPRINT_FILES = [
   "server",
+  "config",
+  "config-schema",
+  "tool-surface-manifest",
+  "mcp-mount-manager",
+  "mcp-mount-tools",
   "durable-task-runner",
   "durable-tasks",
   "tool-surfaces/codex",
@@ -48,6 +53,7 @@ export function localNodeRegistration(
   if (options.durableTasksAvailable) features.push("task.durable");
   if (options.semanticAvailable) features.push("semantic.lsp");
   if (config.subagents.enabled) features.push("agent.subagent");
+  if (config.mcp.servers.some((server) => server.enabled)) features.push("mcp.mount");
 
   return {
     alias: config.node.alias ?? undefined,

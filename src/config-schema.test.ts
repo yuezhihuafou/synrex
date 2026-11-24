@@ -38,6 +38,51 @@ for (const url of [
   }).success, false, url);
 }
 
+const defaultMcpConfig = devspaceConfigSchema.parse({ configVersion: 1 }).mcp;
+assert.deepEqual(defaultMcpConfig.servers, [], "MCP mounts are opt-in and default to an empty list");
+
+const configuredMcp = devspaceConfigSchema.parse({
+  configVersion: 1,
+  mcp: {
+    servers: [
+      { name: "agent-desktop", transport: "stdio", command: "agent-desktop", args: ["mcp"] },
+      { name: "private-remote", transport: "streamable-http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer test-secret" } },
+    ],
+  },
+});
+assert.equal(configuredMcp.mcp.servers[0]?.enabled, true);
+assert.equal(configuredMcp.mcp.servers[0]?.timeoutMs, 30_000);
+assert.equal(configuredMcp.mcp.servers[1]?.transport, "streamable-http");
+assert.doesNotThrow(() => devspaceConfigSchema.parse({
+  configVersion: 1,
+  mcp: { servers: [{ name: "local-http", transport: "streamable-http", url: "http://127.0.0.1:8765/mcp" }] },
+}), "HTTP is permitted for loopback MCP servers");
+
+for (const url of [
+  "http://mcp.example.com/mcp",
+  "http://192.168.1.20:8080/mcp",
+  "https://user:password@mcp.example.com/mcp",
+]) {
+  assert.equal(devspaceConfigSchema.safeParse({
+    configVersion: 1,
+    mcp: { servers: [{ name: "remote", transport: "streamable-http", url }] },
+  }).success, false, `unsafe MCP URL must be rejected: ${url}`);
+}
+
+assert.equal(devspaceConfigSchema.safeParse({
+  configVersion: 1,
+  mcp: { servers: [
+    { name: "duplicate", transport: "stdio", command: "one" },
+    { name: "duplicate", transport: "stdio", command: "two" },
+  ] },
+}).success, false, "duplicate MCP server names must be rejected");
+assert.equal(devspaceConfigSchema.safeParse({
+  configVersion: 1,
+  mcp: { servers: Array.from({ length: 17 }, (_, index) => ({
+    name: `server-${index}`, transport: "stdio", command: "fixture",
+  })) },
+}).success, false, "MCP server count must be bounded");
+
 const generatedSchema = `${JSON.stringify(devspaceConfigJsonSchema(), null, 2)}\n`;
 const committedSchema = readFileSync(
   new URL("../schema/v1/devspace.schema.json", import.meta.url),

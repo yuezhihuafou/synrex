@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import type { ClusterRole } from "./multinode/topology.js";
-import type { ToolMode } from "./config-schema.js";
+import type { McpConfig, ToolMode } from "./config-schema.js";
 import { expandHomePath } from "./roots.js";
 import type { LoggingConfig } from "./logger.js";
 import type { OAuthConfig } from "./oauth-provider.js";
@@ -43,6 +43,7 @@ export interface ServerConfig {
     nodeToken?: string;
   };
   toolMode: ToolMode;
+  mcp: McpConfig;
   taskContinuity?: { enabled: boolean };
   uiEnabled: boolean;
   stateDir: string;
@@ -103,6 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       nodeToken: env.DEVSPACE_NODE_TOKEN ?? files.auth.nodeToken,
     },
     toolMode: stored.tools.mode,
+    mcp: stored.mcp,
     taskContinuity: stored.taskContinuity,
     uiEnabled: stored.ui.enabled,
     stateDir: normalizePath(stored.storage.stateDir),

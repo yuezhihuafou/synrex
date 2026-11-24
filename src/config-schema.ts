@@ -131,6 +131,59 @@ const oauthConfigSchema = z.object({
   ]),
 }).strict().prefault({});
 
+const mcpServerNameSchema = z.string().trim().regex(
+  /^[a-z][a-z0-9_-]{0,31}$/,
+  "MCP server names must start with a lowercase letter and contain only lowercase letters, digits, '_' or '-'.",
+);
+
+const mcpServerBaseSchema = z.object({
+  name: mcpServerNameSchema,
+  enabled: z.boolean().default(true),
+  timeoutMs: z.number().int().min(500).max(120_000).default(30_000),
+});
+
+const mcpStdioServerSchema = mcpServerBaseSchema.extend({
+  transport: z.literal("stdio"),
+  command: z.string().trim().min(1).max(1_024),
+  args: z.array(z.string().max(4_096)).max(64).default([]),
+  cwd: z.string().trim().min(1).max(4_096).optional(),
+  env: z.record(z.string(), z.string().max(16_384)).default({}),
+}).strict();
+
+const mcpStreamableHttpServerSchema = mcpServerBaseSchema.extend({
+  transport: z.literal("streamable-http"),
+  url: z.string().trim().url().refine((value) => {
+    const url = URL.parse(value);
+    return url !== null
+      && !url.username
+      && !url.password
+      && (url.protocol === "https:"
+        || (url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)));
+  }, "MCP server URLs must use HTTPS or HTTP on loopback and must not include URL credentials."),
+  headers: z.record(z.string(), z.string().max(16_384)).default({}),
+}).strict();
+
+const mcpServerSchema = z.discriminatedUnion("transport", [
+  mcpStdioServerSchema,
+  mcpStreamableHttpServerSchema,
+]);
+
+const mcpConfigSchema = z.object({
+  servers: z.array(mcpServerSchema).max(16).default([]),
+}).strict().superRefine((value, context) => {
+  const names = new Set<string>();
+  for (const [index, server] of value.servers.entries()) {
+    if (names.has(server.name)) {
+      context.addIssue({
+        code: "custom",
+        path: ["servers", index, "name"],
+        message: `Duplicate MCP server name: ${server.name}.`,
+      });
+    }
+    names.add(server.name);
+  }
+}).prefault({});
+
 export const devspaceConfigSchema = z.object({
   $schema: z.string().url().default(DEVSPACE_CONFIG_SCHEMA_URL),
   configVersion: z.literal(DEVSPACE_CONFIG_VERSION),
@@ -151,11 +204,14 @@ export const devspaceConfigSchema = z.object({
   }),
   logging: loggingConfigSchema,
   oauth: oauthConfigSchema,
+  mcp: mcpConfigSchema,
 }).strict();
 
 export type DevspaceConfig = z.output<typeof devspaceConfigSchema>;
 export type DevspaceConfigInput = z.input<typeof devspaceConfigSchema>;
 export type ToolMode = DevspaceConfig["tools"]["mode"];
+export type McpConfig = DevspaceConfig["mcp"];
+export type McpServerConfig = McpConfig["servers"][number];
 
 export function defaultDevspaceConfig(): DevspaceConfig {
   return devspaceConfigSchema.parse({ configVersion: DEVSPACE_CONFIG_VERSION });
